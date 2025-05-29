@@ -32,6 +32,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _enableSystemCapture = true;
     private string _currentSpeakerName = string.Empty;
     private string _newSpeakerName = string.Empty;
+    private float _microphoneSensitivity = 1.0f;
+    private AudioDevice? _selectedSystemAudioDevice;
 
     public MainViewModel(IAudioService audioService, ISpeakerService speakerService, ILogger<MainViewModel> logger)
     {
@@ -46,18 +48,49 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         ClearTranscriptCommand = new RelayCommand(ClearTranscript, () => !string.IsNullOrEmpty(TranscriptionText));
         RenameSpeakerCommand = new RelayCommand(async () => await RenameSpeakerAsync(), () => !string.IsNullOrEmpty(CurrentSpeakerName) && !string.IsNullOrEmpty(NewSpeakerName));
         RefreshDevicesCommand = new RelayCommand(RefreshAudioDevices);
+        TestAudioCommand = new RelayCommand(async () => await TestAudioAsync(), () => SelectedMicrophone != null && !IsRecording);
 
         // Initialize collections
         AvailableMicrophones = new ObservableCollection<AudioDevice>();
         TranscriptionSegments = new ObservableCollection<TranscriptionSegment>();
+        AvailableSystemAudioDevices = new ObservableCollection<AudioDevice>();
 
         // Subscribe to audio service events
         _audioService.MicrophoneLevelChanged += OnMicrophoneLevelChanged;
         _audioService.SystemLevelChanged += OnSystemLevelChanged;
         _audioService.TranscriptionReceived += OnTranscriptionReceived;
 
-        // Initialize
-        RefreshAudioDevices();
+        // Initialize devices and start monitoring
+        InitializeAsync();
+    }
+
+    private async void InitializeAsync()
+    {
+        try
+        {
+            _logger.LogInformation("Initializing MainViewModel...");
+            
+            // Refresh audio devices first
+            RefreshAudioDevices();
+            
+            // Start monitoring if we have a microphone selected
+            if (SelectedMicrophone != null)
+            {
+                _logger.LogInformation("Starting audio monitoring with default microphone: {MicName}", SelectedMicrophone.Name);
+                await _audioService.StartMonitoringAsync(SelectedMicrophone.Index, EnableSystemCapture);
+                StatusMessage = "Audio monitoring started - ready to record";
+            }
+            else
+            {
+                StatusMessage = "No microphone selected - please choose a device";
+                _logger.LogWarning("No microphone available for monitoring");
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Error during initialization: {ex.Message}";
+            _logger.LogError(ex, "Error during MainViewModel initialization");
+        }
     }
 
     #region Properties
@@ -174,9 +207,32 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>
+    /// Microphone sensitivity multiplier (0.1 to 2.0).
+    /// </summary>
+    public float MicrophoneSensitivity
+    {
+        get => _microphoneSensitivity;
+        set => SetProperty(ref _microphoneSensitivity, Math.Max(0.1f, Math.Min(2.0f, value)));
+    }
+
+    /// <summary>
     /// Collection of available microphone devices.
     /// </summary>
     public ObservableCollection<AudioDevice> AvailableMicrophones { get; }
+
+    /// <summary>
+    /// Collection of available system audio devices.
+    /// </summary>
+    public ObservableCollection<AudioDevice> AvailableSystemAudioDevices { get; }
+
+    /// <summary>
+    /// Currently selected system audio device.
+    /// </summary>
+    public AudioDevice? SelectedSystemAudioDevice
+    {
+        get => _selectedSystemAudioDevice;
+        set => SetProperty(ref _selectedSystemAudioDevice, value);
+    }
 
     /// <summary>
     /// Collection of transcription segments for detailed view.
@@ -193,6 +249,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public ICommand ClearTranscriptCommand { get; }
     public ICommand RenameSpeakerCommand { get; }
     public ICommand RefreshDevicesCommand { get; }
+    public ICommand TestAudioCommand { get; }
 
     #endregion
 
@@ -209,12 +266,21 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             StatusMessage = "Starting audio capture...";
-            await _audioService.StartCaptureAsync(SelectedMicrophone.Index, EnableSystemCapture);
+            
+            // Stop monitoring first
+            await _audioService.StopMonitoringAsync();
+            
+            // Get system audio device index
+            int systemAudioIndex = SelectedSystemAudioDevice?.Index ?? -1;
+            
+            // Start recording with sensitivity
+            await _audioService.StartCaptureAsync(SelectedMicrophone.Index, EnableSystemCapture, systemAudioIndex, MicrophoneSensitivity);
             
             IsRecording = true;
             StatusMessage = "Recording and transcribing...";
             
-            _logger.LogInformation("Recording started successfully");
+            _logger.LogInformation("Recording started successfully with mic: {MicName}, system audio: {SystemName}, sensitivity: {Sensitivity}", 
+                SelectedMicrophone.Name, SelectedSystemAudioDevice?.Name ?? "Default", MicrophoneSensitivity);
         }
         catch (Exception ex)
         {
@@ -316,13 +382,15 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         try
         {
             AvailableMicrophones.Clear();
+            AvailableSystemAudioDevices.Clear();
             
             using var enumerator = new MMDeviceEnumerator();
-            var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
             
-            for (int i = 0; i < devices.Count; i++)
+            // Enumerate capture devices (microphones)
+            var captureDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+            for (int i = 0; i < captureDevices.Count; i++)
             {
-                var device = devices[i];
+                var device = captureDevices[i];
                 AvailableMicrophones.Add(new AudioDevice
                 {
                     Index = i,
@@ -332,9 +400,27 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
                 });
             }
 
-            // Select default microphone if available
+            // Enumerate render devices (system audio)
+            var renderDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+            for (int i = 0; i < renderDevices.Count; i++)
+            {
+                var device = renderDevices[i];
+                AvailableSystemAudioDevices.Add(new AudioDevice
+                {
+                    Index = i,
+                    Name = device.FriendlyName,
+                    DeviceId = device.ID,
+                    IsDefault = device.DataFlow == DataFlow.Render && device.State == DeviceState.Active
+                });
+            }
+
+            // Select default devices if available
             SelectedMicrophone = AvailableMicrophones.FirstOrDefault(d => d.IsDefault) ?? AvailableMicrophones.FirstOrDefault();
-            StatusMessage = $"Found {AvailableMicrophones.Count} microphone(s)";
+            SelectedSystemAudioDevice = AvailableSystemAudioDevices.FirstOrDefault(d => d.IsDefault) ?? AvailableSystemAudioDevices.FirstOrDefault();
+            
+            StatusMessage = $"Found {AvailableMicrophones.Count} microphone(s) and {AvailableSystemAudioDevices.Count} system audio device(s)";
+            _logger.LogInformation("Refreshed audio devices: {MicCount} microphones, {SpeakerCount} speakers", 
+                AvailableMicrophones.Count, AvailableSystemAudioDevices.Count);
         }
         catch (Exception ex)
         {
@@ -392,6 +478,34 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         
         TranscriptionText = sb.ToString();
+    }
+
+    private async Task TestAudioAsync()
+    {
+        try
+        {
+            if (SelectedMicrophone == null)
+            {
+                StatusMessage = "Please select a microphone device first";
+                return;
+            }
+
+            StatusMessage = "Testing audio... Speak into your microphone";
+            _logger.LogInformation("Starting audio test for device: {DeviceName}", SelectedMicrophone.Name);
+
+            // Stop current monitoring if active
+            await _audioService.StopMonitoringAsync();
+            
+            // Start monitoring with selected device
+            await _audioService.StartMonitoringAsync(SelectedMicrophone.Index, EnableSystemCapture, -1, MicrophoneSensitivity);
+            
+            StatusMessage = "Audio test active - check volume meters";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Audio test failed: {ex.Message}";
+            _logger.LogError(ex, "Error during audio test");
+        }
     }
 
     #endregion

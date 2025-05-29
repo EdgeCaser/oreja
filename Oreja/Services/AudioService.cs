@@ -246,7 +246,7 @@ public class AudioService : IAudioService, IDisposable
             DiscardOnBufferOverflow = true
         };
 
-        _microphoneCapture.DataAvailable += async (s, e) =>
+        _microphoneCapture.DataAvailable += (s, e) =>
         {
             _microphoneBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
             
@@ -254,8 +254,18 @@ public class AudioService : IAudioService, IDisposable
             var level = CalculateAudioLevel(e.Buffer, e.BytesRecorded) * sensitivity;
             MicrophoneLevelChanged?.Invoke(this, new AudioLevelEventArgs(level));
             
-            // Process audio buffer for transcription
-            await ProcessAudioBufferAsync(e.Buffer, e.BytesRecorded, "microphone");
+            // Process audio buffer for transcription asynchronously
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessAudioBufferAsync(e.Buffer, e.BytesRecorded, "microphone");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error processing microphone audio buffer");
+                }
+            });
         };
     }
 
@@ -286,7 +296,7 @@ public class AudioService : IAudioService, IDisposable
             DiscardOnBufferOverflow = true
         };
 
-        _systemCapture.DataAvailable += async (s, e) =>
+        _systemCapture.DataAvailable += (s, e) =>
         {
             _systemBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
             
@@ -294,8 +304,18 @@ public class AudioService : IAudioService, IDisposable
             var level = CalculateAudioLevel(e.Buffer, e.BytesRecorded);
             SystemLevelChanged?.Invoke(this, new AudioLevelEventArgs(level));
             
-            // Process audio buffer for transcription
-            await ProcessAudioBufferAsync(e.Buffer, e.BytesRecorded, "system");
+            // Process audio buffer for transcription asynchronously
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessAudioBufferAsync(e.Buffer, e.BytesRecorded, "system");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error processing system audio buffer");
+                }
+            });
         };
     }
 

@@ -8,6 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Oreja</AssemblyName>
     <RootNamespace>Oreja</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <!-- <ApplicationIcon>Resources\oreja-icon.ico</ApplicationIcon> -->
     <StartupObject>Oreja.App</StartupObject>
     <Version>1.0.0</Version>
@@ -93,13 +95,6 @@
     <None Include="appsettings.Development.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <Page Include="Oreja\Views\MainWindow.xaml">
-      <Generator>MSBuild:Compile</Generator>
-      <SubType>Designer</SubType>
-    </Page>
   </ItemGroup>
 
   <ItemGroup>
