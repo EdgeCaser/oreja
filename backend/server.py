@@ -41,17 +41,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global model instances (loaded once at startup)
-whisper_pipeline = None
-diarization_pipeline = None
-embedding_model = None
-device = None
-
 # Configuration constants
 SAMPLE_RATE = 16000
 MAX_AUDIO_LENGTH = 30  # seconds
 MIN_AUDIO_LENGTH = 0.1  # seconds
-WHISPER_MODEL = "openai/whisper-large-v3"
+WHISPER_MODEL = "openai/whisper-large-v3"  # Back to large model now that we have GPU
 DIARIZATION_MODEL = "pyannote/speaker-diarization-3.0"
 EMBEDDING_MODEL = "pyannote/embedding"
 
@@ -70,73 +64,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global variables
+device = None
+whisper_model = None
+diarization_pipeline = None
+embedding_model = None
 
-async def load_models():
-    """Load Hugging Face models at startup for better performance."""
-    global whisper_pipeline, diarization_pipeline, embedding_model, device
+
+def initialize_models():
+    """Initialize all models and set up the device."""
+    global device, whisper_model, diarization_pipeline, embedding_model
     
+    # Set up device (GPU if available, otherwise CPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logger.info(f"Using device: cuda ({torch.cuda.get_device_name(0)})")
+        logger.info(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    else:
+        device = torch.device("cpu")
+        logger.info("Using device: cpu")
+    
+    logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
+    whisper_model = pipeline(
+        "automatic-speech-recognition",
+        model=WHISPER_MODEL,
+        device=device,
+        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+    )
+    logger.info("✓ Whisper model loaded successfully")
+    
+    # Try to load pyannote.audio for speaker diarization
     try:
-        # Get Hugging Face token from environment
+        logger.info(f"Loading diarization model: {DIARIZATION_MODEL}")
         hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
-        if not hf_token:
-            logger.warning("HUGGINGFACE_HUB_TOKEN not found in environment variables")
-            logger.warning("Some models may not be available without authentication")
-        
-        # Determine device (CUDA if available, else CPU)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {device}")
-        
-        # Load Whisper for transcription (this doesn't require authentication)
-        logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
-        whisper_pipeline = pipeline(
-            "automatic-speech-recognition",
-            model=WHISPER_MODEL,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device=device,
-            return_timestamps=True,
-            chunk_length_s=30,
+        diarization_pipeline = DiarizationPipeline.from_pretrained(
+            DIARIZATION_MODEL,
+            use_auth_token=hf_token if hf_token else True
         )
-        logger.info("✓ Whisper model loaded successfully")
-        
-        # Try to load pyannote.audio for speaker diarization
-        try:
-            logger.info(f"Loading diarization model: {DIARIZATION_MODEL}")
-            diarization_pipeline = DiarizationPipeline.from_pretrained(
-                DIARIZATION_MODEL,
-                use_auth_token=hf_token if hf_token else True
-            )
-            if device == "cuda":
-                diarization_pipeline.to(torch.device("cuda"))
-            logger.info("✓ Diarization model loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load diarization model: {e}")
-            logger.warning("Continuing without speaker diarization - only transcription will be available")
-            diarization_pipeline = None
-        
-        # Try to load embedding model for speaker recognition
-        try:
-            logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
-            embedding_model = PretrainedSpeakerEmbedding(
-                EMBEDDING_MODEL,
-                device=torch.device(device)
-            )
-            logger.info("✓ Embedding model loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load embedding model: {e}")
-            logger.warning("Continuing without speaker embeddings")
-            embedding_model = None
-        
-        logger.info("Model loading completed")
-        
+        if device.type == "cuda":
+            diarization_pipeline.to(device)
+        logger.info("✓ Diarization model loaded successfully")
     except Exception as e:
-        logger.error(f"Failed to load core models: {e}")
-        raise RuntimeError(f"Critical model loading failed: {e}")
+        logger.warning(f"Failed to load diarization model: {e}")
+        logger.warning("Continuing without speaker diarization - only transcription will be available")
+        diarization_pipeline = None
+    
+    # Try to load embedding model for speaker recognition
+    try:
+        logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+        embedding_model = PretrainedSpeakerEmbedding(
+            EMBEDDING_MODEL,
+            device=device
+        )
+        logger.info("✓ Embedding model loaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to load embedding model: {e}")
+        logger.warning("Continuing without speaker embeddings")
+        embedding_model = None
+    
+    logger.info("Model loading completed")
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize models when the server starts."""
-    await load_models()
+    initialize_models()
 
 
 @app.get("/")
@@ -146,7 +138,7 @@ async def root():
         "message": "Oreja Audio Processing API",
         "status": "running",
         "models_loaded": all([
-            whisper_pipeline is not None,
+            whisper_model is not None,
             diarization_pipeline is not None,
             embedding_model is not None
         ])
@@ -160,7 +152,7 @@ async def health_check():
         "status": "healthy",
         "device": device,
         "models": {
-            "whisper": whisper_pipeline is not None,
+            "whisper": whisper_model is not None,
             "diarization": diarization_pipeline is not None,
             "embedding": embedding_model is not None
         },
@@ -327,14 +319,14 @@ def load_audio_from_bytes(audio_data: bytes) -> tuple[torch.Tensor, int]:
 async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
     """Run Whisper transcription on audio waveform."""
     try:
-        if whisper_pipeline is None:
-            raise ValueError("Whisper pipeline not loaded")
+        if whisper_model is None:
+            raise ValueError("Whisper model not loaded")
         
         # Convert to numpy for Whisper
         audio_array = waveform.numpy().flatten()
         
         # Run transcription
-        result = whisper_pipeline(
+        result = whisper_model(
             audio_array,
             return_timestamps=True,
             generate_kwargs={"language": "en", "task": "transcribe"}

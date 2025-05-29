@@ -62,6 +62,21 @@ public partial class App : Application
     private const string BACKEND_URL = "http://127.0.0.1:8000";
     private const int AUDIO_CHUNK_DURATION_MS = 5000; // Send audio every 5 seconds (increased from 3)
     private bool _isProcessingTranscription = false; // Prevent overlapping requests
+    
+    // Speaker renaming and save functionality
+    private Dictionary<string, string> _speakerNames = new Dictionary<string, string>();
+    private Button? _saveTranscriptionButton;
+    private List<TranscriptionSegment> _transcriptionHistory = new List<TranscriptionSegment>();
+
+    // Helper class for transcription segments
+    public class TranscriptionSegment
+    {
+        public string? Speaker { get; set; }
+        public string? Text { get; set; }
+        public double StartTime { get; set; }
+        public string Source { get; set; } = "";
+        public DateTime Timestamp { get; set; } = DateTime.Now;
+    }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -217,8 +232,21 @@ public partial class App : Application
             };
             _stopRecordingButton.Click += StopRecordingButton_Click;
             
+            _saveTranscriptionButton = new Button 
+            { 
+                Content = "💾 Save Transcription",
+                Width = 150,
+                Height = 40,
+                Margin = new Thickness(10, 0, 0, 0),
+                FontSize = 14,
+                Background = Brushes.LightBlue,
+                IsEnabled = false // Initially disabled until we have transcriptions
+            };
+            _saveTranscriptionButton.Click += SaveTranscriptionButton_Click;
+            
             buttonPanel.Children.Add(_startRecordingButton);
             buttonPanel.Children.Add(_stopRecordingButton);
+            buttonPanel.Children.Add(_saveTranscriptionButton);
             
             // Status text
             _statusText = new TextBlock 
@@ -704,6 +732,23 @@ public partial class App : Application
             return;
         }
         
+        // Store in transcription history
+        var segment = new TranscriptionSegment
+        {
+            Speaker = speaker,
+            Text = text,
+            StartTime = startTime,
+            Source = source,
+            Timestamp = DateTime.Now
+        };
+        _transcriptionHistory.Add(segment);
+        
+        // Enable save button once we have transcriptions
+        if (_saveTranscriptionButton != null)
+        {
+            _saveTranscriptionButton.IsEnabled = true;
+        }
+        
         var segmentPanel = new StackPanel 
         { 
             Orientation = Orientation.Horizontal, 
@@ -720,15 +765,21 @@ public partial class App : Application
             Margin = new Thickness(0, 0, 10, 0)
         };
         
-        // Speaker
-        var speakerText = new TextBlock 
+        // Speaker (now clickable for renaming)
+        var displaySpeaker = GetDisplaySpeakerName(speaker);
+        var speakerButton = new Button 
         { 
-            Text = $"{speaker ?? "Unknown"}:",
+            Content = $"{displaySpeaker}:",
             FontWeight = FontWeights.Bold,
             Foreground = GetSpeakerColor(speaker),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
             Width = 100,
-            Margin = new Thickness(0, 0, 10, 0)
+            Margin = new Thickness(0, 0, 10, 0),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            ToolTip = "Click to rename speaker"
         };
+        speakerButton.Click += (s, e) => ShowSpeakerRenameDialog(speaker);
         
         // Source indicator
         var sourceText = new TextBlock 
@@ -750,7 +801,7 @@ public partial class App : Application
         };
         
         segmentPanel.Children.Add(timestampText);
-        segmentPanel.Children.Add(speakerText);
+        segmentPanel.Children.Add(speakerButton);
         segmentPanel.Children.Add(sourceText);
         segmentPanel.Children.Add(textBlock);
         
@@ -762,6 +813,259 @@ public partial class App : Application
         Console.WriteLine("Transcription segment added to UI successfully");
     }
     
+    private string GetDisplaySpeakerName(string? originalSpeaker)
+    {
+        if (string.IsNullOrEmpty(originalSpeaker))
+            return "Unknown";
+            
+        // Check if we have a custom name for this speaker
+        if (_speakerNames.ContainsKey(originalSpeaker))
+            return _speakerNames[originalSpeaker];
+            
+        return originalSpeaker;
+    }
+    
+    private void ShowSpeakerRenameDialog(string? originalSpeaker)
+    {
+        if (string.IsNullOrEmpty(originalSpeaker))
+            return;
+            
+        var currentName = GetDisplaySpeakerName(originalSpeaker);
+        
+        // Create simple input dialog
+        var inputWindow = new Window
+        {
+            Title = "Rename Speaker",
+            Width = 350,
+            Height = 200,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = MainWindow,
+            ResizeMode = ResizeMode.NoResize
+        };
+        
+        var panel = new StackPanel { Margin = new Thickness(20) };
+        
+        var label = new TextBlock 
+        { 
+            Text = $"Enter new name for '{currentName}':",
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        
+        var textBox = new TextBox 
+        { 
+            Text = currentName,
+            Margin = new Thickness(0, 0, 0, 20),
+            Padding = new Thickness(5)
+        };
+        textBox.SelectAll();
+        textBox.Focus();
+        
+        var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        
+        var okButton = new Button 
+        { 
+            Content = "OK",
+            Width = 70,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsDefault = true
+        };
+        
+        var cancelButton = new Button 
+        { 
+            Content = "Cancel",
+            Width = 70,
+            Height = 30,
+            IsCancel = true
+        };
+        
+        okButton.Click += (s, e) =>
+        {
+            var newName = textBox.Text.Trim();
+            if (!string.IsNullOrEmpty(newName))
+            {
+                _speakerNames[originalSpeaker] = newName;
+                RefreshTranscriptionDisplay();
+                inputWindow.DialogResult = true;
+            }
+        };
+        
+        cancelButton.Click += (s, e) => inputWindow.DialogResult = false;
+        
+        // Handle Enter key
+        textBox.KeyDown += (s, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.Enter)
+            {
+                okButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+        };
+        
+        buttonPanel.Children.Add(okButton);
+        buttonPanel.Children.Add(cancelButton);
+        
+        panel.Children.Add(label);
+        panel.Children.Add(textBox);
+        panel.Children.Add(buttonPanel);
+        
+        inputWindow.Content = panel;
+        inputWindow.ShowDialog();
+    }
+    
+    private void RefreshTranscriptionDisplay()
+    {
+        if (_transcriptionPanel == null)
+            return;
+            
+        // Clear current display
+        _transcriptionPanel.Children.Clear();
+        
+        // Redraw all segments with updated speaker names
+        foreach (var segment in _transcriptionHistory)
+        {
+            var segmentPanel = new StackPanel 
+            { 
+                Orientation = Orientation.Horizontal, 
+                Margin = new Thickness(0, 5, 0, 5) 
+            };
+            
+            // Timestamp
+            var timestampText = new TextBlock 
+            { 
+                Text = $"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}]",
+                FontWeight = FontWeights.Bold,
+                Foreground = Brushes.Gray,
+                Width = 60,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            
+            // Speaker (clickable)
+            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+            var speakerButton = new Button 
+            { 
+                Content = $"{displaySpeaker}:",
+                FontWeight = FontWeights.Bold,
+                Foreground = GetSpeakerColor(segment.Speaker),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Width = 100,
+                Margin = new Thickness(0, 0, 10, 0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "Click to rename speaker"
+            };
+            speakerButton.Click += (s, e) => ShowSpeakerRenameDialog(segment.Speaker);
+            
+            // Source indicator
+            var sourceText = new TextBlock 
+            { 
+                Text = $"[{segment.Source}]",
+                FontWeight = FontWeights.Normal,
+                Foreground = segment.Source == "Microphone" ? Brushes.Blue : Brushes.Green,
+                Width = 80,
+                FontSize = 10,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            
+            // Transcribed text
+            var textBlock = new TextBlock 
+            { 
+                Text = segment.Text,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            
+            segmentPanel.Children.Add(timestampText);
+            segmentPanel.Children.Add(speakerButton);
+            segmentPanel.Children.Add(sourceText);
+            segmentPanel.Children.Add(textBlock);
+            
+            _transcriptionPanel.Children.Add(segmentPanel);
+        }
+        
+        // Auto-scroll to bottom
+        _transcriptionScrollViewer?.ScrollToEnd();
+    }
+    
+    private void SaveTranscriptionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transcriptionHistory.Count == 0)
+        {
+            MessageBox.Show("No transcription data to save.", "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        var saveFileDialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*",
+            DefaultExt = "txt",
+            FileName = $"Oreja_Transcription_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt"
+        };
+        
+        if (saveFileDialog.ShowDialog() == true)
+        {
+            try
+            {
+                var content = GenerateTranscriptionReport();
+                File.WriteAllText(saveFileDialog.FileName, content);
+                
+                MessageBox.Show($"Transcription saved successfully to:\n{saveFileDialog.FileName}", 
+                    "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error saving transcription:\n{ex.Message}", 
+                    "Oreja Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+    
+    private string GenerateTranscriptionReport()
+    {
+        var report = new System.Text.StringBuilder();
+        
+        report.AppendLine("=== OREJA TRANSCRIPTION REPORT ===");
+        report.AppendLine($"Generated on: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        report.AppendLine($"Total segments: {_transcriptionHistory.Count}");
+        report.AppendLine();
+        
+        // Group by source
+        var microphoneSegments = _transcriptionHistory.Where(s => s.Source == "Microphone").ToList();
+        var systemAudioSegments = _transcriptionHistory.Where(s => s.Source == "System Audio").ToList();
+        
+        if (microphoneSegments.Any())
+        {
+            report.AppendLine("=== MICROPHONE AUDIO ===");
+            foreach (var segment in microphoneSegments)
+            {
+                var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+                report.AppendLine($"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}] {displaySpeaker}: {segment.Text}");
+            }
+            report.AppendLine();
+        }
+        
+        if (systemAudioSegments.Any())
+        {
+            report.AppendLine("=== SYSTEM AUDIO ===");
+            foreach (var segment in systemAudioSegments)
+            {
+                var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+                report.AppendLine($"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}] {displaySpeaker}: {segment.Text}");
+            }
+            report.AppendLine();
+        }
+        
+        // Combined chronological view
+        report.AppendLine("=== CHRONOLOGICAL TRANSCRIPT ===");
+        var sortedSegments = _transcriptionHistory.OrderBy(s => s.Timestamp).ToList();
+        foreach (var segment in sortedSegments)
+        {
+            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+            report.AppendLine($"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}] [{segment.Source}] {displaySpeaker}: {segment.Text}");
+        }
+        
+        return report.ToString();
+    }
+
     private Brush GetSpeakerColor(string? speaker)
     {
         // Assign colors to speakers for better visualization
