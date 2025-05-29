@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
 MAX_AUDIO_LENGTH = 30  # seconds
 MIN_AUDIO_LENGTH = 0.1  # seconds
-WHISPER_MODEL = "openai/whisper-large-v3"  # Back to large model now that we have GPU
+WHISPER_MODEL = "openai/whisper-large-v3-turbo"  # Latest model from October 2024 - faster with same accuracy as large-v3
 DIARIZATION_MODEL = "pyannote/speaker-diarization-3.0"
 EMBEDDING_MODEL = "pyannote/embedding"
 
@@ -90,6 +90,9 @@ def initialize_models():
         model=WHISPER_MODEL,
         device=device,
         torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        return_timestamps=True,
+        chunk_length_s=30,  # Optimal chunk length for quality
+        stride_length_s=5,  # Overlap for better continuity
     )
     logger.info("✓ Whisper model loaded successfully")
     
@@ -329,7 +332,15 @@ async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[st
         result = whisper_model(
             audio_array,
             return_timestamps=True,
-            generate_kwargs={"language": "en", "task": "transcribe"}
+            generate_kwargs={
+                "language": "en", 
+                "task": "transcribe",
+                "temperature": 0.0,  # Deterministic output for better quality
+                "compression_ratio_threshold": 2.4,  # Higher quality threshold
+                "logprob_threshold": -1.0,  # Better confidence filtering
+                "no_speech_threshold": 0.6,  # Stricter speech detection
+                "condition_on_previous_text": True,  # Better context continuity
+            }
         )
         
         return result
