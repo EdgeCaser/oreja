@@ -24,8 +24,8 @@ public partial class App : Application
         _serviceProvider = services.BuildServiceProvider();
 
         // Create and show main window with injected dependencies
-        var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
-        mainWindow.Show();
+        // var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
+        // mainWindow.Show(); // This is now handled by StartupUri in App.xaml
     }
 
     private void ConfigureServices(IServiceCollection services)
