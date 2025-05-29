@@ -1,0 +1,104 @@
+# Cursor Rules for Oreja Project
+
+## Project Context
+Oreja is a Windows desktop application for real-time conference call transcription using local Hugging Face models (Whisper, pyannote.audio). It uses C#/.NET 8 for the frontend (WPF, NAudio, SQLite) and Python 3.10 for the backend (FastAPI, transcription, diarization). Audio is processed in memory with no cloud interaction.
+
+## Code Style
+- **C#**:
+  - Use C# 12 with .NET 8.
+  - PascalCase for public members/types, camelCase for private fields/variables.
+  - Prefix interfaces with 'I' (e.g., IAudioService).
+  - XML comments for public members.
+  - Async/await for I/O, suffix with 'Async'.
+- **Python**:
+  - Use Python 3.10, follow PEP 8.
+  - snake_case for functions/variables, CamelCase for classes.
+  - Docstrings for functions/classes.
+  - Async for FastAPI routes.
+- **XAML**:
+  - Descriptive control names (e.g., MicComboBox).
+  - Explicit bindings (e.g., {Binding Path=Property}).
+- Use `dotnet format` for C#, `black` and `isort` for Python.
+
+## File Structure
+- /Oreja: C# frontend.
+  - /Models: Data models.
+  - /ViewModels: MVVM view models.
+  - /Views: XAML and code-behind.
+  - /Services: Audio/database services.
+  - /Utilities: Helpers.
+- /backend: Python FastAPI server.
+- /scripts: Model download scripts.
+
+## Completion Preferences
+- **C#**:
+  - Prioritize NAudio (WasapiCapture, WasapiLoopbackCapture, MixingSampleProvider).
+  - Prioritize WPF (XAML, MVVM, DependencyProperty).
+  - Prioritize HttpClient for FastAPI communication.
+  - Prioritize SQLite (Microsoft.Data.Sqlite).
+  - Prioritize SkiaSharp for volume meters.
+  - Suggest async methods for I/O.
+- **Python**:
+  - Prioritize transformers (Whisper pipeline).
+  - Prioritize pyannote.audio (Pipeline, embedding extraction).
+  - Prioritize FastAPI (async routes, UploadFile).
+  - Prioritize torchaudio for audio processing.
+  - Suggest async routes and in-memory processing.
+- **XAML**:
+  - Suggest WPF controls (TextBox, ProgressBar, ScrollViewer).
+  - Emphasize data binding (e.g., {Binding Path=Property}).
+- Warn about disk writes to ensure privacy.
+
+## Error Handling
+- **C#**:
+  - Suggest try-catch for NAudio, HTTP, SQLite.
+  - Recommend Serilog logging.
+- **Python**:
+  - Suggest try-except for model inference, FastAPI routes.
+  - Recommend `logging` module.
+
+## Performance
+- Suggest buffer pools for audio.
+- Optimize Whisper chunking (e.g., chunk_length_s=30).
+- Warn about WPF memory leaks (e.g., event handlers).
+- Suggest GPU usage for Python models if available.
+
+## Testing
+- **C#**: Suggest xUnit tests, Moq for mocking.
+- **Python**: Suggest pytest for backend.
+- Test audio processing, transcription, diarization.
+
+## Context-Aware Suggestions
+- In .cs: Suggest NAudio, WPF, HttpClient, SQLite.
+- In .xaml: Suggest WPF controls, bindings.
+- In .py: Suggest transformers, pyannote.audio, FastAPI.
+- Use repository files (README.md, ARCHITECTURE.md, etc.) for context.
+
+## Example Snippets
+- **C# Audio Capture**:
+  ```csharp
+  using (var capture = new WasapiCapture(deviceIndex))
+  {
+      capture.DataAvailable += async (s, e) => await SendAudioBuffer(e.Buffer, e.BytesRecorded);
+      capture.StartRecording();
+  }
+  ```
+- **Python Transcription**:
+  ```python
+  from fastapi import FastAPI, UploadFile
+  app = FastAPI()
+  @app.post("/transcribe")
+  async def transcribe_audio(audio: UploadFile) -> list:
+      waveform, sr = torchaudio.load(io.BytesIO(await audio.read()))
+      ...
+  ```
+- **WPF Binding**:
+  ```xaml
+  <TextBox Text="{Binding TranscriptionText, Mode=OneWay}"/>
+  ```
+
+## Additional Notes
+- Avoid cloud APIs (e.g., Azure, Google).
+- Warn about missing Hugging Face tokens or model cache.
+- Suggest NuGet/pip packages for dependencies.
+- Encourage comments for complex audio/model logic.

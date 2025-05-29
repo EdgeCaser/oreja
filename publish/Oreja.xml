@@ -1,0 +1,299 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Oreja</name>
+    </assembly>
+    <members>
+        <member name="T:Oreja.App">
+            <summary>
+            Interaction logic for App.xaml
+            </summary>
+            <summary>
+            App
+            </summary>
+        </member>
+        <member name="M:Oreja.App.Main">
+            <summary>
+            Application Entry Point.
+            </summary>
+        </member>
+        <member name="T:Oreja.Controls.VolumeMeter">
+            <summary>
+            Custom volume meter control using SkiaSharp for smooth audio level visualization.
+            </summary>
+        </member>
+        <member name="F:Oreja.Controls.VolumeMeter.LevelProperty">
+            <summary>
+            Audio level dependency property (0.0 to 1.0).
+            </summary>
+        </member>
+        <member name="F:Oreja.Controls.VolumeMeter.ActiveColorProperty">
+            <summary>
+            Color for the active (filled) portion of the meter.
+            </summary>
+        </member>
+        <member name="F:Oreja.Controls.VolumeMeter.InactiveColorProperty">
+            <summary>
+            Color for the inactive (background) portion of the meter.
+            </summary>
+        </member>
+        <member name="F:Oreja.Controls.VolumeMeter.PeakColorProperty">
+            <summary>
+            Color for the peak indicator.
+            </summary>
+        </member>
+        <member name="F:Oreja.Controls.VolumeMeter.ShowSegmentsProperty">
+            <summary>
+            Whether to show segment divisions in the meter.
+            </summary>
+        </member>
+        <member name="P:Oreja.Controls.VolumeMeter.Level">
+            <summary>
+            Gets or sets the current audio level (0.0 to 1.0).
+            </summary>
+        </member>
+        <member name="P:Oreja.Controls.VolumeMeter.ActiveColor">
+            <summary>
+            Gets or sets the color for the active portion of the meter.
+            </summary>
+        </member>
+        <member name="P:Oreja.Controls.VolumeMeter.InactiveColor">
+            <summary>
+            Gets or sets the color for the inactive portion of the meter.
+            </summary>
+        </member>
+        <member name="P:Oreja.Controls.VolumeMeter.PeakColor">
+            <summary>
+            Gets or sets the color for the peak indicator.
+            </summary>
+        </member>
+        <member name="P:Oreja.Controls.VolumeMeter.ShowSegments">
+            <summary>
+            Gets or sets whether to show segment divisions.
+            </summary>
+        </member>
+        <member name="M:Oreja.Controls.VolumeMeter.SetLevelSmooth(System.Single)">
+            <summary>
+            Sets the level with smooth animation support.
+            </summary>
+            <param name="level">Target level (0.0 to 1.0)</param>
+        </member>
+        <member name="M:Oreja.Controls.VolumeMeter.ResetPeak">
+            <summary>
+            Resets the peak indicator.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.TranscriptionResult">
+            <summary>
+            Represents the result of audio transcription and diarization.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.TranscriptionSegment">
+            <summary>
+            Represents a single segment of transcribed audio with speaker information.
+            </summary>
+        </member>
+        <member name="P:Oreja.Models.TranscriptionSegment.Duration">
+            <summary>
+            Duration of the segment in seconds.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.Speaker">
+            <summary>
+            Represents speaker information stored in the local database.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.RenameSpeakerRequest">
+            <summary>
+            Request model for renaming a speaker.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.SpeakerResponse">
+            <summary>
+            Response model for speaker operations.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.AudioDevice">
+            <summary>
+            Model for audio device information.
+            </summary>
+        </member>
+        <member name="T:Oreja.Models.TranscriptionSettings">
+            <summary>
+            Configuration model for transcription settings.
+            </summary>
+        </member>
+        <member name="T:Oreja.Services.AudioService">
+            <summary>
+            Service for capturing microphone and system audio using NAudio.
+            Processes audio in memory and sends to Python backend for transcription.
+            </summary>
+        </member>
+        <member name="M:Oreja.Services.AudioService.StartCaptureAsync(System.Int32,System.Boolean)">
+            <summary>
+            Starts audio capture from specified microphone and system audio devices.
+            </summary>
+            <param name="microphoneDeviceIndex">Index of microphone device</param>
+            <param name="enableSystemCapture">Whether to capture system audio</param>
+        </member>
+        <member name="M:Oreja.Services.AudioService.StopCaptureAsync">
+            <summary>
+            Stops audio capture and cleans up resources.
+            </summary>
+        </member>
+        <member name="M:Oreja.Services.AudioService.StartMonitoringAsync(System.Int32,System.Boolean)">
+            <summary>
+            Starts audio monitoring for volume levels only (no transcription).
+            </summary>
+            <param name="microphoneDeviceIndex">Index of microphone device</param>
+            <param name="enableSystemCapture">Whether to monitor system audio</param>
+        </member>
+        <member name="M:Oreja.Services.AudioService.StopMonitoringAsync">
+            <summary>
+            Stops audio monitoring.
+            </summary>
+        </member>
+        <member name="T:Oreja.Services.IAudioService">
+            <summary>
+            Interface for audio capture service.
+            </summary>
+        </member>
+        <member name="T:Oreja.Services.AudioLevelEventArgs">
+            <summary>
+            Event arguments for audio level changes.
+            </summary>
+        </member>
+        <member name="T:Oreja.Services.TranscriptionEventArgs">
+            <summary>
+            Event arguments for transcription results.
+            </summary>
+        </member>
+        <member name="T:Oreja.Services.SpeakerService">
+            <summary>
+            Service for managing speaker embeddings and identification using SQLite.
+            All speaker data is stored locally with encrypted embeddings.
+            </summary>
+        </member>
+        <member name="M:Oreja.Services.SpeakerService.InitializeDatabaseAsync">
+            <summary>
+            Initializes the SQLite database and creates tables if they don't exist.
+            </summary>
+        </member>
+        <member name="M:Oreja.Services.SpeakerService.IdentifySpeakerAsync(System.Byte[])">
+            <summary>
+            Identifies a speaker based on their voice embedding or creates a new speaker entry.
+            </summary>
+            <param name="embedding">Voice embedding vector</param>
+            <returns>Speaker information</returns>
+        </member>
+        <member name="M:Oreja.Services.SpeakerService.RenameSpeakerAsync(System.String,System.String)">
+            <summary>
+            Renames a speaker in the database.
+            </summary>
+            <param name="currentName">Current speaker name</param>
+            <param name="newName">New speaker name</param>
+            <returns>True if successful</returns>
+        </member>
+        <member name="M:Oreja.Services.SpeakerService.GetAllSpeakersAsync">
+            <summary>
+            Gets all known speakers from the database.
+            </summary>
+            <returns>List of speakers</returns>
+        </member>
+        <member name="M:Oreja.Services.SpeakerService.DeleteSpeakerAsync(System.Int32)">
+            <summary>
+            Deletes a speaker from the database.
+            </summary>
+            <param name="speakerId">Speaker ID to delete</param>
+            <returns>True if successful</returns>
+        </member>
+        <member name="T:Oreja.Services.ISpeakerService">
+            <summary>
+            Interface for speaker identification and management service.
+            </summary>
+        </member>
+        <member name="T:Oreja.ViewModels.MainViewModel">
+            <summary>
+            Main view model for the Oreja application implementing MVVM pattern.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.IsRecording">
+            <summary>
+            Indicates whether audio recording is currently active.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.IsNotRecording">
+            <summary>
+            Inverse of IsRecording for UI binding convenience.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.MicrophoneLevel">
+            <summary>
+            Current microphone audio level (0.0 to 1.0).
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.SystemLevel">
+            <summary>
+            Current system audio level (0.0 to 1.0).
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.TranscriptionText">
+            <summary>
+            Complete transcription text for display.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.StatusMessage">
+            <summary>
+            Current application status message.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.SelectedMicrophone">
+            <summary>
+            Currently selected microphone device.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.EnableSystemCapture">
+            <summary>
+            Whether to capture system audio along with microphone.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.CurrentSpeakerName">
+            <summary>
+            Name of speaker selected for renaming.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.NewSpeakerName">
+            <summary>
+            New name for speaker renaming operation.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.AvailableMicrophones">
+            <summary>
+            Collection of available microphone devices.
+            </summary>
+        </member>
+        <member name="P:Oreja.ViewModels.MainViewModel.TranscriptionSegments">
+            <summary>
+            Collection of transcription segments for detailed view.
+            </summary>
+        </member>
+        <member name="T:Oreja.ViewModels.RelayCommand">
+            <summary>
+            Simple implementation of ICommand for view model commands.
+            </summary>
+        </member>
+        <member name="T:Oreja.Views.MainWindow">
+            <summary>
+            Interaction logic for MainWindow.xaml
+            </summary>
+            <summary>
+            MainWindow
+            </summary>
+        </member>
+        <member name="M:Oreja.Views.MainWindow.InitializeComponent">
+            <summary>
+            InitializeComponent
+            </summary>
+        </member>
+    </members>
+</doc>

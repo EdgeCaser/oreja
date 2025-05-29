@@ -1,0 +1,296 @@
+<Window x:Class="Oreja.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:Oreja.Views"
+        xmlns:controls="clr-namespace:Oreja.Controls"
+        mc:Ignorable="d"
+        Title="Oreja - Real-time Conference Transcription" 
+        Height="700" Width="1000"
+        MinHeight="500" MinWidth="800"
+        WindowStartupLocation="CenterScreen">
+    
+    <Window.Resources>
+        <!-- Modern UI Styles -->
+        <Style x:Key="ModernButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#FF0078D4"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" 
+                                CornerRadius="4" 
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <ContentPresenter HorizontalAlignment="Center" 
+                                            VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#FF106EBE"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#FF005A9E"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Background" Value="#FF666666"/>
+                                <Setter Property="Foreground" Value="#FF999999"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ModernComboBoxStyle" TargetType="ComboBox">
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="BorderBrush" Value="#FFCCCCCC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style x:Key="HeaderTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#FF333333"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+
+        <Style x:Key="StatusTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="#FF666666"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            
+            <StackPanel Grid.Column="0">
+                <TextBlock Text="Oreja" FontSize="24" FontWeight="Bold" Foreground="#FF0078D4"/>
+                <TextBlock Text="Real-time Conference Call Transcription" 
+                          Style="{StaticResource StatusTextStyle}"/>
+            </StackPanel>
+            
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Content="🔄 Refresh Devices" 
+                       Style="{StaticResource ModernButtonStyle}"
+                       Background="#FF6B6B6B"
+                       Command="{Binding Path=RefreshDevicesCommand}"
+                       Margin="0,0,8,0"/>
+                <Button Content="💾 Save Transcript" 
+                       Style="{StaticResource ModernButtonStyle}"
+                       Background="#FF28A745"
+                       Command="{Binding Path=SaveTranscriptCommand}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Audio Controls -->
+        <Grid Grid.Row="1" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Device Selection -->
+            <GroupBox Header="Audio Devices" Grid.Row="0" Margin="10">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Microphone Selection -->
+                    <Label Content="Microphone:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1" Margin="5"
+                              ItemsSource="{Binding AvailableMicrophones}"
+                              SelectedItem="{Binding SelectedMicrophone}"
+                              DisplayMemberPath="Name"/>
+
+                    <!-- System Audio Selection -->
+                    <Label Content="System Audio:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                    <ComboBox Grid.Row="1" Grid.Column="1" Margin="5"
+                              ItemsSource="{Binding AvailableSystemAudioDevices}"
+                              SelectedItem="{Binding SelectedSystemAudioDevice}"
+                              DisplayMemberPath="Name"/>
+
+                    <!-- Enable System Capture -->
+                    <CheckBox Grid.Row="2" Grid.Column="1" Margin="5"
+                              IsChecked="{Binding EnableSystemCapture}"
+                              Content="Capture System Audio"/>
+
+                    <!-- Microphone Sensitivity -->
+                    <Label Content="Mic Sensitivity:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center"/>
+                    <Slider Grid.Row="3" Grid.Column="1" Margin="5"
+                            Minimum="0.1" Maximum="2.0" Value="{Binding MicrophoneSensitivity}"
+                            TickFrequency="0.1" IsSnapToTickEnabled="True"/>
+
+                    <!-- Volume Meters -->
+                    <Label Content="Mic Level:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center"/>
+                    <controls:VolumeMeter Grid.Row="4" Grid.Column="1" Margin="5"
+                                         Level="{Binding MicrophoneLevel}"
+                                         Height="20"/>
+
+                    <!-- Refresh Button -->
+                    <Button Grid.Row="0" Grid.Column="2" Grid.RowSpan="2" Margin="5"
+                            Content="Refresh Devices" Width="100"
+                            Command="{Binding RefreshDevicesCommand}"/>
+                    
+                    <!-- Test Audio Button -->
+                    <Button Grid.Row="3" Grid.Column="2" Grid.RowSpan="2" Margin="5"
+                            Content="Test Audio" Width="100"
+                            Command="{Binding TestAudioCommand}"/>
+                </Grid>
+            </GroupBox>
+
+            <!-- Recording Controls -->
+            <GroupBox Grid.Column="2" Header="Recording" Padding="12">
+                <StackPanel>
+                    <Button Name="StartButton"
+                           Content="🎙️ Start"
+                           Style="{StaticResource ModernButtonStyle}"
+                           Background="#FF28A745"
+                           Command="{Binding Path=StartRecordingCommand}"
+                           Margin="0,0,0,8"/>
+                    
+                    <Button Name="StopButton"
+                           Content="⏹️ Stop"
+                           Style="{StaticResource ModernButtonStyle}"
+                           Background="#FFDC3545"
+                           Command="{Binding Path=StopRecordingCommand}"
+                           Margin="0,0,0,8"/>
+                    
+                    <Button Content="🗑️ Clear"
+                           Style="{StaticResource ModernButtonStyle}"
+                           Background="#FF6C757D"
+                           Command="{Binding Path=ClearTranscriptCommand}"/>
+                </StackPanel>
+            </GroupBox>
+
+            <!-- Speaker Management -->
+            <GroupBox Grid.Column="4" Header="Speaker Rename" Padding="12">
+                <StackPanel>
+                    <TextBlock Text="Current Name:" FontSize="11" Margin="0,0,0,4"/>
+                    <TextBox Name="CurrentSpeakerTextBox"
+                            Text="{Binding Path=CurrentSpeakerName, UpdateSourceTrigger=PropertyChanged}"
+                            Padding="6"
+                            BorderBrush="#FFCCCCCC"
+                            Margin="0,0,0,8"/>
+                    
+                    <TextBlock Text="New Name:" FontSize="11" Margin="0,0,0,4"/>
+                    <TextBox Name="NewSpeakerTextBox"
+                            Text="{Binding Path=NewSpeakerName, UpdateSourceTrigger=PropertyChanged}"
+                            Padding="6"
+                            BorderBrush="#FFCCCCCC"
+                            Margin="0,0,0,8"/>
+                    
+                    <Button Content="✏️ Rename"
+                           Style="{StaticResource ModernButtonStyle}"
+                           Background="#FFFFC107"
+                           Foreground="#FF000000"
+                           Command="{Binding Path=RenameSpeakerCommand}"/>
+                </StackPanel>
+            </GroupBox>
+        </Grid>
+
+        <!-- Transcription Display -->
+        <GroupBox Grid.Row="2" Header="Live Transcription" Padding="12" Margin="0,0,0,16">
+            <ScrollViewer Name="TranscriptionScrollViewer" 
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled">
+                <TextBox Name="TranscriptionTextBox"
+                        Text="{Binding Path=TranscriptionText, Mode=OneWay}"
+                        IsReadOnly="True"
+                        TextWrapping="Wrap"
+                        FontSize="14"
+                        FontFamily="Segoe UI"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Padding="8"
+                        AcceptsReturn="True"
+                        VerticalScrollBarVisibility="Disabled"/>
+            </ScrollViewer>
+        </GroupBox>
+
+        <!-- Detailed Segments -->
+        <Expander Grid.Row="3" Header="Detailed Segments" Margin="0,0,0,16">
+            <DataGrid Name="SegmentsDataGrid"
+                     ItemsSource="{Binding Path=TranscriptionSegments}"
+                     AutoGenerateColumns="False"
+                     IsReadOnly="True"
+                     CanUserReorderColumns="False"
+                     CanUserResizeRows="False"
+                     Height="150"
+                     GridLinesVisibility="Horizontal"
+                     HorizontalGridLinesBrush="#FFEEEEEE">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Start" Binding="{Binding Start, StringFormat='{}{0:F2}s'}" Width="60"/>
+                    <DataGridTextColumn Header="End" Binding="{Binding End, StringFormat='{}{0:F2}s'}" Width="60"/>
+                    <DataGridTextColumn Header="Duration" Binding="{Binding Duration, StringFormat='{}{0:F2}s'}" Width="70"/>
+                    <DataGridTextColumn Header="Speaker" Binding="{Binding Speaker}" Width="100"/>
+                    <DataGridTextColumn Header="Text" Binding="{Binding Text}" Width="*"/>
+                    <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence, StringFormat='{}{0:P0}'}" Width="80"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Expander>
+
+        <!-- Status Bar -->
+        <Border Grid.Row="4" 
+               Background="#FFF8F9FA" 
+               BorderBrush="#FFDDDDDD" 
+               BorderThickness="0,1,0,0" 
+               Padding="12,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                
+                <TextBlock Grid.Column="0" 
+                          Text="{Binding Path=StatusMessage}" 
+                          Style="{StaticResource StatusTextStyle}"/>
+                
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBlock Text="Recording: " Style="{StaticResource StatusTextStyle}"/>
+                    <Ellipse Width="12" Height="12" 
+                            Fill="Red"
+                            Margin="4,0,16,0"/>
+                    <TextBlock Text="Privacy: ✓ Local Processing Only" 
+                              Style="{StaticResource StatusTextStyle}"
+                              Foreground="#FF28A745"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window> 

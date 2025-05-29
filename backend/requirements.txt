@@ -1,0 +1,24 @@
+# Core FastAPI and web server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Audio processing
+torch>=2.1.0
+torchaudio>=2.1.0
+numpy>=1.24.0
+librosa>=0.10.0
+
+# Hugging Face transformers and models
+transformers>=4.35.0
+pyannote.audio>=3.1.0
+sentencepiece>=0.1.99
+
+# Additional utilities
+typing-extensions>=4.8.0
+pydantic>=2.4.0
+python-dotenv>=1.0.0
+
+# Optional: GPU support (uncomment if using CUDA)
+# torch>=2.1.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+# torchaudio>=2.1.0+cu118 --index-url https://download.pytorch.org/whl/cu118 
