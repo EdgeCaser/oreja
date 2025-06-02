@@ -15,8 +15,17 @@ using System.Text.Json;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Oreja;
+
+// Settings class for speaker persistence
+public class SpeakerSettings
+{
+    public List<string> AvailableSpeakers { get; set; } = new List<string>();
+    public Dictionary<string, string> SpeakerNameMappings { get; set; } = new Dictionary<string, string>();
+    public int NextSpeakerNumber { get; set; } = 5;
+}
 
 /// <summary>
 /// Interaction logic for App.xaml
@@ -31,6 +40,7 @@ public partial class App : Application
     private ComboBox? _systemAudioComboBox;
     private Button? _startRecordingButton;
     private Button? _stopRecordingButton;
+    private Button? _monitoringToggleButton;
     private Rectangle? _microphoneVolumeBar;
     private Rectangle? _systemAudioVolumeBar;
     private TextBlock? _statusText;
@@ -42,6 +52,7 @@ public partial class App : Application
     private int _selectedMicrophoneIndex = 0;
     private int _selectedSystemAudioIndex = 0;
     private bool _isRecording = false;
+    private bool _isMonitoring = false;
     
     // Audio capture components
     private WaveInEvent? _waveIn;
@@ -52,7 +63,6 @@ public partial class App : Application
     
     // Volume level tracking
     private float _microphoneLevel = 0f;
-    private float _systemAudioLevel = 0f;
     
     // Transcription components
     private HttpClient? _httpClient;
@@ -67,6 +77,18 @@ public partial class App : Application
     private Dictionary<string, string> _speakerNames = new Dictionary<string, string>();
     private Button? _saveTranscriptionButton;
     private List<TranscriptionSegment> _transcriptionHistory = new List<TranscriptionSegment>();
+    
+    // Manual speaker assignment functionality
+    private List<string> _availableSpeakers = new List<string> { "Unknown" }; // Remove default speakers 1-4
+    private int _nextSpeakerNumber = 1; // Start from 1 instead of 5
+
+    // Speaker persistence settings
+    private const string SETTINGS_FILE = "oreja_speaker_settings.json";
+    private string? _settingsFilePath;
+    private SpeakerSettings _speakerSettings = new SpeakerSettings();
+
+    // Keep track of all speaker ComboBoxes for refreshing
+    private List<ComboBox> _speakerComboBoxes = new List<ComboBox>();
 
     // Helper class for transcription segments
     public class TranscriptionSegment
@@ -76,6 +98,7 @@ public partial class App : Application
         public double StartTime { get; set; }
         public string Source { get; set; } = "";
         public DateTime Timestamp { get; set; } = DateTime.Now;
+        public int SegmentId { get; set; } // Add unique ID for tracking
     }
 
     protected override void OnStartup(StartupEventArgs e)
@@ -98,19 +121,43 @@ public partial class App : Application
             _httpClient = new HttpClient();
             _httpClient.Timeout = TimeSpan.FromSeconds(60);
             
+            // Initialize settings file path
+            var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var orejaFolderPath = System.IO.Path.Combine(appDataPath, "Oreja");
+            Directory.CreateDirectory(orejaFolderPath); // Ensure directory exists
+            _settingsFilePath = System.IO.Path.Combine(orejaFolderPath, SETTINGS_FILE);
+            
+            // Load speaker settings from file
+            LoadSpeakerSettings();
+            Console.WriteLine($"Loaded {_availableSpeakers.Count} speaker names from settings");
+            
             Console.WriteLine("Creating window...");
             // Create window entirely in code to bypass XAML issues
             var window = new Window
             {
                 Title = "Oreja - Real-time Conference Transcription",
                 Width = 800,
-                Height = 700,
+                Height = 800,
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
                 WindowState = WindowState.Normal,
                 Topmost = false
             };
             
-            var mainPanel = new StackPanel { Margin = new Thickness(20) };
+            // Use Grid instead of StackPanel for better layout control
+            var mainGrid = new Grid { Margin = new Thickness(20) };
+            
+            // Define rows for the grid
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Title
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Microphone section
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // System audio section
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Volume meters
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Control buttons
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Status text
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Transcription label
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Instructions
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Transcription area (takes remaining space)
+            
+            int currentRow = 0;
             
             // Title
             var titleText = new TextBlock 
@@ -121,8 +168,10 @@ public partial class App : Application
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 20)
             };
+            Grid.SetRow(titleText, currentRow++);
             
-            // Microphone selection
+            // Microphone selection section
+            var microphoneSection = new StackPanel { Margin = new Thickness(0, 0, 0, 15) };
             var microphoneLabel = new TextBlock 
             { 
                 Text = "Select Microphone:",
@@ -133,12 +182,16 @@ public partial class App : Application
             _microphoneComboBox = new ComboBox
             {
                 Width = 500,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                Margin = new Thickness(0, 0, 0, 15)
+                HorizontalAlignment = HorizontalAlignment.Left
             };
             _microphoneComboBox.SelectionChanged += MicrophoneComboBox_SelectionChanged;
             
-            // System audio selection
+            microphoneSection.Children.Add(microphoneLabel);
+            microphoneSection.Children.Add(_microphoneComboBox);
+            Grid.SetRow(microphoneSection, currentRow++);
+            
+            // System audio selection section
+            var systemAudioSection = new StackPanel { Margin = new Thickness(0, 0, 0, 15) };
             var systemAudioLabel = new TextBlock 
             { 
                 Text = "Select System Audio:",
@@ -149,12 +202,16 @@ public partial class App : Application
             _systemAudioComboBox = new ComboBox
             {
                 Width = 500,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                Margin = new Thickness(0, 0, 0, 15)
+                HorizontalAlignment = HorizontalAlignment.Left
             };
             _systemAudioComboBox.SelectionChanged += SystemAudioComboBox_SelectionChanged;
             
+            systemAudioSection.Children.Add(systemAudioLabel);
+            systemAudioSection.Children.Add(_systemAudioComboBox);
+            Grid.SetRow(systemAudioSection, currentRow++);
+            
             // Volume meters section
+            var volumeSection = new StackPanel { Margin = new Thickness(0, 0, 0, 20) };
             var volumeLabel = new TextBlock 
             { 
                 Text = "Audio Levels:",
@@ -186,7 +243,7 @@ public partial class App : Application
             micVolumePanel.Children.Add(micVolumeBorder);
             
             // System audio volume meter
-            var sysVolumePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 20) };
+            var sysVolumePanel = new StackPanel { Orientation = Orientation.Horizontal };
             var sysVolumeLabel = new TextBlock { Text = "System Audio: ", Width = 120, VerticalAlignment = VerticalAlignment.Center };
             var sysVolumeBorder = new Border 
             { 
@@ -206,6 +263,11 @@ public partial class App : Application
             sysVolumeBorder.Child = _systemAudioVolumeBar;
             sysVolumePanel.Children.Add(sysVolumeLabel);
             sysVolumePanel.Children.Add(sysVolumeBorder);
+            
+            volumeSection.Children.Add(volumeLabel);
+            volumeSection.Children.Add(micVolumePanel);
+            volumeSection.Children.Add(sysVolumePanel);
+            Grid.SetRow(volumeSection, currentRow++);
             
             // Recording controls
             var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 20) };
@@ -232,6 +294,18 @@ public partial class App : Application
             };
             _stopRecordingButton.Click += StopRecordingButton_Click;
             
+            _monitoringToggleButton = new Button 
+            { 
+                Content = "🔄 Start Monitoring",
+                Width = 150,
+                Height = 40,
+                Margin = new Thickness(10, 0, 0, 0),
+                FontSize = 14,
+                Background = Brushes.LightBlue,
+                IsEnabled = true
+            };
+            _monitoringToggleButton.Click += MonitoringToggleButton_Click;
+            
             _saveTranscriptionButton = new Button 
             { 
                 Content = "💾 Save Transcription",
@@ -246,19 +320,22 @@ public partial class App : Application
             
             buttonPanel.Children.Add(_startRecordingButton);
             buttonPanel.Children.Add(_stopRecordingButton);
+            buttonPanel.Children.Add(_monitoringToggleButton);
             buttonPanel.Children.Add(_saveTranscriptionButton);
+            Grid.SetRow(buttonPanel, currentRow++);
             
             // Status text
             _statusText = new TextBlock 
             { 
-                Text = "Initializing audio devices...",
+                Text = "Ready! Select a microphone and toggle monitoring to start.",
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 15),
                 TextWrapping = TextWrapping.Wrap,
                 FontSize = 12
             };
+            Grid.SetRow(_statusText, currentRow++);
             
-            // Transcription section
+            // Transcription section label
             var transcriptionLabel = new TextBlock 
             { 
                 Text = "Live Transcription:",
@@ -266,7 +343,43 @@ public partial class App : Application
                 FontWeight = FontWeights.Bold,
                 Margin = new Thickness(0, 0, 0, 10)
             };
+            Grid.SetRow(transcriptionLabel, currentRow++);
             
+            // Instructions panel
+            var instructionsBorder = new Border
+            {
+                BorderBrush = Brushes.LightBlue,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3),
+                Background = Brushes.AliceBlue,
+                Padding = new Thickness(10),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            
+            var instructionsPanel = new StackPanel();
+            
+            var instructionsTitle = new TextBlock
+            {
+                Text = "💡 Speaker Assignment Help:",
+                FontWeight = FontWeights.Bold,
+                FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 5)
+            };
+            
+            var instructionsText = new TextBlock
+            {
+                Text = "• Use dropdowns to change speaker assignments\n• Click number buttons (1-4) for quick assignment\n• Click '+' to create new speakers\n• Click '×' to delete speakers from the list\n• Type in dropdown to create custom speaker names",
+                FontSize = 11,
+                Foreground = Brushes.DarkBlue,
+                TextWrapping = TextWrapping.Wrap
+            };
+            
+            instructionsPanel.Children.Add(instructionsTitle);
+            instructionsPanel.Children.Add(instructionsText);
+            instructionsBorder.Child = instructionsPanel;
+            Grid.SetRow(instructionsBorder, currentRow++);
+            
+            // Transcription area - this will now take up all remaining space
             _transcriptionPanel = new StackPanel 
             { 
                 Margin = new Thickness(10),
@@ -275,30 +388,29 @@ public partial class App : Application
             
             _transcriptionScrollViewer = new ScrollViewer 
             { 
-                Height = 250,
+                // Remove fixed Height - let it fill available space
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 BorderBrush = Brushes.Gray,
                 BorderThickness = new Thickness(1),
                 Background = Brushes.WhiteSmoke,
-                Content = _transcriptionPanel
+                Content = _transcriptionPanel,
+                Margin = new Thickness(0, 0, 0, 10)
             };
+            Grid.SetRow(_transcriptionScrollViewer, currentRow++);
             
-            // Add all controls to main panel
-            mainPanel.Children.Add(titleText);
-            mainPanel.Children.Add(microphoneLabel);
-            mainPanel.Children.Add(_microphoneComboBox);
-            mainPanel.Children.Add(systemAudioLabel);
-            mainPanel.Children.Add(_systemAudioComboBox);
-            mainPanel.Children.Add(volumeLabel);
-            mainPanel.Children.Add(micVolumePanel);
-            mainPanel.Children.Add(sysVolumePanel);
-            mainPanel.Children.Add(buttonPanel);
-            mainPanel.Children.Add(_statusText);
-            mainPanel.Children.Add(transcriptionLabel);
-            mainPanel.Children.Add(_transcriptionScrollViewer);
+            // Add all sections to the grid
+            mainGrid.Children.Add(titleText);
+            mainGrid.Children.Add(microphoneSection);
+            mainGrid.Children.Add(systemAudioSection);
+            mainGrid.Children.Add(volumeSection);
+            mainGrid.Children.Add(buttonPanel);
+            mainGrid.Children.Add(_statusText);
+            mainGrid.Children.Add(transcriptionLabel);
+            mainGrid.Children.Add(instructionsBorder);
+            mainGrid.Children.Add(_transcriptionScrollViewer);
             
-            window.Content = mainPanel;
+            window.Content = mainGrid;
             window.Closing += Window_Closing;
             
             Console.WriteLine("Setting as main window...");
@@ -340,7 +452,7 @@ public partial class App : Application
                     Console.WriteLine("Initialization complete!");
                     if (_statusText != null)
                     {
-                        _statusText.Text = "Ready! Application initialized successfully.";
+                        _statusText.Text = "Ready! Select a microphone and toggle monitoring to start.";
                     }
                 }
                 catch (Exception ex)
@@ -488,6 +600,14 @@ public partial class App : Application
                 _audioBuffer.Clear();
                 _systemAudioBuffer.Clear();
                 
+                // If monitoring is active, stop it first (we'll use recording mode instead)
+                if (_isMonitoring)
+                {
+                    _waveIn?.StopRecording();
+                    _systemAudioCapture?.StopRecording();
+                    _isMonitoring = false;
+                }
+                
                 // Initialize WaveIn for actual audio capture
                 _waveIn = new WaveInEvent
                 {
@@ -514,9 +634,15 @@ public partial class App : Application
                 _transcriptionTimer?.Start();
                 _isRecording = true;
                 
-                if (_statusText != null) _statusText.Text = $"Recording from: {_selectedMicrophone.FriendlyName} - Transcribing in real-time...";
+                if (_statusText != null) _statusText.Text = $"Recording from: {_selectedMicrophone.FriendlyName} - Transcribing in real-time... (monitoring auto-enabled)";
                 if (_startRecordingButton != null) _startRecordingButton.IsEnabled = false;
                 if (_stopRecordingButton != null) _stopRecordingButton.IsEnabled = true;
+                if (_monitoringToggleButton != null)
+                {
+                    _monitoringToggleButton.Content = "🔄 Recording Mode";
+                    _monitoringToggleButton.Background = Brushes.Orange;
+                    _monitoringToggleButton.IsEnabled = false; // Disable during recording
+                }
             }
             else
             {
@@ -555,10 +681,98 @@ public partial class App : Application
             if (_statusText != null) _statusText.Text = "Recording stopped. Transcription complete.";
             if (_stopRecordingButton != null) _stopRecordingButton.IsEnabled = false;
             if (_startRecordingButton != null) _startRecordingButton.IsEnabled = true;
+            
+            // Re-enable monitoring toggle and restore monitoring state
+            if (_monitoringToggleButton != null)
+            {
+                _monitoringToggleButton.IsEnabled = true;
+                _monitoringToggleButton.Content = "🔄 Start Monitoring";
+                _monitoringToggleButton.Background = Brushes.LightBlue;
+            }
         }
         catch (Exception ex)
         {
             if (_statusText != null) _statusText.Text = $"Error stopping recording: {ex.Message}";
+        }
+    }
+    
+    private void MonitoringToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_selectedMicrophone == null)
+            {
+                if (_statusText != null) _statusText.Text = "Please select a microphone first.";
+                return;
+            }
+
+            if (_isMonitoring)
+            {
+                // Stop monitoring
+                _waveIn?.StopRecording();
+                _systemAudioCapture?.StopRecording();
+                _isMonitoring = false;
+                
+                if (_monitoringToggleButton != null)
+                {
+                    _monitoringToggleButton.Content = "🔄 Start Monitoring";
+                    _monitoringToggleButton.Background = Brushes.LightBlue;
+                }
+                if (_statusText != null) _statusText.Text = "Audio monitoring stopped.";
+            }
+            else
+            {
+                // Start monitoring (without transcription)
+                if (_selectedMicrophone != null)
+                {
+                    // Use a separate WaveIn for monitoring only
+                    _waveIn = new WaveInEvent
+                    {
+                        DeviceNumber = _selectedMicrophoneIndex,
+                        WaveFormat = new WaveFormat(16000, 1),
+                        BufferMilliseconds = 50,
+                        NumberOfBuffers = 2
+                    };
+                    
+                    // Only handle data for volume monitoring, no buffering
+                    _waveIn.DataAvailable += (s, args) =>
+                    {
+                        // Calculate volume level only - no audio storage
+                        float level = 0f;
+                        for (int i = 0; i < args.BytesRecorded; i += 2)
+                        {
+                            if (i + 1 < args.BytesRecorded)
+                            {
+                                short sample = BitConverter.ToInt16(args.Buffer, i);
+                                level = Math.Max(level, Math.Abs(sample) / 32768f);
+                            }
+                        }
+                        _microphoneLevel = level;
+                    };
+                    
+                    _waveIn.StartRecording();
+                    
+                    // Start system audio monitoring too
+                    if (_defaultSystemAudio != null)
+                    {
+                        _systemAudioCapture = new WasapiLoopbackCapture(_defaultSystemAudio);
+                        _systemAudioCapture.StartRecording();
+                    }
+                    
+                    _isMonitoring = true;
+                    
+                    if (_monitoringToggleButton != null)
+                    {
+                        _monitoringToggleButton.Content = "🔄 Stop Monitoring";
+                        _monitoringToggleButton.Background = Brushes.LightGreen;
+                    }
+                    if (_statusText != null) _statusText.Text = "Audio monitoring started - ready to record.";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (_statusText != null) _statusText.Text = $"Error toggling monitoring: {ex.Message}";
         }
     }
     
@@ -614,10 +828,9 @@ public partial class App : Application
     {
         _systemAudioCapture?.Dispose();
         _systemAudioCapture = null;
-        _systemAudioLevel = 0f;
     }
     
-    private async void TranscriptionTimer_Tick(object? sender, EventArgs e)
+    private void TranscriptionTimer_Tick(object? sender, EventArgs e)
     {
         if (_isRecording && !_isProcessingTranscription)
         {
@@ -732,6 +945,9 @@ public partial class App : Application
             return;
         }
         
+        // Generate unique segment ID
+        var segmentId = _transcriptionHistory.Count;
+        
         // Store in transcription history
         var segment = new TranscriptionSegment
         {
@@ -739,9 +955,19 @@ public partial class App : Application
             Text = text,
             StartTime = startTime,
             Source = source,
-            Timestamp = DateTime.Now
+            Timestamp = DateTime.Now,
+            SegmentId = segmentId
         };
         _transcriptionHistory.Add(segment);
+        
+        // Ensure speaker is in available speakers list
+        if (!string.IsNullOrEmpty(speaker) && !_availableSpeakers.Contains(speaker))
+        {
+            _availableSpeakers.Add(speaker);
+            // Save settings when new speaker is auto-detected
+            SaveSpeakerSettings();
+            Console.WriteLine($"Auto-detected and saved new speaker: {speaker}");
+        }
         
         // Enable save button once we have transcriptions
         if (_saveTranscriptionButton != null)
@@ -749,10 +975,24 @@ public partial class App : Application
             _saveTranscriptionButton.IsEnabled = true;
         }
         
-        var segmentPanel = new StackPanel 
+        // Create main container for the segment
+        var segmentBorder = new Border 
+        { 
+            BorderBrush = Brushes.LightGray,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(5),
+            Margin = new Thickness(0, 2, 0, 2),
+            Padding = new Thickness(8),
+            Background = Brushes.White
+        };
+        
+        var segmentPanel = new StackPanel();
+        
+        // Top row: Timestamp, Speaker Assignment, Source, and Controls
+        var topPanel = new StackPanel 
         { 
             Orientation = Orientation.Horizontal, 
-            Margin = new Thickness(0, 5, 0, 5) 
+            Margin = new Thickness(0, 0, 0, 5) 
         };
         
         // Timestamp
@@ -762,50 +1002,161 @@ public partial class App : Application
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.Gray,
             Width = 60,
+            VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 10, 0)
         };
         
-        // Speaker (now clickable for renaming)
-        var displaySpeaker = GetDisplaySpeakerName(speaker);
-        var speakerButton = new Button 
-        { 
-            Content = $"{displaySpeaker}:",
-            FontWeight = FontWeights.Bold,
-            Foreground = GetSpeakerColor(speaker),
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0),
-            Width = 100,
+        // Speaker assignment dropdown
+        var speakerComboBox = new ComboBox
+        {
+            Width = 120,
+            ItemsSource = _availableSpeakers.ToList(),
+            SelectedItem = GetDisplaySpeakerName(speaker),
             Margin = new Thickness(0, 0, 10, 0),
-            Cursor = System.Windows.Input.Cursors.Hand,
-            ToolTip = "Click to rename speaker"
+            ToolTip = "Select or change speaker",
+            IsEditable = true
         };
-        speakerButton.Click += (s, e) => ShowSpeakerRenameDialog(speaker);
+        
+        // Track this ComboBox for refreshing
+        _speakerComboBoxes.Add(speakerComboBox);
+        
+        // Capture segment ID for event handlers
+        var currentSegmentId = segmentId;
+        
+        // Handle speaker selection change
+        speakerComboBox.SelectionChanged += (s, e) =>
+        {
+            if (speakerComboBox.SelectedItem != null)
+            {
+                var newSpeaker = speakerComboBox.SelectedItem.ToString();
+                if (!string.IsNullOrEmpty(newSpeaker))
+                {
+                    UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+                }
+            }
+        };
+        
+        // Handle manual text entry for new speakers
+        speakerComboBox.LostFocus += (s, e) =>
+        {
+            var newSpeaker = speakerComboBox.Text.Trim();
+            if (!string.IsNullOrEmpty(newSpeaker) && newSpeaker != GetDisplaySpeakerName(speaker))
+            {
+                // Add to available speakers if new
+                if (!_availableSpeakers.Contains(newSpeaker))
+                {
+                    _availableSpeakers.Add(newSpeaker);
+                    RefreshAllSpeakerDropdowns();
+                    
+                    // Save settings when new speaker is created
+                    SaveSpeakerSettings();
+                    Console.WriteLine($"Created and saved new speaker via text entry in refresh: {newSpeaker}");
+                }
+                UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+            }
+        };
         
         // Source indicator
         var sourceText = new TextBlock 
         { 
             Text = $"[{source}]",
             FontWeight = FontWeights.Normal,
-            Foreground = source == "Microphone" ? Brushes.Blue : Brushes.Green,
+            Foreground = segment.Source == "Microphone" ? Brushes.Blue : Brushes.Green,
             Width = 80,
             FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 10, 0)
         };
         
-        // Transcribed text
+        // Quick speaker buttons
+        var quickSpeakerPanel = new StackPanel 
+        { 
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 10, 0)
+        };
+        
+        // Add quick assignment buttons for common speakers
+        for (int i = 1; i <= 4; i++)
+        {
+            var speakerNum = i;
+            var quickButton = new Button
+            {
+                Content = speakerNum.ToString(),
+                Width = 25,
+                Height = 25,
+                Margin = new Thickness(2, 0, 2, 0),
+                FontSize = 10,
+                Background = Brushes.LightBlue,
+                ToolTip = $"Assign to Speaker {speakerNum}",
+                BorderThickness = new Thickness(1)
+            };
+            
+            quickButton.Click += (s, e) =>
+            {
+                var newSpeaker = $"Speaker {speakerNum}";
+                speakerComboBox.SelectedItem = newSpeaker;
+                UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+            };
+            
+            quickSpeakerPanel.Children.Add(quickButton);
+        }
+        
+        // New speaker button
+        var newSpeakerButton = new Button
+        {
+            Content = "+",
+            Width = 25,
+            Height = 25,
+            Margin = new Thickness(5, 0, 2, 0),
+            FontSize = 12,
+            FontWeight = FontWeights.Bold,
+            Background = Brushes.LightGreen,
+            ToolTip = "Create new speaker"
+        };
+        
+        newSpeakerButton.Click += (s, e) => CreateNewSpeaker(speakerComboBox, currentSegmentId);
+        
+        // Delete speaker button
+        var deleteSpeakerButton = new Button
+        {
+            Content = "×",
+            Width = 25,
+            Height = 25,
+            Margin = new Thickness(2, 0, 0, 0),
+            FontSize = 14,
+            FontWeight = FontWeights.Bold,
+            Background = Brushes.LightCoral,
+            ToolTip = "Delete current speaker from list",
+            Foreground = Brushes.DarkRed
+        };
+        
+        deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
+        
+        // Add all top row elements
+        topPanel.Children.Add(timestampText);
+        topPanel.Children.Add(speakerComboBox);
+        topPanel.Children.Add(sourceText);
+        topPanel.Children.Add(quickSpeakerPanel);
+        topPanel.Children.Add(newSpeakerButton);
+        topPanel.Children.Add(deleteSpeakerButton);
+        
+        // Text content (in its own row for better readability)
         var textBlock = new TextBlock 
         { 
             Text = text,
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 10, 0)
+            Margin = new Thickness(0, 5, 0, 0),
+            FontSize = 13,
+            LineHeight = 18
         };
         
-        segmentPanel.Children.Add(timestampText);
-        segmentPanel.Children.Add(speakerButton);
-        segmentPanel.Children.Add(sourceText);
+        // Add both rows to the segment panel
+        segmentPanel.Children.Add(topPanel);
         segmentPanel.Children.Add(textBlock);
         
-        _transcriptionPanel.Children.Add(segmentPanel);
+        // Add segment panel to border and border to main panel
+        segmentBorder.Child = segmentPanel;
+        _transcriptionPanel.Children.Add(segmentBorder);
         
         // Auto-scroll to bottom
         _transcriptionScrollViewer?.ScrollToEnd();
@@ -823,6 +1174,217 @@ public partial class App : Application
             return _speakerNames[originalSpeaker];
             
         return originalSpeaker;
+    }
+    
+    private void UpdateSegmentSpeaker(int segmentId, string newSpeaker)
+    {
+        // Find and update the segment in history
+        var segment = _transcriptionHistory.FirstOrDefault(s => s.SegmentId == segmentId);
+        if (segment != null)
+        {
+            var oldSpeaker = segment.Speaker;
+            segment.Speaker = newSpeaker;
+            Console.WriteLine($"Updated segment {segmentId} speaker from '{oldSpeaker}' to '{newSpeaker}'");
+            
+            // If this is a speaker name mapping change, save it
+            if (!string.IsNullOrEmpty(oldSpeaker) && oldSpeaker != newSpeaker)
+            {
+                _speakerNames[oldSpeaker] = newSpeaker;
+                SaveSpeakerSettings();
+                Console.WriteLine($"Saved speaker name mapping: {oldSpeaker} -> {newSpeaker}");
+                
+                // Send feedback to backend to improve speaker recognition
+                _ = SendSpeakerCorrectionFeedbackAsync(segment, newSpeaker);
+            }
+        }
+    }
+    
+    private async Task SendSpeakerCorrectionFeedbackAsync(TranscriptionSegment segment, string correctSpeakerName)
+    {
+        try
+        {
+            // Only send feedback if we have the original audio and the correction is meaningful
+            if (string.IsNullOrEmpty(correctSpeakerName) || correctSpeakerName == "Unknown")
+                return;
+            
+            Console.WriteLine($"Sending speaker correction feedback: '{segment.Speaker}' -> '{correctSpeakerName}'");
+            
+            // Send the name mapping to the backend
+            var requestData = new
+            {
+                old_speaker_id = segment.Speaker,
+                new_speaker_name = correctSpeakerName
+            };
+            
+            var jsonContent = System.Text.Json.JsonSerializer.Serialize(requestData);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+            
+            try
+            {
+                var response = await _httpClient!.PostAsync($"{BACKEND_URL}/speakers/name_mapping?old_speaker_id={Uri.EscapeDataString(segment.Speaker ?? "")}&new_speaker_name={Uri.EscapeDataString(correctSpeakerName)}", null);
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseContent = await response.Content.ReadAsStringAsync();
+                    var result = System.Text.Json.JsonSerializer.Deserialize<JsonElement>(responseContent);
+                    
+                    var status = result.GetProperty("status").GetString();
+                    Console.WriteLine($"Speaker feedback processed: {status}");
+                    
+                    if (status == "speakers_merged")
+                    {
+                        Console.WriteLine($"Speakers successfully merged in backend");
+                    }
+                    else if (status == "name_updated")
+                    {
+                        Console.WriteLine($"Speaker name updated in backend");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Speaker feedback failed: HTTP {response.StatusCode}");
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"Network error sending speaker feedback: {ex.Message}");
+            }
+            
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error sending speaker correction feedback: {ex.Message}");
+        }
+    }
+    
+    private void CreateNewSpeaker(ComboBox comboBox, int segmentId)
+    {
+        var inputWindow = new Window
+        {
+            Title = "Create New Speaker",
+            Width = 300,
+            Height = 180,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = MainWindow,
+            ResizeMode = ResizeMode.NoResize
+        };
+        
+        var panel = new StackPanel { Margin = new Thickness(20) };
+        
+        var label = new TextBlock 
+        { 
+            Text = "Enter name for new speaker:",
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        
+        var textBox = new TextBox 
+        { 
+            Text = $"Speaker {_nextSpeakerNumber}",
+            Margin = new Thickness(0, 0, 0, 20),
+            Padding = new Thickness(5)
+        };
+        textBox.SelectAll();
+        textBox.Focus();
+        
+        var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        
+        var okButton = new Button 
+        { 
+            Content = "Create",
+            Width = 70,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsDefault = true
+        };
+        
+        var cancelButton = new Button 
+        { 
+            Content = "Cancel",
+            Width = 70,
+            Height = 30,
+            IsCancel = true
+        };
+        
+        okButton.Click += (s, e) =>
+        {
+            var newSpeaker = textBox.Text.Trim();
+            if (!string.IsNullOrEmpty(newSpeaker))
+            {
+                // Add to available speakers
+                if (!_availableSpeakers.Contains(newSpeaker))
+                {
+                    _availableSpeakers.Add(newSpeaker);
+                    _nextSpeakerNumber++;
+                    RefreshAllSpeakerDropdowns();
+                    
+                    // Save settings when new speaker is created
+                    SaveSpeakerSettings();
+                    Console.WriteLine($"Created and saved new speaker: {newSpeaker}");
+                }
+                
+                // Set the new speaker for this segment
+                comboBox.SelectedItem = newSpeaker;
+                UpdateSegmentSpeaker(segmentId, newSpeaker);
+                
+                inputWindow.DialogResult = true;
+            }
+        };
+        
+        cancelButton.Click += (s, e) => inputWindow.DialogResult = false;
+        
+        // Handle Enter key
+        textBox.KeyDown += (s, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.Enter)
+            {
+                okButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+        };
+        
+        buttonPanel.Children.Add(okButton);
+        buttonPanel.Children.Add(cancelButton);
+        
+        panel.Children.Add(label);
+        panel.Children.Add(textBox);
+        panel.Children.Add(buttonPanel);
+        
+        inputWindow.Content = panel;
+        inputWindow.ShowDialog();
+    }
+    
+    private void RefreshAllSpeakerDropdowns()
+    {
+        Console.WriteLine($"Refreshing {_speakerComboBoxes.Count} speaker dropdowns with {_availableSpeakers.Count} speakers");
+        
+        // Update all tracked ComboBoxes
+        foreach (var comboBox in _speakerComboBoxes.ToList()) // Use ToList() to avoid collection modification issues
+        {
+            try
+            {
+                // Check if ComboBox is still valid (not disposed)
+                var currentSelection = comboBox.SelectedItem as string;
+                
+                // Update ItemsSource
+                comboBox.ItemsSource = _availableSpeakers.ToList();
+                
+                // Restore selection if still valid
+                if (!string.IsNullOrEmpty(currentSelection) && _availableSpeakers.Contains(currentSelection))
+                {
+                    comboBox.SelectedItem = currentSelection;
+                }
+                else if (!string.IsNullOrEmpty(currentSelection))
+                {
+                    // If selected speaker was deleted, set to "Unknown"
+                    comboBox.SelectedItem = "Unknown";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error refreshing ComboBox: {ex.Message}");
+                // Remove invalid ComboBox from tracking list
+                _speakerComboBoxes.Remove(comboBox);
+            }
+        }
     }
     
     private void ShowSpeakerRenameDialog(string? originalSpeaker)
@@ -886,6 +1448,11 @@ public partial class App : Application
             {
                 _speakerNames[originalSpeaker] = newName;
                 RefreshTranscriptionDisplay();
+                
+                // Save settings when speaker is renamed
+                SaveSpeakerSettings();
+                Console.WriteLine($"Renamed and saved speaker: {originalSpeaker} -> {newName}");
+                
                 inputWindow.DialogResult = true;
             }
         };
@@ -917,16 +1484,31 @@ public partial class App : Application
         if (_transcriptionPanel == null)
             return;
             
-        // Clear current display
+        // Clear current display and ComboBox tracking
         _transcriptionPanel.Children.Clear();
+        _speakerComboBoxes.Clear();
         
-        // Redraw all segments with updated speaker names
+        // Redraw all segments with updated layout
         foreach (var segment in _transcriptionHistory)
         {
-            var segmentPanel = new StackPanel 
+            // Create main container for the segment
+            var segmentBorder = new Border 
+            { 
+                BorderBrush = Brushes.LightGray,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(5),
+                Margin = new Thickness(0, 2, 0, 2),
+                Padding = new Thickness(8),
+                Background = Brushes.White
+            };
+            
+            var segmentPanel = new StackPanel();
+            
+            // Top row: Timestamp, Speaker Assignment, Source, and Controls
+            var topPanel = new StackPanel 
             { 
                 Orientation = Orientation.Horizontal, 
-                Margin = new Thickness(0, 5, 0, 5) 
+                Margin = new Thickness(0, 0, 0, 5) 
             };
             
             // Timestamp
@@ -936,24 +1518,59 @@ public partial class App : Application
                 FontWeight = FontWeights.Bold,
                 Foreground = Brushes.Gray,
                 Width = 60,
+                VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 10, 0)
             };
             
-            // Speaker (clickable)
-            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
-            var speakerButton = new Button 
-            { 
-                Content = $"{displaySpeaker}:",
-                FontWeight = FontWeights.Bold,
-                Foreground = GetSpeakerColor(segment.Speaker),
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Width = 100,
+            // Speaker assignment dropdown
+            var speakerComboBox = new ComboBox
+            {
+                Width = 120,
+                ItemsSource = _availableSpeakers.ToList(),
+                SelectedItem = GetDisplaySpeakerName(segment.Speaker),
                 Margin = new Thickness(0, 0, 10, 0),
-                Cursor = System.Windows.Input.Cursors.Hand,
-                ToolTip = "Click to rename speaker"
+                ToolTip = "Select or change speaker",
+                IsEditable = true
             };
-            speakerButton.Click += (s, e) => ShowSpeakerRenameDialog(segment.Speaker);
+            
+            // Track this ComboBox for refreshing
+            _speakerComboBoxes.Add(speakerComboBox);
+            
+            // Capture segment ID for event handlers
+            var currentSegmentId = segment.SegmentId;
+            
+            // Handle speaker selection change
+            speakerComboBox.SelectionChanged += (s, e) =>
+            {
+                if (speakerComboBox.SelectedItem != null)
+                {
+                    var newSpeaker = speakerComboBox.SelectedItem.ToString();
+                    if (!string.IsNullOrEmpty(newSpeaker))
+                    {
+                        UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+                    }
+                }
+            };
+            
+            // Handle manual text entry for new speakers
+            speakerComboBox.LostFocus += (s, e) =>
+            {
+                var newSpeaker = speakerComboBox.Text.Trim();
+                if (!string.IsNullOrEmpty(newSpeaker) && newSpeaker != GetDisplaySpeakerName(segment.Speaker))
+                {
+                    // Add to available speakers if new
+                    if (!_availableSpeakers.Contains(newSpeaker))
+                    {
+                        _availableSpeakers.Add(newSpeaker);
+                        RefreshAllSpeakerDropdowns();
+                        
+                        // Save settings when new speaker is created
+                        SaveSpeakerSettings();
+                        Console.WriteLine($"Created and saved new speaker via text entry in refresh: {newSpeaker}");
+                    }
+                    UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+                }
+            };
             
             // Source indicator
             var sourceText = new TextBlock 
@@ -963,23 +1580,99 @@ public partial class App : Application
                 Foreground = segment.Source == "Microphone" ? Brushes.Blue : Brushes.Green,
                 Width = 80,
                 FontSize = 10,
+                VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 10, 0)
             };
             
-            // Transcribed text
+            // Quick speaker buttons
+            var quickSpeakerPanel = new StackPanel 
+            { 
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            
+            // Add quick assignment buttons for common speakers
+            for (int i = 1; i <= 4; i++)
+            {
+                var speakerNum = i;
+                var quickButton = new Button
+                {
+                    Content = speakerNum.ToString(),
+                    Width = 25,
+                    Height = 25,
+                    Margin = new Thickness(2, 0, 2, 0),
+                    FontSize = 10,
+                    Background = Brushes.LightBlue,
+                    ToolTip = $"Assign to Speaker {speakerNum}",
+                    BorderThickness = new Thickness(1)
+                };
+                
+                quickButton.Click += (s, e) =>
+                {
+                    var newSpeaker = $"Speaker {speakerNum}";
+                    speakerComboBox.SelectedItem = newSpeaker;
+                    UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
+                };
+                
+                quickSpeakerPanel.Children.Add(quickButton);
+            }
+            
+            // New speaker button
+            var newSpeakerButton = new Button
+            {
+                Content = "+",
+                Width = 25,
+                Height = 25,
+                Margin = new Thickness(5, 0, 2, 0),
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Background = Brushes.LightGreen,
+                ToolTip = "Create new speaker"
+            };
+            
+            newSpeakerButton.Click += (s, e) => CreateNewSpeaker(speakerComboBox, currentSegmentId);
+            
+            // Delete speaker button
+            var deleteSpeakerButton = new Button
+            {
+                Content = "×",
+                Width = 25,
+                Height = 25,
+                Margin = new Thickness(2, 0, 0, 0),
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Background = Brushes.LightCoral,
+                ToolTip = "Delete current speaker from list",
+                Foreground = Brushes.DarkRed
+            };
+            
+            deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
+            
+            // Add all top row elements
+            topPanel.Children.Add(timestampText);
+            topPanel.Children.Add(speakerComboBox);
+            topPanel.Children.Add(sourceText);
+            topPanel.Children.Add(quickSpeakerPanel);
+            topPanel.Children.Add(newSpeakerButton);
+            topPanel.Children.Add(deleteSpeakerButton);
+            
+            // Text content (in its own row for better readability)
             var textBlock = new TextBlock 
             { 
                 Text = segment.Text,
                 TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 10, 0)
+                Margin = new Thickness(0, 5, 0, 0),
+                FontSize = 13,
+                LineHeight = 18
             };
             
-            segmentPanel.Children.Add(timestampText);
-            segmentPanel.Children.Add(speakerButton);
-            segmentPanel.Children.Add(sourceText);
+            // Add both rows to the segment panel
+            segmentPanel.Children.Add(topPanel);
             segmentPanel.Children.Add(textBlock);
             
-            _transcriptionPanel.Children.Add(segmentPanel);
+            // Add segment panel to border and border to main panel
+            segmentBorder.Child = segmentPanel;
+            _transcriptionPanel.Children.Add(segmentBorder);
         }
         
         // Auto-scroll to bottom
@@ -1157,6 +1850,10 @@ public partial class App : Application
     
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        // Save speaker settings before closing
+        SaveSpeakerSettings();
+        Console.WriteLine("Saved speaker settings on application exit");
+        
         // Clean up resources
         _volumeTimer?.Stop();
         _transcriptionTimer?.Stop();
@@ -1172,5 +1869,137 @@ public partial class App : Application
     {
         MessageBox.Show($"An unhandled exception occurred: {e.Exception.Message}", "Oreja Error", MessageBoxButton.OK, MessageBoxImage.Error);
         e.Handled = true;
+    }
+
+    private void LoadSpeakerSettings()
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(_settingsFilePath) && File.Exists(_settingsFilePath))
+            {
+                Console.WriteLine($"Loading speaker settings from: {_settingsFilePath}");
+                var json = File.ReadAllText(_settingsFilePath);
+                _speakerSettings = JsonSerializer.Deserialize<SpeakerSettings>(json) ?? new SpeakerSettings();
+                
+                // Update current state from loaded settings
+                if (_speakerSettings.AvailableSpeakers.Count > 0)
+                {
+                    _availableSpeakers = _speakerSettings.AvailableSpeakers.ToList();
+                }
+                else
+                {
+                    // If no speakers saved, use new defaults (no preset speakers)
+                    _availableSpeakers = new List<string> { "Unknown" };
+                }
+                
+                _nextSpeakerNumber = _speakerSettings.NextSpeakerNumber;
+                _speakerNames = new Dictionary<string, string>(_speakerSettings.SpeakerNameMappings);
+                
+                Console.WriteLine($"Loaded settings: {_availableSpeakers.Count} speakers, next number: {_nextSpeakerNumber}");
+            }
+            else
+            {
+                Console.WriteLine("No existing speaker settings found, using defaults");
+                // Initialize with new defaults (no preset speakers)
+                _availableSpeakers = new List<string> { "Unknown" };
+                _nextSpeakerNumber = 1;
+                _speakerNames = new Dictionary<string, string>();
+                
+                // Save initial settings
+                SaveSpeakerSettings();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading speaker settings: {ex.Message}");
+            // Fallback to new defaults
+            _availableSpeakers = new List<string> { "Unknown" };
+            _nextSpeakerNumber = 1;
+            _speakerNames = new Dictionary<string, string>();
+        }
+    }
+
+    private void SaveSpeakerSettings()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settingsFilePath))
+            {
+                Console.WriteLine("Settings file path not initialized, skipping save");
+                return;
+            }
+            
+            // Update settings object with current state
+            _speakerSettings.AvailableSpeakers = _availableSpeakers.ToList();
+            _speakerSettings.NextSpeakerNumber = _nextSpeakerNumber;
+            _speakerSettings.SpeakerNameMappings = new Dictionary<string, string>(_speakerNames);
+            
+            var options = new JsonSerializerOptions 
+            { 
+                WriteIndented = true // Make JSON readable
+            };
+            var json = JsonSerializer.Serialize(_speakerSettings, options);
+            File.WriteAllText(_settingsFilePath, json);
+            
+            Console.WriteLine($"Saved speaker settings to: {_settingsFilePath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error saving speaker settings: {ex.Message}");
+        }
+    }
+
+    private void UpdateSpeakerSettings(string oldSpeaker, string newSpeaker)
+    {
+        if (_speakerNames.ContainsKey(oldSpeaker))
+        {
+            _speakerNames[oldSpeaker] = newSpeaker;
+            SaveSpeakerSettings();
+        }
+    }
+
+    private void DeleteSpeaker(ComboBox comboBox, int segmentId)
+    {
+        var selectedSpeaker = comboBox.SelectedItem as string;
+        if (string.IsNullOrEmpty(selectedSpeaker))
+        {
+            MessageBox.Show("No speaker selected to delete.", "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        if (selectedSpeaker == "Unknown")
+        {
+            MessageBox.Show("Cannot delete the 'Unknown' speaker.", "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        if (!_availableSpeakers.Contains(selectedSpeaker))
+        {
+            MessageBox.Show("Selected speaker not found in the list.", "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        var result = MessageBox.Show($"Are you sure you want to delete '{selectedSpeaker}' from the speaker list?\n\nThis will affect all segments assigned to this speaker.", 
+            "Delete Speaker", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            
+        if (result == MessageBoxResult.Yes)
+        {
+            _availableSpeakers.Remove(selectedSpeaker);
+            
+            // Update all segments that used this speaker to "Unknown"
+            foreach (var segment in _transcriptionHistory.Where(s => s.Speaker == selectedSpeaker))
+            {
+                segment.Speaker = "Unknown";
+            }
+            
+            // Update current ComboBox to "Unknown"
+            UpdateSegmentSpeaker(segmentId, "Unknown");
+            
+            // Refresh all dropdowns and save settings
+            RefreshAllSpeakerDropdowns();
+            SaveSpeakerSettings();
+            
+            Console.WriteLine($"Deleted speaker: {selectedSpeaker}");
+        }
     }
 } 

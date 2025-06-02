@@ -34,6 +34,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private string _newSpeakerName = string.Empty;
     private float _microphoneSensitivity = 1.0f;
     private AudioDevice? _selectedSystemAudioDevice;
+    private bool _isMonitoring = false;
 
     public MainViewModel(IAudioService audioService, ISpeakerService speakerService, ILogger<MainViewModel> logger)
     {
@@ -49,6 +50,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         RenameSpeakerCommand = new RelayCommand(async () => await RenameSpeakerAsync(), () => !string.IsNullOrEmpty(CurrentSpeakerName) && !string.IsNullOrEmpty(NewSpeakerName));
         RefreshDevicesCommand = new RelayCommand(RefreshAudioDevices);
         TestAudioCommand = new RelayCommand(async () => await TestAudioAsync(), () => SelectedMicrophone != null && !IsRecording);
+        ToggleMonitoringCommand = new RelayCommand(async () => await ToggleMonitoringAsync(), () => SelectedMicrophone != null && !IsRecording);
 
         // Initialize collections
         AvailableMicrophones = new ObservableCollection<AudioDevice>();
@@ -73,18 +75,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             // Refresh audio devices first
             RefreshAudioDevices();
             
-            // Start monitoring if we have a microphone selected
-            if (SelectedMicrophone != null)
-            {
-                _logger.LogInformation("Starting audio monitoring with default microphone: {MicName}", SelectedMicrophone.Name);
-                await _audioService.StartMonitoringAsync(SelectedMicrophone.Index, EnableSystemCapture);
-                StatusMessage = "Audio monitoring started - ready to record";
-            }
-            else
-            {
-                StatusMessage = "No microphone selected - please choose a device";
-                _logger.LogWarning("No microphone available for monitoring");
-            }
+            StatusMessage = "Ready - select a microphone and enable monitoring to start";
+            _logger.LogInformation("MainViewModel initialized successfully");
         }
         catch (Exception ex)
         {
@@ -239,6 +231,21 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     public ObservableCollection<TranscriptionSegment> TranscriptionSegments { get; }
 
+    /// <summary>
+    /// Indicates whether audio monitoring is currently active.
+    /// </summary>
+    public bool IsMonitoring
+    {
+        get => _isMonitoring;
+        set
+        {
+            if (SetProperty(ref _isMonitoring, value))
+            {
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
     #endregion
 
     #region Commands
@@ -250,6 +257,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public ICommand RenameSpeakerCommand { get; }
     public ICommand RefreshDevicesCommand { get; }
     public ICommand TestAudioCommand { get; }
+    public ICommand ToggleMonitoringCommand { get; }
 
     #endregion
 
@@ -267,8 +275,14 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
 
             StatusMessage = "Starting audio capture...";
             
-            // Stop monitoring first
-            await _audioService.StopMonitoringAsync();
+            // If monitoring was not active, we'll auto-enable it for recording
+            bool wasMonitoring = IsMonitoring;
+            if (IsMonitoring)
+            {
+                // Stop monitoring first to avoid conflicts
+                await _audioService.StopMonitoringAsync();
+                IsMonitoring = false;
+            }
             
             // Get system audio device index
             int systemAudioIndex = SelectedSystemAudioDevice?.Index ?? -1;
@@ -277,7 +291,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             await _audioService.StartCaptureAsync(SelectedMicrophone.Index, EnableSystemCapture, systemAudioIndex, MicrophoneSensitivity);
             
             IsRecording = true;
-            StatusMessage = "Recording and transcribing...";
+            StatusMessage = "Recording and transcribing... (monitoring auto-enabled)";
             
             _logger.LogInformation("Recording started successfully with mic: {MicName}, system audio: {SystemName}, sensitivity: {Sensitivity}", 
                 SelectedMicrophone.Name, SelectedSystemAudioDevice?.Name ?? "Default", MicrophoneSensitivity);
@@ -299,7 +313,28 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             IsRecording = false;
             MicrophoneLevel = 0f;
             SystemLevel = 0f;
-            StatusMessage = "Recording stopped";
+            
+            // Restart monitoring if we have a microphone selected (user can disable it manually if desired)
+            if (SelectedMicrophone != null)
+            {
+                try
+                {
+                    await _audioService.StartMonitoringAsync(SelectedMicrophone.Index, EnableSystemCapture);
+                    IsMonitoring = true;
+                    StatusMessage = "Recording stopped - monitoring resumed";
+                }
+                catch (Exception monitorEx)
+                {
+                    _logger.LogWarning(monitorEx, "Could not restart monitoring after recording");
+                    StatusMessage = "Recording stopped - monitoring not resumed (use toggle to restart)";
+                    IsMonitoring = false;
+                }
+            }
+            else
+            {
+                StatusMessage = "Recording stopped";
+                IsMonitoring = false;
+            }
             
             _logger.LogInformation("Recording stopped successfully");
         }
@@ -505,6 +540,38 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             StatusMessage = $"Audio test failed: {ex.Message}";
             _logger.LogError(ex, "Error during audio test");
+        }
+    }
+
+    private async Task ToggleMonitoringAsync()
+    {
+        try
+        {
+            if (SelectedMicrophone == null)
+            {
+                StatusMessage = "Please select a microphone device first";
+                return;
+            }
+
+            if (IsMonitoring)
+            {
+                await _audioService.StopMonitoringAsync();
+                IsMonitoring = false;
+                StatusMessage = "Audio monitoring stopped";
+            }
+            else
+            {
+                await _audioService.StartMonitoringAsync(SelectedMicrophone.Index, EnableSystemCapture);
+                IsMonitoring = true;
+                StatusMessage = "Audio monitoring started - ready to record";
+            }
+
+            _logger.LogInformation("Audio monitoring toggled to: {IsMonitoring}", IsMonitoring);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Error toggling monitoring: {ex.Message}";
+            _logger.LogError(ex, "Error toggling monitoring");
         }
     }
 
