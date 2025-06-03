@@ -12,7 +12,7 @@ import threading
 import requests
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import webbrowser
 
 class OrejaLauncher:
@@ -72,6 +72,19 @@ class OrejaLauncher:
         frontend_frame = ttk.LabelFrame(main_frame, text="Frontend Applications", padding="10")
         frontend_frame.pack(fill=tk.X, pady=(0, 20))
         
+        # Live Transcription (Primary Tool)
+        live_frame = ttk.Frame(frontend_frame)
+        live_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(live_frame, text="🎙️ Live Transcription", 
+                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(live_frame, text="Real-time audio capture and transcription", 
+                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+        
+        self.live_btn = ttk.Button(live_frame, text="Start Live Transcription", 
+                                  command=self.launch_live_transcription, state="disabled")
+        self.live_btn.pack(anchor=tk.W, pady=(5, 0))
+        
         # Speaker Analytics
         analytics_frame = ttk.Frame(frontend_frame)
         analytics_frame.pack(fill=tk.X, pady=(0, 10))
@@ -98,13 +111,26 @@ class OrejaLauncher:
                                     command=self.launch_editor, state="disabled")
         self.editor_btn.pack(anchor=tk.W, pady=(5, 0))
         
+        # File Transcription Tool
+        file_frame = ttk.Frame(frontend_frame)
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(file_frame, text="📁 File Transcription", 
+                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(file_frame, text="Transcribe individual audio files", 
+                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+        
+        self.file_btn = ttk.Button(file_frame, text="Launch File Transcriber", 
+                                  command=self.launch_file_transcriber, state="disabled")
+        self.file_btn.pack(anchor=tk.W, pady=(5, 0))
+        
         # C# Frontend (if available)
         csharp_frame = ttk.Frame(frontend_frame)
         csharp_frame.pack(fill=tk.X)
         
-        ttk.Label(csharp_frame, text="🖥️ Main Application (C#)", 
+        ttk.Label(csharp_frame, text="🖥️ Desktop Application", 
                  font=("Arial", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(csharp_frame, text="Full-featured desktop application", 
+        ttk.Label(csharp_frame, text="Alternative desktop interface", 
                  font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
         
         self.csharp_btn = ttk.Button(csharp_frame, text="Launch Desktop App", 
@@ -115,9 +141,15 @@ class OrejaLauncher:
         quick_frame = ttk.Frame(main_frame)
         quick_frame.pack(fill=tk.X, pady=(10, 0))
         
-        ttk.Button(quick_frame, text="⚡ Quick Start: Backend + Analytics", 
-                  command=self.quick_start, 
-                  style="Accent.TButton").pack(fill=tk.X)
+        quick_buttons = ttk.Frame(quick_frame)
+        quick_buttons.pack(fill=tk.X)
+        
+        ttk.Button(quick_buttons, text="⚡ Quick Start: Live Transcription", 
+                  command=self.quick_start_live, 
+                  style="Accent.TButton").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        ttk.Button(quick_buttons, text="📊 Quick Start: Analytics", 
+                  command=self.quick_start_analytics).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
         # Check initial state
         self.check_backend_status()
@@ -151,15 +183,19 @@ class OrejaLauncher:
     
     def enable_frontend_buttons(self):
         """Enable frontend buttons when backend is ready"""
+        self.live_btn.config(state="normal")
         self.analytics_btn.config(state="normal")
         self.editor_btn.config(state="normal")
+        self.file_btn.config(state="normal")
         if Path("publish/Oreja.exe").exists():
             self.csharp_btn.config(state="normal")
     
     def disable_frontend_buttons(self):
         """Disable frontend buttons when backend is not ready"""
+        self.live_btn.config(state="disabled")
         self.analytics_btn.config(state="disabled")
         self.editor_btn.config(state="disabled")
+        self.file_btn.config(state="disabled")
         self.csharp_btn.config(state="disabled")
     
     def start_backend(self):
@@ -254,6 +290,56 @@ class OrejaLauncher:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to launch analytics: {e}")
     
+    def launch_live_transcription(self):
+        """Launch live transcription (C# desktop app)"""
+        if not self.backend_ready:
+            messagebox.showerror("Error", "Backend must be running first!")
+            return
+        
+        csharp_exe = Path("publish/Oreja.exe")
+        if not csharp_exe.exists():
+            messagebox.showerror("Error", "Live transcription app not found! Build the C# application first.")
+            return
+        
+        try:
+            subprocess.Popen([str(csharp_exe)])
+            messagebox.showinfo("Live Transcription", 
+                               "Live transcription app launched!\n\n" +
+                               "Tips:\n" +
+                               "• Select your microphone\n" +
+                               "• Click 'Start' to begin real-time transcription\n" +
+                               "• View transcriptions with speaker identification")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch live transcription: {e}")
+    
+    def launch_file_transcriber(self):
+        """Launch file transcription tool"""
+        if not self.backend_ready:
+            messagebox.showerror("Error", "Backend must be running first!")
+            return
+        
+        # Create a simple file transcription dialog
+        file_path = tk.filedialog.askopenfilename(
+            title="Select Audio File to Transcribe",
+            filetypes=[
+                ("Audio Files", "*.mp3 *.wav *.m4a *.flac *.ogg"),
+                ("MP3 Files", "*.mp3"),
+                ("WAV Files", "*.wav"),
+                ("All Files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            try:
+                # Launch simple_batch.py with the selected file
+                subprocess.Popen([sys.executable, "simple_batch.py", file_path])
+                messagebox.showinfo("File Transcription", 
+                                   f"Transcribing: {Path(file_path).name}\n\n" +
+                                   "Check the console window for progress.\n" +
+                                   "Results will be saved to 'transcription_results' folder.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to start file transcription: {e}")
+    
     def launch_editor(self):
         """Launch transcription editor"""
         if not self.backend_ready:
@@ -288,8 +374,17 @@ class OrejaLauncher:
         else:
             messagebox.showwarning("Warning", "Backend must be running to view API docs!")
     
-    def quick_start(self):
-        """Quick start: Launch backend and analytics"""
+    def quick_start_live(self):
+        """Quick start: Launch live transcription"""
+        if not self.backend_ready:
+            self.start_backend()
+            # Wait a moment then launch live transcription
+            self.root.after(3000, lambda: self.launch_live_transcription() if self.backend_ready else None)
+        else:
+            self.launch_live_transcription()
+    
+    def quick_start_analytics(self):
+        """Quick start: Launch analytics"""
         if not self.backend_ready:
             self.start_backend()
             # Wait a moment then launch analytics
