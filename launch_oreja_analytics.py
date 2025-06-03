@@ -23,8 +23,8 @@ class OrejaLauncher:
         # Setup main window
         self.root = tk.Tk()
         self.root.title("🎙️ Oreja Launcher")
-        self.root.geometry("500x400")
-        self.root.resizable(False, False)
+        self.root.geometry("600x700")
+        self.root.resizable(True, True)
         
         # Style configuration
         style = ttk.Style()
@@ -34,7 +34,25 @@ class OrejaLauncher:
         
     def setup_ui(self):
         """Setup the launcher interface"""
-        main_frame = ttk.Frame(self.root, padding="20")
+        # Create main canvas with scrollbar
+        canvas = tk.Canvas(self.root)
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Main content frame
+        main_frame = ttk.Frame(scrollable_frame, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Title
