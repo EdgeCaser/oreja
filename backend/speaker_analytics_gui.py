@@ -26,8 +26,8 @@ class SpeakerAnalyticsDashboard:
         self.root.geometry("1400x900")
         self.root.configure(bg='#f0f0f0')
         
-        # Database path
-        self.db_path = Path("speaker_data/speaker_database.db")
+        # Database path - use JSON file that Oreja actually uses
+        self.db_path = Path("speaker_data/speaker_profiles.json")
         
         # Backend URL
         self.backend_url = "http://127.0.0.1:8000"
@@ -59,7 +59,10 @@ class SpeakerAnalyticsDashboard:
         # Tab 3: Learning Analytics
         self.setup_analytics_tab()
         
-        # Tab 4: Database Management
+        # Tab 4: Batch Processing
+        self.setup_batch_tab()
+        
+        # Tab 5: Database Management
         self.setup_management_tab()
         
         # Status bar
@@ -190,6 +193,168 @@ class SpeakerAnalyticsDashboard:
         self.analytics_canvas = FigureCanvasTkAgg(self.analytics_fig, analytics_charts)
         self.analytics_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
+    def setup_batch_tab(self):
+        """Setup the batch processing tab for recorded calls"""
+        batch_frame = ttk.Frame(self.notebook)
+        self.notebook.add(batch_frame, text="🎬 Batch Processing")
+        
+        # Title
+        title_frame = ttk.Frame(batch_frame)
+        title_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(title_frame, text="🎬 Batch Transcription of Recorded Calls", 
+                 font=('Arial', 16, 'bold')).pack(side=tk.LEFT)
+        
+        # Help button
+        ttk.Button(title_frame, text="❓ Help", 
+                  command=self.show_batch_help).pack(side=tk.RIGHT, padx=5)
+        
+        # Main content with paned window
+        main_paned = ttk.PanedWindow(batch_frame, orient=tk.VERTICAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Top section: File selection and settings
+        top_frame = ttk.LabelFrame(main_paned, text="File Selection & Settings", padding=10)
+        main_paned.add(top_frame, weight=1)
+        
+        # File selection section
+        file_section = ttk.LabelFrame(top_frame, text="Audio Files", padding=10)
+        file_section.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # File selection controls
+        file_controls = ttk.Frame(file_section)
+        file_controls.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(file_controls, text="📁 Add Files", 
+                  command=self.add_batch_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(file_controls, text="📂 Add Folder", 
+                  command=self.add_batch_folder).pack(side=tk.LEFT, padx=5)
+        ttk.Button(file_controls, text="🗑️ Clear All", 
+                  command=self.clear_batch_files).pack(side=tk.LEFT, padx=5)
+        
+        # File list
+        file_list_frame = ttk.Frame(file_section)
+        file_list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create treeview for file list
+        columns = ('size', 'duration', 'status')
+        self.batch_file_tree = ttk.Treeview(file_list_frame, columns=columns, 
+                                           show='tree headings', height=8)
+        
+        self.batch_file_tree.heading('#0', text='Audio File')
+        self.batch_file_tree.heading('size', text='Size')
+        self.batch_file_tree.heading('duration', text='Duration')
+        self.batch_file_tree.heading('status', text='Status')
+        
+        self.batch_file_tree.column('#0', width=300)
+        self.batch_file_tree.column('size', width=80)
+        self.batch_file_tree.column('duration', width=80)
+        self.batch_file_tree.column('status', width=100)
+        
+        # File list scrollbar
+        file_scroll = ttk.Scrollbar(file_list_frame, orient=tk.VERTICAL, 
+                                   command=self.batch_file_tree.yview)
+        self.batch_file_tree.configure(yscrollcommand=file_scroll.set)
+        
+        self.batch_file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        file_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Settings section
+        settings_section = ttk.LabelFrame(top_frame, text="Processing Settings", padding=10)
+        settings_section.pack(fill=tk.X, pady=(10, 0))
+        
+        settings_grid = ttk.Frame(settings_section)
+        settings_grid.pack(fill=tk.X)
+        
+        # Output directory
+        ttk.Label(settings_grid, text="Output Directory:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.batch_output_var = tk.StringVar(value="transcription_results")
+        output_entry = ttk.Entry(settings_grid, textvariable=self.batch_output_var, width=40)
+        output_entry.grid(row=0, column=1, padx=5, sticky=tk.W)
+        ttk.Button(settings_grid, text="Browse", 
+                  command=self.select_output_directory).grid(row=0, column=2, padx=5)
+        
+        # Improve speakers checkbox
+        self.improve_speakers_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(settings_grid, text="Use recordings to improve speaker models", 
+                       variable=self.improve_speakers_var).grid(row=1, column=0, columnspan=2, 
+                                                               sticky=tk.W, padx=5, pady=5)
+        
+        # Speaker name mapping
+        ttk.Label(settings_grid, text="Speaker Mapping:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        self.speaker_mapping_var = tk.StringVar()
+        mapping_entry = ttk.Entry(settings_grid, textvariable=self.speaker_mapping_var, width=40)
+        mapping_entry.grid(row=2, column=1, padx=5, sticky=tk.W)
+        ttk.Button(settings_grid, text="Browse", 
+                  command=self.select_speaker_mapping).grid(row=2, column=2, padx=5)
+        ttk.Button(settings_grid, text="Create", 
+                  command=self.create_speaker_mapping).grid(row=2, column=3, padx=5)
+        
+        # Processing controls
+        process_controls = ttk.Frame(settings_section)
+        process_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        self.batch_process_btn = ttk.Button(process_controls, text="🚀 Start Processing", 
+                                           command=self.start_batch_processing)
+        self.batch_process_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.batch_stop_btn = ttk.Button(process_controls, text="⏹️ Stop", 
+                                        command=self.stop_batch_processing, state=tk.DISABLED)
+        self.batch_stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Progress bar
+        self.batch_progress = ttk.Progressbar(process_controls, mode='determinate')
+        self.batch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        
+        # Progress label
+        self.batch_progress_label = ttk.Label(process_controls, text="Ready")
+        self.batch_progress_label.pack(side=tk.RIGHT, padx=5)
+        
+        # Bottom section: Results and log
+        bottom_frame = ttk.LabelFrame(main_paned, text="Processing Results", padding=10)
+        main_paned.add(bottom_frame, weight=2)
+        
+        # Results notebook
+        results_notebook = ttk.Notebook(bottom_frame)
+        results_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Results tab
+        results_tab = ttk.Frame(results_notebook)
+        results_notebook.add(results_tab, text="📊 Results")
+        
+        # Results tree
+        results_columns = ('file', 'status', 'speakers', 'segments', 'confidence', 'processing_time')
+        self.batch_results_tree = ttk.Treeview(results_tab, columns=results_columns, 
+                                              show='headings', height=10)
+        
+        for col in results_columns:
+            self.batch_results_tree.heading(col, text=col.replace('_', ' ').title())
+            self.batch_results_tree.column(col, width=120)
+        
+        # Results scrollbar
+        results_scroll = ttk.Scrollbar(results_tab, orient=tk.VERTICAL, 
+                                      command=self.batch_results_tree.yview)
+        self.batch_results_tree.configure(yscrollcommand=results_scroll.set)
+        
+        self.batch_results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        results_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Log tab
+        log_tab = ttk.Frame(results_notebook)
+        results_notebook.add(log_tab, text="📝 Processing Log")
+        
+        self.batch_log = tk.Text(log_tab, height=10, font=('Consolas', 9))
+        log_scroll_v = ttk.Scrollbar(log_tab, orient=tk.VERTICAL, command=self.batch_log.yview)
+        self.batch_log.configure(yscrollcommand=log_scroll_v.set)
+        
+        self.batch_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll_v.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Initialize batch processing variables
+        self.batch_files = []
+        self.batch_processor = None
+        self.processing_thread = None
+        
     def setup_management_tab(self):
         """Setup the database management tab"""
         mgmt_frame = ttk.Frame(self.notebook)
@@ -285,38 +450,16 @@ class SpeakerAnalyticsDashboard:
             return
         
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            with open(self.db_path, 'r', encoding='utf-8') as f:
+                self.speaker_data = json.load(f)
             
-            # Load speaker profiles
-            cursor = conn.execute("""
-                SELECT speaker_id, name, created_date, last_seen, 
-                       session_count, total_audio_seconds, 
-                       embedding_count, average_confidence
-                FROM speaker_profiles
-            """)
-            
-            self.speaker_data = {}
-            for row in cursor.fetchall():
-                speaker_id, name, created_date, last_seen, session_count, \
-                total_audio_seconds, embedding_count, avg_confidence = row
-                
-                self.speaker_data[speaker_id] = {
-                    'id': speaker_id,
-                    'name': name,
-                    'created_date': created_date,
-                    'last_seen': last_seen,
-                    'session_count': session_count,
-                    'total_audio_seconds': total_audio_seconds,
-                    'embedding_count': embedding_count,
-                    'average_confidence': avg_confidence,
-                    'type': self.get_speaker_type(speaker_id)
-                }
+            # Add type field to each speaker since it's not in the JSON
+            for speaker_id, data in self.speaker_data.items():
+                data['type'] = self.get_speaker_type(speaker_id)
             
             # Load embeddings for selected speaker if any
             if self.selected_speaker and self.selected_speaker in self.speaker_data:
                 self.load_speaker_embeddings(self.selected_speaker)
-            
-            conn.close()
             
         except Exception as e:
             print(f"Error loading speaker data: {e}")
@@ -325,26 +468,13 @@ class SpeakerAnalyticsDashboard:
     def load_speaker_embeddings(self, speaker_id):
         """Load embedding history for a specific speaker"""
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            with open(self.db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
-            cursor = conn.execute("""
-                SELECT timestamp, confidence, audio_length
-                FROM speaker_embeddings
-                WHERE speaker_id = ?
-                ORDER BY timestamp
-            """, (speaker_id,))
-            
-            embeddings = []
-            for row in cursor.fetchall():
-                timestamp, confidence, audio_length = row
-                embeddings.append({
-                    'timestamp': datetime.fromisoformat(timestamp),
-                    'confidence': confidence,
-                    'audio_length': audio_length
-                })
-            
-            self.speaker_data[speaker_id]['embeddings'] = embeddings
-            conn.close()
+            if speaker_id in data and 'embeddings' in data[speaker_id]:
+                self.speaker_data[speaker_id]['embeddings'] = data[speaker_id]['embeddings']
+            else:
+                self.speaker_data[speaker_id]['embeddings'] = []
             
         except Exception as e:
             print(f"Error loading embeddings for {speaker_id}: {e}")
@@ -519,7 +649,7 @@ Storage:
 {'='*60}
 
 Basic Information:
-├─ Speaker ID: {data['id']}
+├─ Speaker ID: {data['speaker_id']}
 ├─ Type: {data['type']}
 ├─ Created: {data['created_date']}
 └─ Last Seen: {data['last_seen']}
@@ -909,7 +1039,7 @@ SPEAKER BREAKDOWN
                                      reverse=True):
             report += f"""
 Speaker: {data['name']}
-├─ ID: {speaker_id}
+├─ ID: {data['speaker_id']}
 ├─ Type: {data['type']}
 ├─ Samples: {data['embedding_count']}
 ├─ Confidence: {data['average_confidence']:.3f}
@@ -937,6 +1067,423 @@ Speaker: {data['name']}
             self.root.mainloop()
         except KeyboardInterrupt:
             print("\nApplication closed by user")
+
+    def show_batch_help(self):
+        """Show help for batch processing"""
+        help_text = """
+🎬 Batch Processing Help
+
+This feature allows you to transcribe recorded calls using your existing speaker embeddings:
+
+📁 Adding Files:
+• Use "Add Files" to select individual audio files
+• Use "Add Folder" to add all audio files from a directory  
+• Supported formats: WAV, MP3, FLAC, M4A, OGG
+
+⚙️ Settings:
+• Output Directory: Where results will be saved
+• Improve Speaker Models: Use recordings to enhance recognition
+• Speaker Mapping: JSON file to map auto-detected speakers to known names
+
+🚀 Processing:
+• The system will:
+  1. Transcribe each recording using Whisper
+  2. Identify speakers using your existing embeddings
+  3. Enhance speaker identification accuracy
+  4. Optionally improve speaker models with high-confidence segments
+
+📊 Results:
+• View processing results in the Results tab
+• Check detailed logs in the Processing Log tab
+• Find output files in your specified directory
+
+💡 Tips:
+• For best results, ensure your speaker embeddings are well-trained
+• Use speaker mapping to assign meaningful names to speakers
+• Enable "Improve Speaker Models" to enhance future recognition
+        """
+        
+        help_window = tk.Toplevel(self.root)
+        help_window.title("Batch Processing Help")
+        help_window.geometry("600x500")
+        
+        help_text_widget = tk.Text(help_window, wrap=tk.WORD, padx=10, pady=10)
+        help_text_widget.pack(fill=tk.BOTH, expand=True)
+        help_text_widget.insert(tk.END, help_text)
+        help_text_widget.config(state=tk.DISABLED)
+        
+        ttk.Button(help_window, text="Close", 
+                  command=help_window.destroy).pack(pady=10)
+    
+    def add_batch_files(self):
+        """Add individual audio files to batch"""
+        filetypes = [
+            ("Audio Files", "*.wav *.mp3 *.flac *.m4a *.ogg"),
+            ("WAV Files", "*.wav"),
+            ("MP3 Files", "*.mp3"),
+            ("FLAC Files", "*.flac"),
+            ("M4A Files", "*.m4a"),
+            ("OGG Files", "*.ogg"),
+            ("All Files", "*.*")
+        ]
+        
+        files = filedialog.askopenfilenames(
+            title="Select Audio Files",
+            filetypes=filetypes
+        )
+        
+        for file_path in files:
+            self.add_file_to_batch(Path(file_path))
+    
+    def add_batch_folder(self):
+        """Add all audio files from a folder"""
+        folder = filedialog.askdirectory(title="Select Folder with Audio Files")
+        if folder:
+            folder_path = Path(folder)
+            extensions = ['.wav', '.mp3', '.flac', '.m4a', '.ogg']
+            
+            audio_files = []
+            for ext in extensions:
+                audio_files.extend(folder_path.glob(f"*{ext}"))
+                audio_files.extend(folder_path.glob(f"*{ext.upper()}"))
+            
+            for file_path in audio_files:
+                self.add_file_to_batch(file_path)
+            
+            self.log_batch(f"Added {len(audio_files)} files from {folder}")
+    
+    def add_file_to_batch(self, file_path: Path):
+        """Add a single file to the batch processing list"""
+        if file_path in self.batch_files:
+            return  # Already added
+        
+        try:
+            # Get file info
+            file_size = file_path.stat().st_size
+            size_str = self.format_file_size(file_size)
+            
+            # Try to get duration (this is basic, could be enhanced)
+            duration_str = "Unknown"
+            try:
+                import torchaudio
+                info = torchaudio.info(str(file_path))
+                duration = info.num_frames / info.sample_rate
+                duration_str = f"{duration:.1f}s"
+            except:
+                pass
+            
+            # Add to list and tree
+            self.batch_files.append(file_path)
+            self.batch_file_tree.insert('', tk.END, 
+                                       text=file_path.name,
+                                       values=(size_str, duration_str, "Pending"))
+            
+            self.log_batch(f"Added file: {file_path.name}")
+            
+        except Exception as e:
+            self.log_batch(f"Error adding {file_path.name}: {e}")
+    
+    def clear_batch_files(self):
+        """Clear all files from batch processing list"""
+        self.batch_files.clear()
+        for item in self.batch_file_tree.get_children():
+            self.batch_file_tree.delete(item)
+        self.log_batch("Cleared all files from batch")
+    
+    def select_output_directory(self):
+        """Select output directory for batch results"""
+        directory = filedialog.askdirectory(title="Select Output Directory")
+        if directory:
+            self.batch_output_var.set(directory)
+    
+    def select_speaker_mapping(self):
+        """Select speaker mapping JSON file"""
+        file_path = filedialog.askopenfilename(
+            title="Select Speaker Mapping File",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if file_path:
+            self.speaker_mapping_var.set(file_path)
+    
+    def create_speaker_mapping(self):
+        """Create a new speaker mapping file"""
+        mapping_window = tk.Toplevel(self.root)
+        mapping_window.title("Create Speaker Mapping")
+        mapping_window.geometry("500x400")
+        
+        ttk.Label(mapping_window, text="Speaker Name Mapping", 
+                 font=('Arial', 14, 'bold')).pack(pady=10)
+        
+        ttk.Label(mapping_window, text="Map auto-detected speaker IDs to meaningful names:").pack(pady=5)
+        
+        # Mapping entries frame
+        mapping_frame = ttk.Frame(mapping_window)
+        mapping_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Headers
+        ttk.Label(mapping_frame, text="Auto-detected ID", font=('Arial', 10, 'bold')).grid(row=0, column=0, padx=5, pady=5)
+        ttk.Label(mapping_frame, text="Friendly Name", font=('Arial', 10, 'bold')).grid(row=0, column=1, padx=5, pady=5)
+        
+        # Add some example rows
+        self.mapping_entries = []
+        for i in range(10):
+            id_entry = ttk.Entry(mapping_frame, width=25)
+            id_entry.grid(row=i+1, column=0, padx=5, pady=2)
+            
+            name_entry = ttk.Entry(mapping_frame, width=25)
+            name_entry.grid(row=i+1, column=1, padx=5, pady=2)
+            
+            self.mapping_entries.append((id_entry, name_entry))
+        
+        # Buttons
+        button_frame = ttk.Frame(mapping_window)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text="Save Mapping", 
+                  command=lambda: self.save_speaker_mapping(mapping_window)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", 
+                  command=mapping_window.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def save_speaker_mapping(self, window):
+        """Save the speaker mapping to a JSON file"""
+        mapping = {}
+        for id_entry, name_entry in self.mapping_entries:
+            speaker_id = id_entry.get().strip()
+            speaker_name = name_entry.get().strip()
+            if speaker_id and speaker_name:
+                mapping[speaker_id] = speaker_name
+        
+        if not mapping:
+            messagebox.showwarning("Warning", "No mappings entered!")
+            return
+        
+        file_path = filedialog.asksaveasfilename(
+            title="Save Speaker Mapping",
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(mapping, f, indent=2, ensure_ascii=False)
+                
+                self.speaker_mapping_var.set(file_path)
+                self.log_batch(f"Saved speaker mapping to {file_path}")
+                messagebox.showinfo("Success", f"Speaker mapping saved to {file_path}")
+                window.destroy()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save mapping: {e}")
+    
+    def start_batch_processing(self):
+        """Start batch processing of audio files"""
+        if not self.batch_files:
+            messagebox.showwarning("Warning", "No audio files selected!")
+            return
+        
+        # Prepare processing parameters
+        output_dir = Path(self.batch_output_var.get())
+        improve_speakers = self.improve_speakers_var.get()
+        
+        # Load speaker mapping if provided
+        speaker_mapping = None
+        mapping_file = self.speaker_mapping_var.get()
+        if mapping_file and Path(mapping_file).exists():
+            try:
+                with open(mapping_file, 'r', encoding='utf-8') as f:
+                    speaker_mapping = json.load(f)
+                self.log_batch(f"Loaded speaker mapping with {len(speaker_mapping)} entries")
+            except Exception as e:
+                self.log_batch(f"Error loading speaker mapping: {e}")
+        
+        # Initialize processor
+        try:
+            from batch_transcription import BatchTranscriptionProcessor
+            self.batch_processor = BatchTranscriptionProcessor(self.backend_url)
+            
+            # Update UI
+            self.batch_process_btn.config(state=tk.DISABLED)
+            self.batch_stop_btn.config(state=tk.NORMAL)
+            self.batch_progress['value'] = 0
+            self.batch_progress['maximum'] = len(self.batch_files)
+            self.batch_progress_label.config(text="Starting...")
+            
+            # Clear previous results
+            for item in self.batch_results_tree.get_children():
+                self.batch_results_tree.delete(item)
+            
+            # Start processing in separate thread
+            self.processing_thread = threading.Thread(
+                target=self.run_batch_processing,
+                args=(output_dir, improve_speakers, speaker_mapping),
+                daemon=True
+            )
+            self.processing_thread.start()
+            
+            self.log_batch(f"Started batch processing of {len(self.batch_files)} files")
+            
+        except Exception as e:
+            self.log_batch(f"Error starting batch processing: {e}")
+            messagebox.showerror("Error", f"Failed to start processing: {e}")
+            self.reset_batch_ui()
+    
+    def run_batch_processing(self, output_dir: Path, improve_speakers: bool, speaker_mapping: dict):
+        """Run batch processing in background thread"""
+        try:
+            for i, audio_file in enumerate(self.batch_files):
+                if not hasattr(self, 'batch_processor') or self.batch_processor is None:
+                    break  # Processing was stopped
+                
+                # Update progress
+                self.root.after(0, lambda i=i, f=audio_file: self.update_batch_progress(i, f))
+                
+                # Process file
+                try:
+                    result = self.batch_processor.process_recording(
+                        audio_file, output_dir, improve_speakers, speaker_mapping
+                    )
+                    
+                    # Update results in UI thread
+                    self.root.after(0, lambda r=result, f=audio_file: self.add_batch_result(r, f))
+                    
+                except Exception as e:
+                    error_msg = f"Error processing {audio_file.name}: {e}"
+                    self.root.after(0, lambda msg=error_msg: self.log_batch(msg))
+            
+            # Processing complete
+            self.root.after(0, self.finish_batch_processing)
+            
+        except Exception as e:
+            error_msg = f"Batch processing failed: {e}"
+            self.root.after(0, lambda: self.log_batch(error_msg))
+            self.root.after(0, self.reset_batch_ui)
+    
+    def update_batch_progress(self, index: int, current_file: Path):
+        """Update progress bar and label"""
+        self.batch_progress['value'] = index + 1
+        self.batch_progress_label.config(text=f"Processing {current_file.name} ({index + 1}/{len(self.batch_files)})")
+        
+        # Update file status in tree
+        for item in self.batch_file_tree.get_children():
+            if self.batch_file_tree.item(item)['text'] == current_file.name:
+                values = list(self.batch_file_tree.item(item)['values'])
+                values[2] = "Processing..."  # Status column
+                self.batch_file_tree.item(item, values=values)
+                break
+    
+    def add_batch_result(self, result: dict, audio_file: Path):
+        """Add processing result to results tree"""
+        try:
+            if 'error' in result:
+                status = "Error"
+                speakers = "-"
+                segments = "-"
+                confidence = "-"
+                processing_time = "-"
+                self.log_batch(f"Error in {audio_file.name}: {result['error']}")
+            else:
+                status = "Success"
+                enhancement_info = result.get('enhancement_info', {})
+                segments_info = result.get('segments', [])
+                
+                # Get unique speakers
+                unique_speakers = set()
+                total_confidence = 0
+                confident_segments = 0
+                
+                for segment in segments_info:
+                    speaker = segment.get('speaker', 'Unknown')
+                    if speaker != 'Unknown':
+                        unique_speakers.add(speaker)
+                    
+                    conf = segment.get('speaker_confidence', 0)
+                    if conf > 0:
+                        total_confidence += conf
+                        confident_segments += 1
+                
+                speakers = str(len(unique_speakers))
+                segments = str(len(segments_info))
+                
+                if confident_segments > 0:
+                    avg_confidence = total_confidence / confident_segments
+                    confidence = f"{avg_confidence:.2f}"
+                else:
+                    confidence = "N/A"
+                
+                processing_time = result.get('processing_time', 'N/A')
+                
+                self.log_batch(f"Successfully processed {audio_file.name}: {speakers} speakers, {segments} segments")
+            
+            # Add to results tree
+            self.batch_results_tree.insert('', tk.END, values=(
+                audio_file.name, status, speakers, segments, confidence, processing_time
+            ))
+            
+            # Update file status in files tree
+            for item in self.batch_file_tree.get_children():
+                if self.batch_file_tree.item(item)['text'] == audio_file.name:
+                    values = list(self.batch_file_tree.item(item)['values'])
+                    values[2] = status
+                    self.batch_file_tree.item(item, values=values)
+                    break
+            
+        except Exception as e:
+            self.log_batch(f"Error updating results for {audio_file.name}: {e}")
+    
+    def finish_batch_processing(self):
+        """Finish batch processing and update UI"""
+        self.batch_progress_label.config(text="Complete!")
+        self.log_batch("Batch processing completed")
+        
+        # Show completion message
+        successful = len([item for item in self.batch_results_tree.get_children() 
+                         if self.batch_results_tree.item(item)['values'][1] == "Success"])
+        total = len(self.batch_files)
+        
+        completion_msg = f"Batch processing complete!\nProcessed {successful}/{total} files successfully."
+        if successful < total:
+            completion_msg += f"\n{total - successful} files failed to process."
+        
+        messagebox.showinfo("Batch Processing Complete", completion_msg)
+        
+        self.reset_batch_ui()
+    
+    def stop_batch_processing(self):
+        """Stop batch processing"""
+        if hasattr(self, 'batch_processor'):
+            self.batch_processor = None
+        
+        self.log_batch("Batch processing stopped by user")
+        self.reset_batch_ui()
+    
+    def reset_batch_ui(self):
+        """Reset batch processing UI to initial state"""
+        self.batch_process_btn.config(state=tk.NORMAL)
+        self.batch_stop_btn.config(state=tk.DISABLED)
+        self.batch_progress['value'] = 0
+        self.batch_progress_label.config(text="Ready")
+    
+    def log_batch(self, message: str):
+        """Add message to batch processing log"""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        log_entry = f"[{timestamp}] {message}\n"
+        self.batch_log.insert(tk.END, log_entry)
+        self.batch_log.see(tk.END)
+        
+        # Also log to console
+        print(f"BATCH: {message}")
+    
+    def format_file_size(self, size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024**2:
+            return f"{size_bytes/1024:.1f} KB"
+        elif size_bytes < 1024**3:
+            return f"{size_bytes/1024**2:.1f} MB"
+        else:
+            return f"{size_bytes/1024**3:.1f} GB"
 
 def main():
     """Main entry point"""
