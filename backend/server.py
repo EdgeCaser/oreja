@@ -27,6 +27,17 @@ import uvicorn
 # Import our offline speaker embedding manager
 from speaker_embeddings import OfflineSpeakerEmbeddingManager
 
+# Import enhanced transcription features
+try:
+    from enhanced_server_integration import EnhancedTranscriptionService
+    ENHANCED_FEATURES_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("Enhanced transcription features available")
+except ImportError:
+    ENHANCED_FEATURES_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("Enhanced transcription features not available - install with: pip install -r requirements_enhanced.txt")
+
 # Load environment variables from .env file
 try:
     load_dotenv()
@@ -55,9 +66,9 @@ DIARIZATION_MODEL = "pyannote/speaker-diarization-3.0"
 EMBEDDING_MODEL = "pyannote/embedding"
 
 app = FastAPI(
-    title="Oreja Audio Processing API",
-    description="Local audio transcription and speaker diarization service",
-    version="1.0.0"
+    title="Oreja Enhanced Audio Processing API",
+    description="Local audio transcription with speaker diarization, sentiment analysis, and audio features",
+    version="2.0.0"
 )
 
 # Enable CORS for local development
@@ -75,11 +86,12 @@ whisper_model = None
 diarization_pipeline = None
 embedding_model = None
 speaker_embedding_manager = None
+enhanced_service = None
 
 
 def initialize_models():
     """Initialize all models and set up the device."""
-    global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager
+    global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager, enhanced_service
     
     # Set up device (GPU if available, otherwise CPU)
     if torch.cuda.is_available():
@@ -141,6 +153,23 @@ def initialize_models():
         logger.warning("Continuing without offline speaker embeddings")
         speaker_embedding_manager = None
     
+    # Initialize enhanced transcription features
+    if ENHANCED_FEATURES_AVAILABLE:
+        try:
+            logger.info("Initializing enhanced transcription features...")
+            enhanced_service = EnhancedTranscriptionService(
+                sentiment_model="vader",  # Fast and reliable for production
+                enable_audio_features=True
+            )
+            logger.info("✅ Enhanced transcription features initialized successfully")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize enhanced features: {e}")
+            logger.warning("Continuing with basic transcription only")
+            enhanced_service = None
+    else:
+        logger.info("Enhanced features not available - basic transcription only")
+        enhanced_service = None
+    
     logger.info("Model loading completed")
 
 
@@ -174,8 +203,14 @@ async def health_check():
             "whisper": whisper_model is not None,
             "diarization": diarization_pipeline is not None,
             "embedding": embedding_model is not None,
-            "speaker_embeddings": speaker_embedding_manager is not None
+            "speaker_embeddings": speaker_embedding_manager is not None,
+            "enhanced_features": enhanced_service is not None
         },
+        "enhanced_capabilities": {
+            "sentiment_analysis": enhanced_service is not None,
+            "audio_features": enhanced_service is not None,
+            "conversation_analytics": enhanced_service is not None
+        } if enhanced_service else None,
         "memory_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else "N/A"
     }
 
@@ -504,13 +539,13 @@ async def update_speaker_name_mapping(
 @app.post("/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
     """
-    Transcribe and diarize audio file.
+    Transcribe and diarize audio file with enhanced sentiment analysis and audio features.
     
     Args:
         audio: Audio file (WAV format preferred)
         
     Returns:
-        Transcription result with speaker diarization
+        Enhanced transcription result with speaker diarization, sentiment analysis, and audio features
     """
     start_time = time.time()
     
@@ -591,7 +626,8 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
         
         processing_time = time.time() - start_time
         
-        result = {
+        # Create basic result
+        basic_result = {
             "segments": segments,
             "full_text": full_text,
             "processing_time": processing_time,
@@ -600,8 +636,28 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
             "sample_rate": sample_rate
         }
         
+        # 🚀 ENHANCE WITH SENTIMENT ANALYSIS AND AUDIO FEATURES
+        if enhanced_service:
+            try:
+                logger.info("Applying enhanced features (sentiment analysis & audio features)...")
+                enhanced_result = enhanced_service.enhance_transcription_result(
+                    basic_result, waveform, sample_rate
+                )
+                logger.info("✅ Enhanced features applied successfully")
+                
+                # Update processing time to include enhancement
+                enhanced_result["processing_time"] = time.time() - start_time
+                
+                return enhanced_result
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Enhanced features failed, returning basic result: {e}")
+                # Continue with basic result if enhancement fails
+        else:
+            logger.info("Enhanced features not available - returning basic transcription")
+        
         logger.info(f"Transcription completed in {processing_time:.2f}s for {duration:.2f}s audio")
-        return result
+        return basic_result
         
     except HTTPException:
         raise
