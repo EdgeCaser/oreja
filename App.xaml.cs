@@ -2808,21 +2808,29 @@ public partial class App : Application
             MessageBox.Show("No transcription data to save.", "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        
+
         var saveFileDialog = new Microsoft.Win32.SaveFileDialog
         {
-            Filter = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*",
-            DefaultExt = "txt",
-            FileName = $"Oreja_Transcription_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt"
+            Filter = "JSON Files (*.json)|*.json|Text Files (*.txt)|*.txt|All Files (*.*)|*.*",
+            DefaultExt = "json",
+            FileName = $"Oreja_Transcription_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.json"
         };
-        
+
         if (saveFileDialog.ShowDialog() == true)
         {
             try
             {
-                var content = GenerateTranscriptionReport();
-                File.WriteAllText(saveFileDialog.FileName, content);
-                
+                if (saveFileDialog.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    var jsonContent = GenerateJsonTranscription();
+                    File.WriteAllText(saveFileDialog.FileName, jsonContent);
+                }
+                else
+                {
+                    var content = GenerateTranscriptionReport();
+                    File.WriteAllText(saveFileDialog.FileName, content);
+                }
+
                 MessageBox.Show($"Transcription saved successfully to:\n{saveFileDialog.FileName}", 
                     "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
             }
@@ -2832,6 +2840,42 @@ public partial class App : Application
                     "Oreja Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
+    }
+
+    private string GenerateJsonTranscription()
+    {
+        var transcriptionData = new
+        {
+            metadata = new
+            {
+                version = "1.0",
+                created_at = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                total_segments = _transcriptionHistory.Count,
+                privacy_mode = _privacyModeEnabled,
+                source = "Oreja Live Transcription"
+            },
+            segments = _transcriptionHistory.Select(segment => new
+            {
+                id = segment.SegmentId,
+                speaker = GetDisplaySpeakerName(segment.Speaker),
+                text = _privacyModeEnabled ? "[REDACTED]" : segment.Text,
+                start = segment.StartTime,
+                end = segment.EndTime,
+                source = segment.Source,
+                timestamp = segment.Timestamp.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                emotional_tone = segment.EmotionalTone,
+                sentiment_confidence = segment.SentimentConfidence
+            }).ToArray(),
+            speakers = _availableSpeakers.Where(s => s != "Unknown").ToArray(),
+            full_text = _privacyModeEnabled ? "[REDACTED FOR PRIVACY]" : 
+                string.Join(" ", _transcriptionHistory.Select(s => $"{GetDisplaySpeakerName(s.Speaker)}: {s.Text}"))
+        };
+
+        return JsonSerializer.Serialize(transcriptionData, new JsonSerializerOptions 
+        { 
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        });
     }
     
     private string GenerateTranscriptionReport()

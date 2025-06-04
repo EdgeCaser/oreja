@@ -95,27 +95,144 @@ class TranscriptionEditor:
         self.speaker_entries = {}
     
     def load_transcription(self, file_path):
-        """Load transcription from JSON file"""
+        """Load transcription from JSON or TXT file"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                self.transcription_data = json.load(f)
-            
             self.transcription_file = file_path
             self.file_label.config(text=f"File: {Path(file_path).name}")
             
-            # Extract segments and speaker names
-            self.segments = self.transcription_data.get('segments', [])
-            self.speaker_names = set()
-            
-            for segment in self.segments:
-                speaker = segment.get('speaker', 'Unknown')
-                self.speaker_names.add(speaker)
+            if file_path.endswith('.json'):
+                # Load JSON format (structured data)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.transcription_data = json.load(f)
+                
+                # Extract segments and speaker names from JSON
+                self.segments = self.transcription_data.get('segments', [])
+                self.speaker_names = set()
+                
+                for segment in self.segments:
+                    speaker = segment.get('speaker', 'Unknown')
+                    self.speaker_names.add(speaker)
+                    
+            else:
+                # Load TXT format (parse structured text)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                self.segments, self.speaker_names = self.parse_txt_transcription(content)
+                
+                # Create basic transcription data structure
+                self.transcription_data = {
+                    'metadata': {
+                        'source': 'Oreja TXT Import',
+                        'version': '1.0'
+                    },
+                    'segments': self.segments,
+                    'full_text': content
+                }
             
             self.setup_speaker_mapping()
             self.update_preview()
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transcription: {e}")
+    
+    def parse_txt_transcription(self, content):
+        """Parse TXT transcription content into segments"""
+        segments = []
+        speaker_names = set()
+        segment_id = 0
+        
+        lines = content.split('\n')
+        current_speaker = None
+        current_text = ""
+        current_time = 0
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Look for timestamp and speaker patterns: [MM:SS] Speaker: Text
+            import re
+            
+            # Pattern for: [MM:SS] [Source] Speaker: Text
+            full_pattern = r'\[(\d{2}:\d{2})\]\s*\[([^\]]+)\]\s*([^:]+):\s*(.+)'
+            match = re.match(full_pattern, line)
+            
+            if match:
+                time_str, source, speaker, text = match.groups()
+                minutes, seconds = map(int, time_str.split(':'))
+                start_time = minutes * 60 + seconds
+                
+                segments.append({
+                    'id': segment_id,
+                    'speaker': speaker.strip(),
+                    'text': text.strip(),
+                    'start': start_time,
+                    'end': start_time + 5,  # Estimate 5 second duration
+                    'source': source.strip()
+                })
+                speaker_names.add(speaker.strip())
+                segment_id += 1
+                continue
+            
+            # Pattern for: [MM:SS] Speaker: Text  
+            simple_pattern = r'\[(\d{2}:\d{2})\]\s*([^:]+):\s*(.+)'
+            match = re.match(simple_pattern, line)
+            
+            if match:
+                time_str, speaker, text = match.groups()
+                minutes, seconds = map(int, time_str.split(':'))
+                start_time = minutes * 60 + seconds
+                
+                segments.append({
+                    'id': segment_id,
+                    'speaker': speaker.strip(),
+                    'text': text.strip(),
+                    'start': start_time,
+                    'end': start_time + 5,  # Estimate 5 second duration
+                    'source': 'Unknown'
+                })
+                speaker_names.add(speaker.strip())
+                segment_id += 1
+                continue
+            
+            # Pattern for: Speaker: Text (no timestamp)
+            speaker_pattern = r'^([^:]+):\s*(.+)'
+            match = re.match(speaker_pattern, line)
+            
+            if match:
+                speaker, text = match.groups()
+                segments.append({
+                    'id': segment_id,
+                    'speaker': speaker.strip(),
+                    'text': text.strip(),
+                    'start': current_time,
+                    'end': current_time + 5,
+                    'source': 'Unknown'
+                })
+                speaker_names.add(speaker.strip())
+                segment_id += 1
+                current_time += 5  # Increment time for next segment
+                continue
+            
+            # If no pattern matches, treat as continuation of previous speaker
+            if line and segments:
+                segments[-1]['text'] += ' ' + line
+        
+        # If no structured data found, create a single segment
+        if not segments:
+            segments.append({
+                'id': 0,
+                'speaker': 'Unknown',
+                'text': content,
+                'start': 0,
+                'end': len(content.split()) * 0.5,  # Rough estimate
+                'source': 'Unknown'
+            })
+            speaker_names.add('Unknown')
+        
+        return segments, speaker_names
     
     def setup_speaker_mapping(self):
         """Setup speaker name mapping interface"""
@@ -283,8 +400,8 @@ class TranscriptionEditor:
     def open_file(self):
         """Open a transcription file"""
         file_path = filedialog.askopenfilename(
-            title="Select Transcription JSON File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            title="Select Transcription File",
+            filetypes=[("JSON files", "*.json"), ("Text files", "*.txt"), ("All files", "*.*")]
         )
         
         if file_path:
