@@ -19,6 +19,9 @@ import requests
 from pathlib import Path
 import pandas as pd
 
+# Import enhanced transcription processor for conversation analysis
+from enhanced_transcription_processor import EnhancedTranscriptionProcessor
+
 class SpeakerAnalyticsDashboard:
     def __init__(self):
         self.root = tk.Tk()
@@ -40,6 +43,13 @@ class SpeakerAnalyticsDashboard:
         self.speaker_data = {}
         self.selected_speaker = None
         
+        # Initialize enhanced transcription processor
+        try:
+            self.enhanced_processor = EnhancedTranscriptionProcessor(sentiment_model="vader")
+        except Exception as e:
+            print(f"Warning: Could not initialize enhanced processor: {e}")
+            self.enhanced_processor = None
+        
         self.setup_ui()
         self.setup_auto_refresh()
         self.refresh_data()
@@ -59,10 +69,13 @@ class SpeakerAnalyticsDashboard:
         # Tab 3: Learning Analytics
         self.setup_analytics_tab()
         
-        # Tab 4: Batch Processing
+        # Tab 4: Conversation Analysis (NEW)
+        self.setup_conversation_analysis_tab()
+        
+        # Tab 5: Batch Processing
         self.setup_batch_tab()
         
-        # Tab 5: Database Management
+        # Tab 6: Database Management
         self.setup_management_tab()
         
         # Status bar
@@ -193,6 +206,593 @@ class SpeakerAnalyticsDashboard:
         self.analytics_canvas = FigureCanvasTkAgg(self.analytics_fig, analytics_charts)
         self.analytics_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
+    def setup_conversation_analysis_tab(self):
+        """Setup the conversation analysis tab with summarization and annotation features"""
+        conv_frame = ttk.Frame(self.notebook)
+        self.notebook.add(conv_frame, text="🗣️ Conversation Analysis")
+        
+        # Top section: File selection and controls
+        controls_frame = ttk.LabelFrame(conv_frame, text="Transcription Analysis", padding=10)
+        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # File selection
+        file_frame = ttk.Frame(controls_frame)
+        file_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(file_frame, text="Transcription File:").pack(side=tk.LEFT, padx=(0, 5))
+        self.conv_file_var = tk.StringVar()
+        file_entry = ttk.Entry(file_frame, textvariable=self.conv_file_var, width=60)
+        file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(file_frame, text="Browse", command=self.select_transcription_file).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(file_frame, text="Analyze", command=self.analyze_transcription).pack(side=tk.LEFT)
+        
+        # Privacy mode section
+        privacy_frame = ttk.Frame(controls_frame)
+        privacy_frame.pack(fill=tk.X, pady=5)
+        
+        # Privacy mode toggle with prominent styling
+        self.privacy_mode_var = tk.BooleanVar(value=False)
+        privacy_checkbox = ttk.Checkbutton(
+            privacy_frame, 
+            text="🔒 Privacy Mode - Only save summaries and analyses (transcription text will not be saved)", 
+            variable=self.privacy_mode_var,
+            command=self.on_privacy_mode_changed
+        )
+        privacy_checkbox.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Privacy status indicator
+        self.privacy_status_label = ttk.Label(privacy_frame, text="", foreground="green")
+        self.privacy_status_label.pack(side=tk.LEFT)
+        
+        # Analysis options
+        options_frame = ttk.Frame(controls_frame)
+        options_frame.pack(fill=tk.X, pady=5)
+        
+        # Summary options
+        summary_frame = ttk.LabelFrame(options_frame, text="Summary Options")
+        summary_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        self.summary_overall = tk.BooleanVar(value=True)
+        self.summary_speaker = tk.BooleanVar(value=True)
+        self.summary_time = tk.BooleanVar(value=True)
+        self.summary_keypoints = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(summary_frame, text="Overall Summary", variable=self.summary_overall).pack(anchor=tk.W)
+        ttk.Checkbutton(summary_frame, text="By Speaker", variable=self.summary_speaker).pack(anchor=tk.W)
+        ttk.Checkbutton(summary_frame, text="Time-based", variable=self.summary_time).pack(anchor=tk.W)
+        ttk.Checkbutton(summary_frame, text="Key Points", variable=self.summary_keypoints).pack(anchor=tk.W)
+        
+        # Annotation options
+        annotation_frame = ttk.LabelFrame(options_frame, text="Annotation Options")
+        annotation_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.ann_topics = tk.BooleanVar(value=True)
+        self.ann_actions = tk.BooleanVar(value=True)
+        self.ann_qa = tk.BooleanVar(value=True)
+        self.ann_decisions = tk.BooleanVar(value=True)
+        self.ann_emotions = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(annotation_frame, text="Topics", variable=self.ann_topics).pack(anchor=tk.W)
+        ttk.Checkbutton(annotation_frame, text="Action Items", variable=self.ann_actions).pack(anchor=tk.W)
+        ttk.Checkbutton(annotation_frame, text="Q&A Pairs", variable=self.ann_qa).pack(anchor=tk.W)
+        ttk.Checkbutton(annotation_frame, text="Decisions", variable=self.ann_decisions).pack(anchor=tk.W)
+        ttk.Checkbutton(annotation_frame, text="Emotional Moments", variable=self.ann_emotions).pack(anchor=tk.W)
+        
+        # Results display area with notebook
+        results_notebook = ttk.Notebook(conv_frame)
+        results_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Summary Results Tab
+        self.setup_summary_results_tab(results_notebook)
+        
+        # Annotation Results Tab
+        self.setup_annotation_results_tab(results_notebook)
+        
+        # Export Tab
+        self.setup_export_tab(results_notebook)
+    
+    def on_privacy_mode_changed(self):
+        """Handle privacy mode toggle"""
+        if self.privacy_mode_var.get():
+            self.privacy_status_label.config(text="🔒 Privacy Mode ACTIVE", foreground="red")
+            # Show warning about privacy mode
+            messagebox.showinfo(
+                "Privacy Mode Activated", 
+                "🔒 Privacy Mode is now ACTIVE\n\n" +
+                "• Transcription text will NOT be saved to files\n" +
+                "• Only summaries and analyses will be retained\n" +
+                "• Export options will be limited to analytics only\n" +
+                "• Original transcription data will be cleared from memory after processing\n\n" +
+                "This ensures maximum privacy protection for sensitive conversations."
+            )
+        else:
+            self.privacy_status_label.config(text="🔓 Standard Mode", foreground="green")
+    
+    def analyze_transcription(self):
+        """Analyze the selected transcription file"""
+        if not self.enhanced_processor:
+            messagebox.showerror("Error", "Enhanced transcription processor not available!")
+            return
+        
+        file_path = self.conv_file_var.get().strip()
+        if not file_path or not Path(file_path).exists():
+            messagebox.showerror("Error", "Please select a valid transcription file!")
+            return
+        
+        privacy_mode = self.privacy_mode_var.get()
+        
+        try:
+            # Load transcription file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                if file_path.endswith('.json'):
+                    transcription_data = json.load(f)
+                else:
+                    # Simple text file - create basic structure
+                    text_content = f.read()
+                    transcription_data = {
+                        "segments": [{"text": text_content, "speaker": "Unknown", "start": 0, "end": 0}],
+                        "full_text": text_content
+                    }
+            
+            # Get selected options
+            summary_types = []
+            if self.summary_overall.get():
+                summary_types.append("overall")
+            if self.summary_speaker.get():
+                summary_types.append("by_speaker")
+            if self.summary_time.get():
+                summary_types.append("by_time")
+            if self.summary_keypoints.get():
+                summary_types.append("key_points")
+            
+            annotation_types = []
+            if self.ann_topics.get():
+                annotation_types.append("topics")
+            if self.ann_actions.get():
+                annotation_types.append("action_items")
+            if self.ann_qa.get():
+                annotation_types.append("questions_answers")
+            if self.ann_decisions.get():
+                annotation_types.append("decisions")
+            if self.ann_emotions.get():
+                annotation_types.append("emotional_moments")
+            
+            # Show progress
+            status_msg = "Analyzing transcription (Privacy Mode)..." if privacy_mode else "Analyzing transcription..."
+            self.update_status(status_msg)
+            self.root.update()
+            
+            # Generate summaries
+            summaries = {}
+            if summary_types:
+                summaries = self.enhanced_processor.generate_conversation_summary(
+                    transcription_data, summary_types
+                )
+                self.display_summaries(summaries)
+            
+            # Generate annotations
+            annotations = {}
+            if annotation_types:
+                annotations = self.enhanced_processor.generate_conversation_annotations(
+                    transcription_data, annotation_types
+                )
+                self.display_annotations(annotations)
+            
+            # Store for export - handling privacy mode
+            if privacy_mode:
+                # In privacy mode, clear transcription text but keep metadata
+                privacy_safe_transcription = {
+                    "segments": [
+                        {
+                            "speaker": seg.get("speaker", "Unknown"),
+                            "start": seg.get("start", 0),
+                            "end": seg.get("end", 0),
+                            "text": "[REDACTED FOR PRIVACY]",
+                            # Keep any analysis results but remove original text
+                            **{k: v for k, v in seg.items() if k not in ["text", "full_text"]}
+                        }
+                        for seg in transcription_data.get("segments", [])
+                    ],
+                    "full_text": "[REDACTED FOR PRIVACY]",
+                    "privacy_mode": True,
+                    "analysis_timestamp": datetime.now().isoformat(),
+                    "original_file": Path(file_path).name
+                }
+                
+                self.current_analysis = {
+                    "summaries": summaries,
+                    "annotations": annotations,
+                    "transcription": privacy_safe_transcription,
+                    "privacy_mode": True
+                }
+                
+                # Clear original transcription data from memory for extra security
+                del transcription_data
+                
+                self.update_status("Analysis completed (Privacy Mode - transcription text cleared)")
+                messagebox.showinfo(
+                    "Analysis Complete (Privacy Mode)", 
+                    "✅ Analysis completed successfully!\n\n" +
+                    "🔒 Privacy Mode was active:\n" +
+                    "• Original transcription text has been cleared from memory\n" +
+                    "• Only summaries and analyses are retained\n" +
+                    "• Export options will be limited to privacy-safe content"
+                )
+            else:
+                self.current_analysis = {
+                    "summaries": summaries,
+                    "annotations": annotations,
+                    "transcription": transcription_data,
+                    "privacy_mode": False
+                }
+                
+                self.update_status("Analysis completed successfully!")
+                messagebox.showinfo("Success", "Transcription analysis completed!")
+            
+        except Exception as e:
+            error_msg = f"Error analyzing transcription: {str(e)}"
+            self.update_status(error_msg)
+            messagebox.showerror("Error", error_msg)
+    
+    def display_summaries(self, summaries):
+        """Display generated summaries in the UI"""
+        # Update export tab privacy indicator
+        if hasattr(self, 'current_analysis') and self.current_analysis.get('privacy_mode', False):
+            self.export_privacy_label.config(
+                text="🔒 PRIVACY MODE ACTIVE - Only summaries and analyses available for export", 
+                foreground="red"
+            )
+            # Update radio button text for privacy mode
+            self.json_radio.config(text="JSON (Analytics Only)")
+        else:
+            self.export_privacy_label.config(
+                text="🔓 Standard Mode - Full transcription available for export", 
+                foreground="green"
+            )
+            # Update radio button text for standard mode
+            self.json_radio.config(text="JSON (Complete)")
+        
+        # Overall Summary
+        if "overall" in summaries:
+            overall = summaries["overall"]
+            summary_text = f"""📋 OVERALL SUMMARY
+{'='*50}
+
+Summary: {overall.get('summary', 'N/A')}
+
+Key Metrics:
+• Duration: {overall.get('key_metrics', {}).get('duration_minutes', 0)} minutes
+• Speakers: {overall.get('key_metrics', {}).get('speaker_count', 0)}
+• Segments: {overall.get('key_metrics', {}).get('segment_count', 0)}
+• Dominant Sentiment: {overall.get('key_metrics', {}).get('dominant_sentiment', 'N/A')}
+
+Main Topics: {', '.join(overall.get('main_topics', []))}
+"""
+            self.overall_summary_text.delete(1.0, tk.END)
+            self.overall_summary_text.insert(tk.END, summary_text)
+        
+        # Speaker Summaries
+        if "by_speaker" in summaries:
+            speaker_text = "👥 SPEAKER SUMMARIES\n" + "="*50 + "\n\n"
+            for speaker, data in summaries["by_speaker"].items():
+                stats = data.get("participation_stats", {})
+                speaker_text += f"{speaker}:\n"
+                speaker_text += f"  Summary: {data.get('summary', 'N/A')}\n"
+                speaker_text += f"  Participation: {stats.get('participation_percentage', 0)}%\n"
+                speaker_text += f"  Total Time: {stats.get('total_time_seconds', 0)}s\n"
+                speaker_text += f"  Segments: {stats.get('segment_count', 0)}\n"
+                speaker_text += f"  Dominant Sentiment: {stats.get('dominant_sentiment', 'N/A')}\n\n"
+            
+            self.speaker_summary_text.delete(1.0, tk.END)
+            self.speaker_summary_text.insert(tk.END, speaker_text)
+        
+        # Key Points
+        if "key_points" in summaries:
+            keypoints_text = "🎯 KEY POINTS\n" + "="*50 + "\n\n"
+            for i, point in enumerate(summaries["key_points"], 1):
+                keypoints_text += f"{i}. [{point.get('type', 'general')}] {point.get('text', 'N/A')}\n"
+                keypoints_text += f"   Speaker: {point.get('speaker', 'N/A')} at {point.get('timestamp', 0):.1f}s\n"
+                keypoints_text += f"   Sentiment: {point.get('sentiment', 'N/A')}\n\n"
+            
+            self.keypoints_text.delete(1.0, tk.END)
+            self.keypoints_text.insert(tk.END, keypoints_text)
+    
+    def display_annotations(self, annotations):
+        """Display generated annotations in the UI"""
+        # Action Items
+        if "action_items" in annotations:
+            # Clear existing items
+            for item in self.actions_tree.get_children():
+                self.actions_tree.delete(item)
+            
+            for action in annotations["action_items"]:
+                self.actions_tree.insert('', tk.END, 
+                                       text=action.get('action', 'N/A'),
+                                       values=(
+                                           action.get('speaker', 'N/A'),
+                                           f"{action.get('timestamp', 0):.1f}s",
+                                           f"{action.get('confidence', 0):.2f}"
+                                       ))
+        
+        # Q&A Pairs
+        if "questions_answers" in annotations:
+            qa_text = "❓ QUESTION & ANSWER PAIRS\n" + "="*50 + "\n\n"
+            for i, pair in enumerate(annotations["questions_answers"], 1):
+                qa_text += f"{i}. Q: {pair.get('question', 'N/A')}\n"
+                qa_text += f"   Speaker: {pair.get('question_speaker', 'N/A')} at {pair.get('question_timestamp', 0):.1f}s\n\n"
+                qa_text += f"   A: {pair.get('answer', 'N/A')}\n"
+                qa_text += f"   Speaker: {pair.get('answer_speaker', 'N/A')} at {pair.get('answer_timestamp', 0):.1f}s\n"
+                qa_text += f"   Confidence: {pair.get('confidence', 0):.2f}\n\n"
+            
+            self.qa_text.delete(1.0, tk.END)
+            self.qa_text.insert(tk.END, qa_text)
+        
+        # Topics
+        if "topics" in annotations:
+            # Clear existing items
+            for item in self.topics_tree.get_children():
+                self.topics_tree.delete(item)
+            
+            for topic in annotations["topics"]:
+                self.topics_tree.insert('', tk.END,
+                                      text=f"{topic.get('topic', 'N/A')} ({', '.join(topic.get('keywords', []))})",
+                                      values=(
+                                          topic.get('mentions', 0),
+                                          f"{topic.get('first_mentioned', 0):.1f}s"
+                                      ))
+        
+        # Decisions
+        if "decisions" in annotations:
+            decisions_text = "🎯 DECISIONS & CONCLUSIONS\n" + "-"*15 + "\n"
+            for i, decision in enumerate(annotations["decisions"], 1):
+                decisions_text += f"{i}. {decision.get('decision', 'N/A')}\n"
+                decisions_text += f"   Speaker: {decision.get('speaker', 'N/A')} at {decision.get('timestamp', 0):.1f}s\n"
+                decisions_text += f"   Sentiment: {decision.get('sentiment', 'N/A')}\n"
+                decisions_text += f"   Context: {decision.get('context', 'N/A')[:100]}...\n\n"
+            
+            self.decisions_text.delete(1.0, tk.END)
+            self.decisions_text.insert(tk.END, decisions_text)
+    
+    def export_summary(self):
+        """Export summary results"""
+        if not hasattr(self, 'current_analysis'):
+            messagebox.showwarning("Warning", "No analysis results to export!")
+            return
+        
+        self._export_data(self.current_analysis.get("summaries", {}), "summary")
+    
+    def export_annotations(self):
+        """Export annotation results"""
+        if not hasattr(self, 'current_analysis'):
+            messagebox.showwarning("Warning", "No analysis results to export!")
+            return
+        
+        self._export_data(self.current_analysis.get("annotations", {}), "annotations")
+    
+    def export_all(self):
+        """Export all analysis results"""
+        if not hasattr(self, 'current_analysis'):
+            messagebox.showwarning("Warning", "No analysis results to export!")
+            return
+        
+        self._export_data(self.current_analysis, "complete_analysis")
+    
+    def _export_data(self, data, data_type):
+        """Export data in the selected format"""
+        if not data:
+            messagebox.showwarning("Warning", "No data to export!")
+            return
+        
+        # Check if privacy mode is active
+        privacy_mode = hasattr(self, 'current_analysis') and self.current_analysis.get('privacy_mode', False)
+        
+        # Get export format
+        export_format = self.export_format.get()
+        
+        # Generate filename with privacy indicator
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        privacy_suffix = "_privacy" if privacy_mode else ""
+        filename_base = f"oreja_{data_type}{privacy_suffix}_{timestamp}"
+        
+        if export_format == "json":
+            filename = filename_base + ".json"
+            default_ext = ".json"
+            filetypes = [("JSON Files", "*.json"), ("All Files", "*.*")]
+        else:
+            filename = filename_base + ".txt"
+            default_ext = ".txt"
+            filetypes = [("Text Files", "*.txt"), ("All Files", "*.*")]
+        
+        # Show save dialog
+        file_path = filedialog.asksaveasfilename(
+            title=f"Export {data_type.replace('_', ' ').title()}" + (" (Privacy Mode)" if privacy_mode else ""),
+            initialvalue=filename,
+            defaultextension=default_ext,
+            filetypes=filetypes
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            if export_format == "json":
+                # For JSON export, always include privacy mode indicator
+                export_data = data.copy() if isinstance(data, dict) else data
+                if privacy_mode:
+                    if isinstance(export_data, dict):
+                        export_data["__privacy_mode"] = True
+                        export_data["__export_notice"] = "This file was exported in Privacy Mode - transcription text has been redacted"
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, indent=2, ensure_ascii=False)
+            else:
+                export_text = self._format_export_text(data, export_format)
+                
+                # Add privacy mode header for text exports
+                if privacy_mode:
+                    privacy_header = f"""🔒 PRIVACY MODE EXPORT
+{'='*50}
+This export was generated in Privacy Mode.
+Original transcription text has been redacted for privacy protection.
+Only summaries and analyses are included.
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{'='*50}
+
+"""
+                    export_text = privacy_header + export_text
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(export_text)
+            
+            success_msg = f"Data exported to {file_path}"
+            if privacy_mode:
+                success_msg += "\n\n🔒 Privacy Mode: Transcription text was not included"
+            
+            messagebox.showinfo("Export Complete", success_msg)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export data: {str(e)}")
+    
+    def _format_export_text(self, data, format_type):
+        """Format data as text for export"""
+        if format_type == "text":
+            return self._format_as_report(data)
+        elif format_type == "minutes":
+            return self._format_as_minutes(data)
+        elif format_type == "actions":
+            return self._format_actions_only(data)
+        else:
+            return str(data)
+    
+    def _format_as_report(self, data):
+        """Format as comprehensive report"""
+        privacy_mode = hasattr(self, 'current_analysis') and self.current_analysis.get('privacy_mode', False)
+        
+        report = f"""OREJA CONVERSATION ANALYSIS REPORT
+{'='*60}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Privacy Mode: {'ACTIVE (transcription text redacted)' if privacy_mode else 'Standard (full transcription available)'}
+
+"""
+        
+        # Add summaries
+        if "summaries" in data:
+            summaries = data["summaries"]
+            
+            if "overall" in summaries:
+                overall = summaries["overall"]
+                report += f"""OVERALL SUMMARY
+{'-'*20}
+{overall.get('summary', 'N/A')}
+
+Key Metrics:
+• Duration: {overall.get('key_metrics', {}).get('duration_minutes', 0)} minutes
+• Speakers: {overall.get('key_metrics', {}).get('speaker_count', 0)}
+• Segments: {overall.get('key_metrics', {}).get('segment_count', 0)}
+• Dominant Sentiment: {overall.get('key_metrics', {}).get('dominant_sentiment', 'N/A')}
+
+Main Topics: {', '.join(overall.get('main_topics', []))}
+
+"""
+        
+        # Add annotations
+        if "annotations" in data:
+            annotations = data["annotations"]
+            
+            if "action_items" in annotations:
+                report += "ACTION ITEMS\n" + "-"*20 + "\n"
+                for i, action in enumerate(annotations["action_items"], 1):
+                    report += f"{i}. {action.get('action', 'N/A')} ({action.get('speaker', 'N/A')})\n"
+                report += "\n"
+            
+            if "decisions" in annotations:
+                report += "DECISIONS MADE\n" + "-"*20 + "\n"
+                for i, decision in enumerate(annotations["decisions"], 1):
+                    report += f"{i}. {decision.get('decision', 'N/A')} ({decision.get('speaker', 'N/A')})\n"
+                report += "\n"
+        
+        # Add privacy notice if applicable
+        if privacy_mode:
+            report += f"""
+PRIVACY NOTICE
+{'-'*20}
+This report was generated in Privacy Mode. Original transcription
+text has been redacted and is not included in this export.
+Only summaries and analytical insights are provided.
+"""
+        
+        return report
+    
+    def _format_as_minutes(self, data):
+        """Format as meeting minutes"""
+        privacy_mode = hasattr(self, 'current_analysis') and self.current_analysis.get('privacy_mode', False)
+        
+        minutes = f"""MEETING MINUTES
+{'='*30}
+Date: {datetime.now().strftime('%Y-%m-%d')}
+Time: {datetime.now().strftime('%H:%M:%S')}
+Privacy Mode: {'ACTIVE' if privacy_mode else 'Standard'}
+
+"""
+        
+        # Add attendees from summaries
+        if "summaries" in data and "by_speaker" in data["summaries"]:
+            minutes += "ATTENDEES\n" + "-"*10 + "\n"
+            for speaker in data["summaries"]["by_speaker"].keys():
+                minutes += f"• {speaker}\n"
+            minutes += "\n"
+        
+        # Add key points
+        if "summaries" in data and "key_points" in data["summaries"]:
+            minutes += "KEY DISCUSSION POINTS\n" + "-"*25 + "\n"
+            for point in data["summaries"]["key_points"]:
+                minutes += f"• {point.get('text', 'N/A')}\n"
+            minutes += "\n"
+        
+        # Add action items
+        if "annotations" in data and "action_items" in data["annotations"]:
+            minutes += "ACTION ITEMS\n" + "-"*15 + "\n"
+            for action in data["annotations"]["action_items"]:
+                minutes += f"• {action.get('action', 'N/A')} - {action.get('speaker', 'N/A')}\n"
+            minutes += "\n"
+        
+        # Add decisions
+        if "annotations" in data and "decisions" in data["annotations"]:
+            minutes += "DECISIONS MADE\n" + "-"*15 + "\n"
+            for decision in data["annotations"]["decisions"]:
+                minutes += f"• {decision.get('decision', 'N/A')}\n"
+            minutes += "\n"
+        
+        # Add privacy notice if applicable
+        if privacy_mode:
+            minutes += f"""PRIVACY NOTICE
+{'-'*15}
+These minutes were generated in Privacy Mode.
+Original conversation text has been redacted.
+Only summaries and key points are included.
+"""
+        
+        return minutes
+    
+    def _format_actions_only(self, data):
+        """Format action items only"""
+        actions_text = f"""ACTION ITEMS LIST
+{'='*20}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+"""
+        
+        if "annotations" in data and "action_items" in data["annotations"]:
+            for i, action in enumerate(data["annotations"]["action_items"], 1):
+                actions_text += f"{i}. {action.get('action', 'N/A')}\n"
+                actions_text += f"   Assigned to: {action.get('speaker', 'N/A')}\n"
+                actions_text += f"   Mentioned at: {action.get('timestamp', 0):.1f}s\n\n"
+        else:
+            actions_text += "No action items found.\n"
+        
+        return actions_text
+
     def setup_batch_tab(self):
         """Setup the batch processing tab for recorded calls"""
         batch_frame = ttk.Frame(self.notebook)
@@ -1018,8 +1618,7 @@ Quality Assessment:
     
     def create_comprehensive_report(self):
         """Create a comprehensive analytics report"""
-        report = f"""
-OREJA SPEAKER ANALYTICS REPORT
+        report = f"""OREJA SPEAKER ANALYTICS REPORT
 {'='*60}
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
@@ -1484,6 +2083,185 @@ This feature allows you to transcribe recorded calls using your existing speaker
             return f"{size_bytes/1024**2:.1f} MB"
         else:
             return f"{size_bytes/1024**3:.1f} GB"
+
+    def setup_summary_results_tab(self, parent_notebook):
+        """Setup the summary results display tab"""
+        summary_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(summary_frame, text="📋 Summaries")
+        
+        # Create paned window for different summary types
+        summary_paned = ttk.PanedWindow(summary_frame, orient=tk.VERTICAL)
+        summary_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Overall Summary
+        overall_frame = ttk.LabelFrame(summary_paned, text="Overall Summary", padding=5)
+        summary_paned.add(overall_frame, weight=1)
+        
+        self.overall_summary_text = tk.Text(overall_frame, height=8, font=('Consolas', 10))
+        overall_scroll = ttk.Scrollbar(overall_frame, orient=tk.VERTICAL, command=self.overall_summary_text.yview)
+        self.overall_summary_text.configure(yscrollcommand=overall_scroll.set)
+        self.overall_summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        overall_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Speaker Summaries
+        speaker_frame = ttk.LabelFrame(summary_paned, text="Speaker Summaries", padding=5)
+        summary_paned.add(speaker_frame, weight=1)
+        
+        self.speaker_summary_text = tk.Text(speaker_frame, height=8, font=('Consolas', 10))
+        speaker_scroll = ttk.Scrollbar(speaker_frame, orient=tk.VERTICAL, command=self.speaker_summary_text.yview)
+        self.speaker_summary_text.configure(yscrollcommand=speaker_scroll.set)
+        self.speaker_summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        speaker_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Key Points
+        keypoints_frame = ttk.LabelFrame(summary_paned, text="Key Points", padding=5)
+        summary_paned.add(keypoints_frame, weight=1)
+        
+        self.keypoints_text = tk.Text(keypoints_frame, height=8, font=('Consolas', 10))
+        keypoints_scroll = ttk.Scrollbar(keypoints_frame, orient=tk.VERTICAL, command=self.keypoints_text.yview)
+        self.keypoints_text.configure(yscrollcommand=keypoints_scroll.set)
+        self.keypoints_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        keypoints_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def setup_annotation_results_tab(self, parent_notebook):
+        """Setup the annotation results display tab"""
+        annotation_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(annotation_frame, text="🏷️ Annotations")
+        
+        # Create notebook for different annotation types
+        ann_notebook = ttk.Notebook(annotation_frame)
+        ann_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Action Items Tab
+        actions_frame = ttk.Frame(ann_notebook)
+        ann_notebook.add(actions_frame, text="✅ Action Items")
+        
+        # Create treeview for action items
+        self.actions_tree = ttk.Treeview(actions_frame, columns=('speaker', 'timestamp', 'confidence'), 
+                                        show='tree headings', height=12)
+        self.actions_tree.heading('#0', text='Action Item')
+        self.actions_tree.heading('speaker', text='Speaker')
+        self.actions_tree.heading('timestamp', text='Time')
+        self.actions_tree.heading('confidence', text='Confidence')
+        
+        self.actions_tree.column('#0', width=400)
+        self.actions_tree.column('speaker', width=100)
+        self.actions_tree.column('timestamp', width=80)
+        self.actions_tree.column('confidence', width=80)
+        
+        actions_scroll = ttk.Scrollbar(actions_frame, orient=tk.VERTICAL, command=self.actions_tree.yview)
+        self.actions_tree.configure(yscrollcommand=actions_scroll.set)
+        self.actions_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        actions_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Q&A Pairs Tab
+        qa_frame = ttk.Frame(ann_notebook)
+        ann_notebook.add(qa_frame, text="❓ Q&A Pairs")
+        
+        self.qa_text = tk.Text(qa_frame, font=('Consolas', 10))
+        qa_scroll = ttk.Scrollbar(qa_frame, orient=tk.VERTICAL, command=self.qa_text.yview)
+        self.qa_text.configure(yscrollcommand=qa_scroll.set)
+        self.qa_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        qa_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Topics Tab
+        topics_frame = ttk.Frame(ann_notebook)
+        ann_notebook.add(topics_frame, text="🏷️ Topics")
+        
+        self.topics_tree = ttk.Treeview(topics_frame, columns=('mentions', 'first_mentioned'), 
+                                       show='tree headings', height=12)
+        self.topics_tree.heading('#0', text='Topic')
+        self.topics_tree.heading('mentions', text='Mentions')
+        self.topics_tree.heading('first_mentioned', text='First Mentioned')
+        
+        self.topics_tree.column('#0', width=300)
+        self.topics_tree.column('mentions', width=100)
+        self.topics_tree.column('first_mentioned', width=120)
+        
+        topics_scroll = ttk.Scrollbar(topics_frame, orient=tk.VERTICAL, command=self.topics_tree.yview)
+        self.topics_tree.configure(yscrollcommand=topics_scroll.set)
+        self.topics_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        topics_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Decisions Tab
+        decisions_frame = ttk.Frame(ann_notebook)
+        ann_notebook.add(decisions_frame, text="🎯 Decisions")
+        
+        self.decisions_text = tk.Text(decisions_frame, font=('Consolas', 10))
+        decisions_scroll = ttk.Scrollbar(decisions_frame, orient=tk.VERTICAL, command=self.decisions_text.yview)
+        self.decisions_text.configure(yscrollcommand=decisions_scroll.set)
+        self.decisions_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        decisions_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def setup_export_tab(self, parent_notebook):
+        """Setup the export options tab"""
+        export_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(export_frame, text="💾 Export")
+        
+        # Privacy mode indicator
+        privacy_indicator_frame = ttk.Frame(export_frame)
+        privacy_indicator_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.export_privacy_label = ttk.Label(privacy_indicator_frame, text="", font=('Arial', 10, 'bold'))
+        self.export_privacy_label.pack()
+        
+        # Export options
+        export_options_frame = ttk.LabelFrame(export_frame, text="Export Options", padding=10)
+        export_options_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Export format selection
+        format_frame = ttk.Frame(export_options_frame)
+        format_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(format_frame, text="Export Format:").pack(side=tk.LEFT, padx=(0, 10))
+        self.export_format = tk.StringVar(value="json")
+        
+        # Update radio buttons based on privacy mode
+        self.json_radio = ttk.Radiobutton(format_frame, text="JSON (Analytics Only)", variable=self.export_format, value="json")
+        self.json_radio.pack(side=tk.LEFT, padx=5)
+        
+        self.text_radio = ttk.Radiobutton(format_frame, text="Text Report", variable=self.export_format, value="text")
+        self.text_radio.pack(side=tk.LEFT, padx=5)
+        
+        self.minutes_radio = ttk.Radiobutton(format_frame, text="Meeting Minutes", variable=self.export_format, value="minutes")
+        self.minutes_radio.pack(side=tk.LEFT, padx=5)
+        
+        self.actions_radio = ttk.Radiobutton(format_frame, text="Action Items Only", variable=self.export_format, value="actions")
+        self.actions_radio.pack(side=tk.LEFT, padx=5)
+        
+        # Export buttons
+        export_buttons_frame = ttk.Frame(export_options_frame)
+        export_buttons_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(export_buttons_frame, text="📋 Export Summary", 
+                  command=self.export_summary).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_buttons_frame, text="🏷️ Export Annotations", 
+                  command=self.export_annotations).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_buttons_frame, text="📦 Export All", 
+                  command=self.export_all).pack(side=tk.LEFT, padx=5)
+        
+        # Export preview
+        preview_frame = ttk.LabelFrame(export_frame, text="Export Preview", padding=5)
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.export_preview_text = tk.Text(preview_frame, font=('Consolas', 10))
+        preview_scroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.export_preview_text.yview)
+        self.export_preview_text.configure(yscrollcommand=preview_scroll.set)
+        self.export_preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def select_transcription_file(self):
+        """Select transcription file for analysis"""
+        file_path = filedialog.askopenfilename(
+            title="Select Transcription File",
+            filetypes=[
+                ("JSON Files", "*.json"),
+                ("Text Files", "*.txt"),
+                ("All Files", "*.*")
+            ]
+        )
+        if file_path:
+            self.conv_file_var.set(file_path)
 
 def main():
     """Main entry point"""

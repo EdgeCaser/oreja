@@ -10,7 +10,7 @@ import logging
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 import torch
@@ -39,10 +39,11 @@ logger = logging.getLogger(__name__)
 
 class EnhancedTranscriptionProcessor:
     """
-    Enhanced transcription processor with sentiment analysis and audio feature extraction
+    Enhanced transcription processor with sentiment analysis, conversation summarization,
+    and annotation capabilities.
     """
     
-    def __init__(self, sentiment_model="vader"):
+    def __init__(self, sentiment_model: str = "vader"):
         self.sentiment_model = sentiment_model
         self.sample_rate = 16000
         
@@ -64,6 +65,37 @@ class EnhancedTranscriptionProcessor:
             except Exception as e:
                 logger.warning(f"Failed to load transformer model, falling back to VADER: {e}")
                 self.sentiment_model = "vader"
+        
+        # Add summarization and annotation settings
+        self.enable_summarization = True
+        self.enable_annotations = True
+        self.summary_types = ["overall", "by_speaker", "by_time", "key_points"]
+        self.annotation_types = ["topics", "action_items", "questions_answers", "decisions", "emotional_moments"]
+        
+        # Import additional libraries for advanced text processing
+        try:
+            import nltk
+            from nltk.tokenize import sent_tokenize, word_tokenize
+            from nltk.corpus import stopwords
+            from nltk.tag import pos_tag
+            self.nltk_available = True
+            
+            # Download required NLTK data if not present
+            try:
+                nltk.data.find('tokenizers/punkt')
+                nltk.data.find('corpora/stopwords')
+                nltk.data.find('taggers/averaged_perceptron_tagger')
+            except LookupError:
+                nltk.download('punkt', quiet=True)
+                nltk.download('stopwords', quiet=True)
+                nltk.download('averaged_perceptron_tagger', quiet=True)
+                
+            self.stopwords = set(stopwords.words('english'))
+            
+        except ImportError:
+            logger.warning("NLTK not available - advanced text processing will be limited")
+            self.nltk_available = False
+            self.stopwords = set()
     
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """
@@ -570,6 +602,638 @@ class EnhancedTranscriptionProcessor:
         }
         
         return enhanced_result
+    
+    def process_with_summary_and_annotations(self, transcription_result: Dict[str, Any], 
+                                           waveform: Any, sample_rate: int,
+                                           include_summary: bool = True,
+                                           include_annotations: bool = True,
+                                           summary_types: Optional[List[str]] = None,
+                                           annotation_types: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Process transcription with enhanced features including summarization and annotations
+        
+        Args:
+            transcription_result: Original transcription result
+            waveform: Audio waveform tensor
+            sample_rate: Audio sample rate
+            include_summary: Whether to generate summaries
+            include_annotations: Whether to generate annotations
+            summary_types: Types of summaries to generate
+            annotation_types: Types of annotations to generate
+            
+        Returns:
+            Enhanced transcription with summaries and annotations
+        """
+        # First, run the existing enhanced processing
+        enhanced_result = self.process_enhanced_transcription(transcription_result, waveform, sample_rate)
+        
+        # Add summarization
+        if include_summary:
+            summary_types = summary_types or self.summary_types
+            enhanced_result["conversation_summary"] = self.generate_conversation_summary(
+                enhanced_result, summary_types
+            )
+        
+        # Add annotations
+        if include_annotations:
+            annotation_types = annotation_types or self.annotation_types
+            enhanced_result["conversation_annotations"] = self.generate_conversation_annotations(
+                enhanced_result, annotation_types
+            )
+        
+        # Add processing metadata
+        enhanced_result["processing_info"] = {
+            "enhanced_features": True,
+            "summarization_enabled": include_summary,
+            "annotations_enabled": include_annotations,
+            "processing_timestamp": datetime.now().isoformat(),
+            "summary_types": summary_types if include_summary else [],
+            "annotation_types": annotation_types if include_annotations else []
+        }
+        
+        return enhanced_result
+    
+    def generate_conversation_summary(self, transcription_result: Dict[str, Any], 
+                                    summary_types: List[str]) -> Dict[str, Any]:
+        """Generate various types of conversation summaries"""
+        segments = transcription_result.get("segments", [])
+        full_text = transcription_result.get("full_text", "")
+        
+        summaries = {}
+        
+        if "overall" in summary_types:
+            summaries["overall"] = self._generate_overall_summary(segments, full_text)
+        
+        if "by_speaker" in summary_types:
+            summaries["by_speaker"] = self._generate_speaker_summaries(segments)
+        
+        if "by_time" in summary_types:
+            summaries["by_time"] = self._generate_time_based_summaries(segments)
+        
+        if "key_points" in summary_types:
+            summaries["key_points"] = self._extract_key_points(segments)
+        
+        return summaries
+    
+    def _generate_overall_summary(self, segments: List[Dict[str, Any]], full_text: str) -> Dict[str, Any]:
+        """Generate an overall conversation summary"""
+        if not segments:
+            return {"summary": "No content to summarize", "method": "empty"}
+        
+        # Basic extractive summarization
+        important_sentences = self._extract_important_sentences(segments)
+        
+        # Calculate conversation metrics
+        total_duration = segments[-1].get("end", 0) - segments[0].get("start", 0) if segments else 0
+        speaker_count = len(set(seg.get("speaker", "Unknown") for seg in segments))
+        
+        # Identify dominant themes/topics
+        topics = self._identify_main_topics(segments)
+        
+        # Overall sentiment
+        overall_sentiment = self._calculate_overall_sentiment(segments)
+        
+        return {
+            "summary": " ".join(important_sentences[:3]) if important_sentences else "Conversation recorded.",
+            "key_metrics": {
+                "duration_minutes": round(total_duration / 60, 1),
+                "speaker_count": speaker_count,
+                "segment_count": len(segments),
+                "dominant_sentiment": overall_sentiment
+            },
+            "main_topics": topics[:5],  # Top 5 topics
+            "method": "extractive_with_metrics"
+        }
+    
+    def _generate_speaker_summaries(self, segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate summaries for each speaker"""
+        speaker_data = {}
+        
+        for segment in segments:
+            speaker = segment.get("speaker", "Unknown")
+            text = segment.get("text", "").strip()
+            duration = segment.get("end", 0) - segment.get("start", 0)
+            sentiment = segment.get("sentiment_analysis", {})
+            
+            if speaker not in speaker_data:
+                speaker_data[speaker] = {
+                    "texts": [],
+                    "total_time": 0,
+                    "sentiments": [],
+                    "segment_count": 0
+                }
+            
+            speaker_data[speaker]["texts"].append(text)
+            speaker_data[speaker]["total_time"] += duration
+            speaker_data[speaker]["segment_count"] += 1
+            
+            if sentiment.get("confidence", 0) > 0.3:
+                speaker_data[speaker]["sentiments"].append(sentiment.get("sentiment", "neutral"))
+        
+        # Generate summaries for each speaker
+        summaries = {}
+        for speaker, data in speaker_data.items():
+            combined_text = " ".join(data["texts"])
+            key_sentences = self._extract_key_sentences_from_text(combined_text)
+            
+            # Calculate speaker stats
+            avg_sentiment = self._calculate_dominant_sentiment(data["sentiments"])
+            participation_percentage = 0
+            
+            summaries[speaker] = {
+                "summary": " ".join(key_sentences[:2]) if key_sentences else f"{speaker} participated in conversation.",
+                "participation_stats": {
+                    "total_time_seconds": round(data["total_time"], 1),
+                    "segment_count": data["segment_count"],
+                    "dominant_sentiment": avg_sentiment,
+                    "participation_percentage": participation_percentage  # Will calculate after all speakers
+                }
+            }
+        
+        # Calculate participation percentages
+        total_time = sum(data["total_time"] for data in speaker_data.values())
+        if total_time > 0:
+            for speaker in summaries:
+                summaries[speaker]["participation_stats"]["participation_percentage"] = round(
+                    (speaker_data[speaker]["total_time"] / total_time) * 100, 1
+                )
+        
+        return summaries
+    
+    def _generate_time_based_summaries(self, segments: List[Dict[str, Any]], 
+                                     interval_minutes: int = 5) -> List[Dict[str, Any]]:
+        """Generate summaries for time-based intervals"""
+        if not segments:
+            return []
+        
+        summaries = []
+        start_time = segments[0].get("start", 0)
+        end_time = segments[-1].get("end", 0)
+        interval_seconds = interval_minutes * 60
+        
+        current_time = start_time
+        while current_time < end_time:
+            interval_end = min(current_time + interval_seconds, end_time)
+            
+            # Get segments in this interval
+            interval_segments = [
+                seg for seg in segments 
+                if seg.get("start", 0) >= current_time and seg.get("start", 0) < interval_end
+            ]
+            
+            if interval_segments:
+                interval_text = " ".join(seg.get("text", "") for seg in interval_segments)
+                key_sentences = self._extract_key_sentences_from_text(interval_text)
+                speakers = list(set(seg.get("speaker", "Unknown") for seg in interval_segments))
+                
+                summaries.append({
+                    "time_range": {
+                        "start_minutes": round(current_time / 60, 1),
+                        "end_minutes": round(interval_end / 60, 1)
+                    },
+                    "summary": " ".join(key_sentences[:2]) if key_sentences else "Continued conversation.",
+                    "active_speakers": speakers,
+                    "segment_count": len(interval_segments)
+                })
+            
+            current_time = interval_end
+        
+        return summaries
+    
+    def _extract_key_points(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract key points from the conversation"""
+        key_points = []
+        
+        for segment in segments:
+            text = segment.get("text", "").strip()
+            sentiment = segment.get("sentiment_analysis", {})
+            speaker = segment.get("speaker", "Unknown")
+            
+            # Look for key indicators
+            if self._is_key_point(text):
+                key_points.append({
+                    "text": text,
+                    "speaker": speaker,
+                    "timestamp": segment.get("start", 0),
+                    "type": self._classify_key_point_type(text),
+                    "sentiment": sentiment.get("sentiment", "neutral"),
+                    "confidence": sentiment.get("confidence", 0)
+                })
+        
+        # Sort by importance/confidence
+        key_points.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+        
+        return key_points[:10]  # Return top 10 key points
+    
+    def generate_conversation_annotations(self, transcription_result: Dict[str, Any],
+                                        annotation_types: List[str]) -> Dict[str, Any]:
+        """Generate conversation annotations"""
+        segments = transcription_result.get("segments", [])
+        annotations = {}
+        
+        if "topics" in annotation_types:
+            annotations["topics"] = self._identify_conversation_topics(segments)
+        
+        if "action_items" in annotation_types:
+            annotations["action_items"] = self._extract_action_items(segments)
+        
+        if "questions_answers" in annotation_types:
+            annotations["questions_answers"] = self._identify_question_answer_pairs(segments)
+        
+        if "decisions" in annotation_types:
+            annotations["decisions"] = self._extract_decisions(segments)
+        
+        if "emotional_moments" in annotation_types:
+            annotations["emotional_moments"] = self._identify_emotional_moments(segments)
+        
+        return annotations
+    
+    def _identify_conversation_topics(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Identify main topics discussed in the conversation"""
+        # Combine all text
+        all_text = " ".join(seg.get("text", "") for seg in segments)
+        
+        # Extract keywords and phrases
+        topics = self._extract_topics_from_text(all_text)
+        
+        # Add timing information
+        topic_segments = []
+        for topic in topics:
+            # Find segments that mention this topic
+            relevant_segments = []
+            for seg in segments:
+                if any(keyword.lower() in seg.get("text", "").lower() for keyword in topic["keywords"]):
+                    relevant_segments.append({
+                        "timestamp": seg.get("start", 0),
+                        "speaker": seg.get("speaker", "Unknown"),
+                        "text": seg.get("text", "")
+                    })
+            
+            if relevant_segments:
+                topic_segments.append({
+                    "topic": topic["topic"],
+                    "keywords": topic["keywords"],
+                    "mentions": len(relevant_segments),
+                    "first_mentioned": relevant_segments[0]["timestamp"],
+                    "last_mentioned": relevant_segments[-1]["timestamp"],
+                    "relevant_segments": relevant_segments[:3]  # Keep first 3 mentions
+                })
+        
+        return sorted(topic_segments, key=lambda x: x["mentions"], reverse=True)[:10]
+    
+    def _extract_action_items(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract action items and tasks from the conversation"""
+        action_patterns = [
+            r'\b(?:need to|have to|must|should|will)\s+([^.!?]+)',
+            r'\b(?:action item|to-?do|task|assignment):\s*([^.!?]+)',
+            r'\b(?:I\'ll|we\'ll|you\'ll|they\'ll)\s+([^.!?]+)',
+            r'\b(?:let\'s|let us)\s+([^.!?]+)',
+            r'\b(?:follow up|next step|action):\s*([^.!?]+)'
+        ]
+        
+        action_items = []
+        
+        for segment in segments:
+            text = segment.get("text", "")
+            speaker = segment.get("speaker", "Unknown")
+            timestamp = segment.get("start", 0)
+            
+            for pattern in action_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    action_items.append({
+                        "action": match.strip(),
+                        "speaker": speaker,
+                        "timestamp": timestamp,
+                        "context": text,
+                        "confidence": 0.7  # Basic confidence score
+                    })
+        
+        # Remove duplicates and sort by timestamp
+        unique_actions = []
+        for item in action_items:
+            if not any(item["action"].lower() in existing["action"].lower() 
+                      for existing in unique_actions):
+                unique_actions.append(item)
+        
+        return sorted(unique_actions, key=lambda x: x["timestamp"])[:10]
+    
+    def _identify_question_answer_pairs(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Identify question and answer pairs in the conversation"""
+        qa_pairs = []
+        questions = []
+        
+        # First pass: identify questions
+        for i, segment in enumerate(segments):
+            text = segment.get("text", "").strip()
+            if text.endswith('?') or any(text.lower().startswith(q) for q in ['what', 'how', 'why', 'when', 'where', 'who', 'which', 'can', 'could', 'would', 'should', 'do', 'does', 'did', 'is', 'are', 'was', 'were']):
+                questions.append({
+                    "question": text,
+                    "speaker": segment.get("speaker", "Unknown"),
+                    "timestamp": segment.get("start", 0),
+                    "segment_index": i
+                })
+        
+        # Second pass: find potential answers
+        for question in questions:
+            potential_answers = []
+            
+            # Look for answers in the next few segments
+            start_idx = question["segment_index"] + 1
+            for i in range(start_idx, min(start_idx + 5, len(segments))):
+                answer_segment = segments[i]
+                
+                # Skip if same speaker (unless significant time gap)
+                if (answer_segment.get("speaker") == question["speaker"] and 
+                    answer_segment.get("start", 0) - question["timestamp"] < 10):
+                    continue
+                
+                potential_answers.append({
+                    "answer": answer_segment.get("text", ""),
+                    "speaker": answer_segment.get("speaker", "Unknown"),
+                    "timestamp": answer_segment.get("start", 0),
+                    "confidence": self._calculate_answer_confidence(question["question"], answer_segment.get("text", ""))
+                })
+            
+            # Keep best answer
+            if potential_answers:
+                best_answer = max(potential_answers, key=lambda x: x["confidence"])
+                if best_answer["confidence"] > 0.3:  # Minimum confidence threshold
+                    qa_pairs.append({
+                        "question": question["question"],
+                        "question_speaker": question["speaker"],
+                        "question_timestamp": question["timestamp"],
+                        "answer": best_answer["answer"],
+                        "answer_speaker": best_answer["speaker"],
+                        "answer_timestamp": best_answer["timestamp"],
+                        "confidence": best_answer["confidence"]
+                    })
+        
+        return sorted(qa_pairs, key=lambda x: x["question_timestamp"])[:10]
+    
+    def _extract_decisions(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract decisions and conclusions from the conversation"""
+        decision_patterns = [
+            r'\b(?:decided|conclude|resolution|final|agreed|settled)\b.*?([^.!?]+)',
+            r'\b(?:decision|conclusion|agreement):\s*([^.!?]+)',
+            r'\b(?:so we\'ll|therefore|thus|hence)\s+([^.!?]+)',
+            r'\b(?:final|ultimate|definitive)\s+([^.!?]+)'
+        ]
+        
+        decisions = []
+        
+        for segment in segments:
+            text = segment.get("text", "")
+            speaker = segment.get("speaker", "Unknown")
+            timestamp = segment.get("start", 0)
+            sentiment = segment.get("sentiment_analysis", {})
+            
+            for pattern in decision_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    decisions.append({
+                        "decision": match.strip(),
+                        "speaker": speaker,
+                        "timestamp": timestamp,
+                        "context": text,
+                        "sentiment": sentiment.get("sentiment", "neutral"),
+                        "confidence": 0.6
+                    })
+        
+        # Remove duplicates
+        unique_decisions = []
+        for decision in decisions:
+            if not any(decision["decision"].lower() in existing["decision"].lower() 
+                      for existing in unique_decisions):
+                unique_decisions.append(decision)
+        
+        return sorted(unique_decisions, key=lambda x: x["timestamp"])[:10]
+    
+    def _identify_emotional_moments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Identify emotionally significant moments in the conversation"""
+        emotional_moments = []
+        
+        for segment in segments:
+            sentiment = segment.get("sentiment_analysis", {})
+            confidence = sentiment.get("confidence", 0)
+            sentiment_label = sentiment.get("sentiment", "neutral")
+            
+            # High confidence non-neutral sentiment indicates emotional moment
+            if confidence > 0.7 and sentiment_label != "neutral":
+                audio_features = segment.get("audio_features", {})
+                energy = audio_features.get("energy", {})
+                
+                emotional_moments.append({
+                    "text": segment.get("text", ""),
+                    "speaker": segment.get("speaker", "Unknown"),
+                    "timestamp": segment.get("start", 0),
+                    "sentiment": sentiment_label,
+                    "sentiment_confidence": confidence,
+                    "audio_intensity": energy.get("volume_level", "unknown"),
+                    "emotional_indicator": f"{sentiment_label.capitalize()} (confidence: {confidence:.2f})"
+                })
+        
+        return sorted(emotional_moments, key=lambda x: x["sentiment_confidence"], reverse=True)[:10]
+    
+    # Helper methods for text processing
+    def _extract_important_sentences(self, segments: List[Dict[str, Any]]) -> List[str]:
+        """Extract the most important sentences from segments"""
+        sentences = []
+        
+        for segment in segments:
+            text = segment.get("text", "").strip()
+            sentiment = segment.get("sentiment_analysis", {})
+            
+            if len(text) > 20:  # Minimum length
+                # Score based on sentiment confidence and length
+                score = sentiment.get("confidence", 0) + min(len(text) / 100, 1.0)
+                sentences.append((text, score))
+        
+        # Sort by score and return top sentences
+        sentences.sort(key=lambda x: x[1], reverse=True)
+        return [sent[0] for sent in sentences[:5]]
+    
+    def _extract_key_sentences_from_text(self, text: str) -> List[str]:
+        """Extract key sentences from a text block"""
+        if not self.nltk_available or not text.strip():
+            return [text[:200] + "..." if len(text) > 200 else text]
+        
+        try:
+            from nltk.tokenize import sent_tokenize
+            sentences = sent_tokenize(text)
+            
+            # Score sentences by length and keyword presence
+            scored_sentences = []
+            for sent in sentences:
+                if len(sent) > 20:  # Minimum length
+                    score = len(sent) / 100  # Base score on length
+                    
+                    # Boost score for important keywords
+                    important_words = ['important', 'key', 'main', 'significant', 'crucial', 'decision', 'agree', 'disagree']
+                    for word in important_words:
+                        if word in sent.lower():
+                            score += 0.5
+                    
+                    scored_sentences.append((sent, score))
+            
+            # Sort and return top sentences
+            scored_sentences.sort(key=lambda x: x[1], reverse=True)
+            return [sent[0] for sent in scored_sentences[:3]]
+            
+        except Exception as e:
+            logger.warning(f"Error in sentence extraction: {e}")
+            return [text[:200] + "..." if len(text) > 200 else text]
+    
+    def _identify_main_topics(self, segments: List[Dict[str, Any]]) -> List[str]:
+        """Identify main topics from conversation segments"""
+        # Combine all text
+        all_text = " ".join(seg.get("text", "") for seg in segments)
+        
+        if not self.nltk_available:
+            # Simple keyword extraction without NLTK
+            words = all_text.lower().split()
+            word_freq = {}
+            for word in words:
+                if len(word) > 3 and word.isalpha():
+                    word_freq[word] = word_freq.get(word, 0) + 1
+            
+            # Return most frequent words as topics
+            sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+            return [word[0] for word in sorted_words[:5]]
+        
+        try:
+            from nltk.tokenize import word_tokenize
+            from nltk.tag import pos_tag
+            
+            # Tokenize and get part-of-speech tags
+            words = word_tokenize(all_text.lower())
+            pos_tags = pos_tag(words)
+            
+            # Extract nouns as potential topics
+            nouns = [word for word, pos in pos_tags if pos.startswith('NN') and len(word) > 3]
+            
+            # Remove stopwords
+            filtered_nouns = [word for word in nouns if word not in self.stopwords]
+            
+            # Count frequency
+            noun_freq = {}
+            for noun in filtered_nouns:
+                noun_freq[noun] = noun_freq.get(noun, 0) + 1
+            
+            # Return most frequent nouns as topics
+            sorted_nouns = sorted(noun_freq.items(), key=lambda x: x[1], reverse=True)
+            return [noun[0] for noun in sorted_nouns[:5]]
+            
+        except Exception as e:
+            logger.warning(f"Error in topic identification: {e}")
+            return ["conversation", "discussion"]
+    
+    def _extract_topics_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """Extract topics with keywords from text"""
+        topics = []
+        
+        # Simple topic extraction - in real implementation, you might use more sophisticated methods
+        topic_keywords = {
+            "business": ["business", "company", "revenue", "profit", "market", "customer", "client"],
+            "technology": ["technology", "software", "system", "technical", "development", "programming"],
+            "project": ["project", "task", "deadline", "milestone", "timeline", "deliverable"],
+            "meeting": ["meeting", "agenda", "discussion", "presentation", "schedule"],
+            "finance": ["budget", "cost", "expense", "financial", "money", "price", "payment"]
+        }
+        
+        text_lower = text.lower()
+        
+        for topic, keywords in topic_keywords.items():
+            matches = sum(1 for keyword in keywords if keyword in text_lower)
+            if matches > 0:
+                topics.append({
+                    "topic": topic,
+                    "keywords": [kw for kw in keywords if kw in text_lower],
+                    "relevance_score": matches / len(keywords)
+                })
+        
+        return sorted(topics, key=lambda x: x["relevance_score"], reverse=True)
+    
+    def _is_key_point(self, text: str) -> bool:
+        """Determine if a text segment represents a key point"""
+        key_indicators = [
+            'important', 'key', 'main', 'significant', 'crucial', 'critical',
+            'decision', 'conclusion', 'summary', 'result', 'outcome',
+            'agree', 'disagree', 'decided', 'resolved', 'final'
+        ]
+        
+        text_lower = text.lower()
+        return any(indicator in text_lower for indicator in key_indicators) or len(text) > 50
+    
+    def _classify_key_point_type(self, text: str) -> str:
+        """Classify the type of key point"""
+        text_lower = text.lower()
+        
+        if any(word in text_lower for word in ['decision', 'decided', 'final', 'concluded']):
+            return "decision"
+        elif any(word in text_lower for word in ['action', 'task', 'todo', 'need to', 'will']):
+            return "action_item"
+        elif any(word in text_lower for word in ['important', 'key', 'significant', 'crucial']):
+            return "important_point"
+        elif text.endswith('?'):
+            return "question"
+        else:
+            return "general"
+    
+    def _calculate_overall_sentiment(self, segments: List[Dict[str, Any]]) -> str:
+        """Calculate overall sentiment of the conversation"""
+        sentiments = []
+        
+        for segment in segments:
+            sentiment_info = segment.get("sentiment_analysis", {})
+            if sentiment_info.get("confidence", 0) > 0.3:
+                sentiments.append(sentiment_info.get("sentiment", "neutral"))
+        
+        if not sentiments:
+            return "neutral"
+        
+        # Count sentiment occurrences
+        sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
+        for sentiment in sentiments:
+            sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
+        
+        # Return dominant sentiment
+        return max(sentiment_counts.items(), key=lambda x: x[1])[0]
+    
+    def _calculate_dominant_sentiment(self, sentiments: List[str]) -> str:
+        """Calculate dominant sentiment from a list"""
+        if not sentiments:
+            return "neutral"
+        
+        sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
+        for sentiment in sentiments:
+            sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
+        
+        return max(sentiment_counts.items(), key=lambda x: x[1])[0]
+    
+    def _calculate_answer_confidence(self, question: str, answer: str) -> float:
+        """Calculate confidence that an answer relates to a question"""
+        # Simple heuristic - in practice, you might use more sophisticated NLP
+        question_words = set(question.lower().split())
+        answer_words = set(answer.lower().split())
+        
+        # Remove common words
+        common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        question_words -= common_words
+        answer_words -= common_words
+        
+        if not question_words:
+            return 0.0
+        
+        # Calculate word overlap
+        overlap = len(question_words.intersection(answer_words))
+        confidence = overlap / len(question_words)
+        
+        # Boost confidence if answer is reasonably long
+        if len(answer) > 20:
+            confidence += 0.2
+        
+        return min(confidence, 1.0)
 
 
 def main():
@@ -611,7 +1275,7 @@ def main():
     mock_waveform = torch.tensor(mock_audio).unsqueeze(0)
     
     # Process with enhancements
-    enhanced_result = processor.process_enhanced_transcription(
+    enhanced_result = processor.process_with_summary_and_annotations(
         mock_transcription, mock_waveform, sample_rate
     )
     
