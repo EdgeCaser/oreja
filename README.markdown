@@ -8,7 +8,7 @@ This application was built with the intention of letting a person get a better r
 No data ever touches the cloud. No recording ever lasts more than a few seconds, and is never saved to any disk or server.
 
 ## DISCLAIMER
-Use this at your own risk, and do not use it in a way that breaches privacy laws. If you live in a jurisdiction with laws around recording conversations there may be further restrictions to how you can use this app.  
+Use this at your own risk, and do not use it in a way that breaches privacy laws. If you live in a jurisdiction with laws around recording conversations there may be further restrictions to how you can use this app.  You bear sole responsibility for the use of this app or its output files.
 
 My recommendation: keep it simple and just let people know you are using a note-taking tool and ask if that is ok. That should cover most of the gray areas. I am not a lawyer, so don't take this as legal advice either.
 
@@ -215,7 +215,7 @@ Once you have the executable working:
 4. **Read the advanced documentation** in the other README files for specific features
 
 ## Contributing
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.markdown](CONTRIBUTING.markdown) for guidelines.
 
 ## License
 MIT License. See [LICENSE](LICENSE) for details.
