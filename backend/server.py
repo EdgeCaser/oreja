@@ -1043,17 +1043,30 @@ def merge_transcription_and_diarization(
 def find_speaker_for_segment(diarization: Any, start_time: float, end_time: float) -> str:
     """Find the dominant speaker for a given time segment."""
     try:
+        # Validate input parameters
+        if start_time is None or end_time is None:
+            logger.warning("Invalid segment timing: start_time or end_time is None")
+            return "Unknown Speaker"
+        
         # Calculate the midpoint of the segment
         mid_time = (start_time + end_time) / 2
         
         # Find which speaker is active at the midpoint
         for segment, _, speaker in diarization.itertracks(yield_label=True):
+            # Check if segment has valid timing
+            if segment.start is None or segment.end is None:
+                continue
+                
             if segment.start <= mid_time <= segment.end:
                 return f"Speaker {speaker}"
         
         # If no speaker found, use overlap analysis
         speaker_durations = {}
         for segment, _, speaker in diarization.itertracks(yield_label=True):
+            # Check if segment has valid timing
+            if segment.start is None or segment.end is None:
+                continue
+                
             overlap_start = max(segment.start, start_time)
             overlap_end = min(segment.end, end_time)
             

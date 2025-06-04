@@ -292,21 +292,28 @@ class SpeakerAnalyticsDashboard:
         self.setup_export_tab(results_notebook)
     
     def on_privacy_mode_changed(self):
-        """Handle privacy mode toggle"""
-        if self.privacy_mode_var.get():
-            self.privacy_status_label.config(text="🔒 Privacy Mode ACTIVE", foreground="red")
-            # Show warning about privacy mode
-            messagebox.showinfo(
-                "Privacy Mode Activated", 
-                "🔒 Privacy Mode is now ACTIVE\n\n" +
-                "• Transcription text will NOT be saved to files\n" +
-                "• Only summaries and analyses will be retained\n" +
-                "• Export options will be limited to analytics only\n" +
-                "• Original transcription data will be cleared from memory after processing\n\n" +
-                "This ensures maximum privacy protection for sensitive conversations."
-            )
+        """Handle privacy mode toggle for conversation analysis"""
+        privacy_enabled = self.privacy_mode_var.get()
+        
+        if privacy_enabled:
+            self.privacy_info.config(text="Privacy mode: Speaker names will be anonymized in analysis")
         else:
-            self.privacy_status_label.config(text="🔓 Standard Mode", foreground="green")
+            self.privacy_info.config(text="Privacy mode disabled: Speaker names will be preserved")
+    
+    def on_batch_privacy_mode_changed(self):
+        """Handle privacy mode toggle for batch processing"""
+        privacy_enabled = self.batch_privacy_mode_var.get()
+        
+        if privacy_enabled:
+            self.batch_privacy_info.config(text="Privacy mode: Speaker IDs will be anonymized (Speaker_A, Speaker_B, etc.)")
+        else:
+            self.batch_privacy_info.config(text="Privacy mode disabled: Original speaker IDs will be preserved")
+        
+        # Optionally disable speaker mapping when privacy mode is enabled
+        if hasattr(self, 'speaker_mapping_var'):
+            # You might want to disable speaker mapping in privacy mode
+            # since it would conflict with anonymization
+            pass
     
     def analyze_transcription(self):
         """Analyze the selected transcription file"""
@@ -879,6 +886,18 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ttk.Checkbutton(settings_grid, text="Use recordings to improve speaker models", 
                        variable=self.improve_speakers_var).grid(row=1, column=0, columnspan=2, 
                                                                sticky=tk.W, padx=5, pady=5)
+        
+        # Privacy mode toggle
+        self.batch_privacy_mode_var = tk.BooleanVar(value=False)
+        privacy_checkbox = ttk.Checkbutton(settings_grid, text="🔒 Privacy Mode (anonymous speaker IDs)", 
+                                          variable=self.batch_privacy_mode_var,
+                                          command=self.on_batch_privacy_mode_changed)
+        privacy_checkbox.grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        
+        # Privacy mode info label
+        self.batch_privacy_info = ttk.Label(settings_grid, text="Privacy mode disabled: Original speaker IDs will be preserved", 
+                                           font=('Arial', 8), foreground='gray')
+        self.batch_privacy_info.grid(row=1, column=4, columnspan=2, sticky=tk.W, padx=5)
         
         # Speaker name mapping
         ttk.Label(settings_grid, text="Speaker Mapping:").grid(row=2, column=0, sticky=tk.W, padx=5)
@@ -1683,28 +1702,38 @@ This feature allows you to transcribe recorded calls using your existing speaker
 • Output Directory: Where results will be saved
 • Improve Speaker Models: Use recordings to enhance recognition
 • Speaker Mapping: JSON file to map auto-detected speakers to known names
+• 🔒 Privacy Mode: Anonymize speaker IDs for privacy protection
+
+🔒 Privacy Mode:
+• When enabled, speaker IDs are replaced with anonymous labels (Speaker_A, Speaker_B, etc.)
+• Speaker model improvements are disabled to protect user data
+• Confidence scores and detailed metadata are hidden in output files
+• Use this for sensitive recordings where speaker identity must be protected
 
 🚀 Processing:
 • The system will:
   1. Transcribe each recording using Whisper
-  2. Identify speakers using your existing embeddings
-  3. Enhance speaker identification accuracy
-  4. Optionally improve speaker models with high-confidence segments
+  2. Identify speakers using your existing embeddings (unless in privacy mode)
+  3. Enhance speaker identification accuracy (unless in privacy mode)
+  4. Optionally improve speaker models with high-confidence segments (disabled in privacy mode)
 
 📊 Results:
 • View processing results in the Results tab
 • Check detailed logs in the Processing Log tab
 • Find output files in your specified directory
+• Privacy mode status is clearly indicated in all output files
 
 💡 Tips:
 • For best results, ensure your speaker embeddings are well-trained
 • Use speaker mapping to assign meaningful names to speakers
 • Enable "Improve Speaker Models" to enhance future recognition
+• Use Privacy Mode for sensitive recordings where anonymity is required
+• Privacy mode and speaker mapping are mutually exclusive features
         """
         
         help_window = tk.Toplevel(self.root)
         help_window.title("Batch Processing Help")
-        help_window.geometry("600x500")
+        help_window.geometry("700x600")
         
         help_text_widget = tk.Text(help_window, wrap=tk.WORD, padx=10, pady=10)
         help_text_widget.pack(fill=tk.BOTH, expand=True)
@@ -1884,6 +1913,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
         # Prepare processing parameters
         output_dir = Path(self.batch_output_var.get())
         improve_speakers = self.improve_speakers_var.get()
+        privacy_mode = self.batch_privacy_mode_var.get()  # Get privacy mode setting
         
         # Load speaker mapping if provided
         speaker_mapping = None
@@ -1895,6 +1925,12 @@ This feature allows you to transcribe recorded calls using your existing speaker
                 self.log_batch(f"Loaded speaker mapping with {len(speaker_mapping)} entries")
             except Exception as e:
                 self.log_batch(f"Error loading speaker mapping: {e}")
+        
+        # Log privacy mode status
+        if privacy_mode:
+            self.log_batch("Privacy mode ENABLED: Speaker IDs will be anonymized")
+        else:
+            self.log_batch("Privacy mode disabled: Original speaker IDs will be preserved")
         
         # Initialize processor
         try:
@@ -1915,7 +1951,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
             # Start processing in separate thread
             self.processing_thread = threading.Thread(
                 target=self.run_batch_processing,
-                args=(output_dir, improve_speakers, speaker_mapping),
+                args=(output_dir, improve_speakers, speaker_mapping, privacy_mode),  # Pass privacy mode
                 daemon=True
             )
             self.processing_thread.start()
@@ -1927,7 +1963,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
             messagebox.showerror("Error", f"Failed to start processing: {e}")
             self.reset_batch_ui()
     
-    def run_batch_processing(self, output_dir: Path, improve_speakers: bool, speaker_mapping: dict):
+    def run_batch_processing(self, output_dir: Path, improve_speakers: bool, speaker_mapping: dict, privacy_mode: bool):
         """Run batch processing in background thread"""
         try:
             for i, audio_file in enumerate(self.batch_files):
@@ -1940,7 +1976,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
                 # Process file
                 try:
                     result = self.batch_processor.process_recording(
-                        audio_file, output_dir, improve_speakers, speaker_mapping
+                        audio_file, output_dir, improve_speakers, speaker_mapping, privacy_mode
                     )
                     
                     # Update results in UI thread

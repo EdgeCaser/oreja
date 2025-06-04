@@ -47,7 +47,8 @@ class BatchTranscriptionProcessor:
                          audio_path: Path,
                          output_dir: Optional[Path] = None,
                          improve_speakers: bool = True,
-                         speaker_name_mapping: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                         speaker_name_mapping: Optional[Dict[str, str]] = None,
+                         privacy_mode: bool = False) -> Dict[str, Any]:
         """
         Process a single recorded call
         
@@ -56,11 +57,14 @@ class BatchTranscriptionProcessor:
             output_dir: Directory to save results (optional)
             improve_speakers: Whether to use this recording to improve speaker models
             speaker_name_mapping: Manual mapping of auto-detected speakers to known names
+            privacy_mode: Whether to anonymize speaker IDs for privacy protection
             
         Returns:
             Transcription result with speaker identification
         """
         logger.info(f"Processing recording: {audio_path}")
+        if privacy_mode:
+            logger.info("Privacy mode ENABLED: Speaker IDs will be anonymized")
         
         try:
             # Load and preprocess audio
@@ -71,23 +75,26 @@ class BatchTranscriptionProcessor:
             
             # Enhance speaker identification using existing embeddings
             enhanced_result = self._enhance_speaker_identification(
-                transcription_result, waveform, sample_rate, speaker_name_mapping
+                transcription_result, waveform, sample_rate, speaker_name_mapping, privacy_mode
             )
             
-            # Improve speaker models if requested
-            if improve_speakers:
+            # Skip speaker model improvement in privacy mode to protect user data
+            if improve_speakers and not privacy_mode:
                 self._improve_speaker_models(enhanced_result, waveform, sample_rate)
+            elif privacy_mode:
+                logger.info("Skipping speaker model improvement due to privacy mode")
             
             # Save results
             if output_dir:
-                self._save_results(enhanced_result, audio_path, output_dir)
+                self._save_results(enhanced_result, audio_path, output_dir, privacy_mode)
             
             # Add to batch results
             self.results.append({
                 'file': str(audio_path),
                 'result': enhanced_result,
                 'processed_at': datetime.now().isoformat(),
-                'speakers_improved': improve_speakers
+                'speakers_improved': improve_speakers and not privacy_mode,
+                'privacy_mode': privacy_mode
             })
             
             logger.info(f"Successfully processed {audio_path}")
@@ -98,7 +105,8 @@ class BatchTranscriptionProcessor:
             error_result = {
                 'error': str(e),
                 'file': str(audio_path),
-                'processed_at': datetime.now().isoformat()
+                'processed_at': datetime.now().isoformat(),
+                'privacy_mode': privacy_mode
             }
             self.results.append(error_result)
             return error_result
@@ -202,11 +210,14 @@ class BatchTranscriptionProcessor:
                                       transcription_result: Dict[str, Any],
                                       waveform: torch.Tensor,
                                       sample_rate: int,
-                                      speaker_mapping: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                                      speaker_mapping: Optional[Dict[str, str]] = None,
+                                      privacy_mode: bool = False) -> Dict[str, Any]:
         """
         Enhance speaker identification using existing embeddings
         """
         enhanced_segments = []
+        speaker_anonymization_map = {}  # For privacy mode
+        anonymous_speaker_counter = 0
         
         for segment in transcription_result.get('segments', []):
             start_time = segment.get('start', 0)
@@ -224,28 +235,53 @@ class BatchTranscriptionProcessor:
                 
                 # Only process segments long enough for reliable identification
                 if segment_duration >= self.MIN_SEGMENT_LENGTH:
-                    enhanced_speaker, confidence = self._identify_speaker_from_segment(
-                        segment_waveform, sample_rate
-                    )
-                    
-                    # Apply manual mapping if provided
-                    if speaker_mapping and enhanced_speaker in speaker_mapping:
-                        enhanced_speaker = speaker_mapping[enhanced_speaker]
-                    
-                    segment['enhanced_speaker'] = enhanced_speaker
-                    segment['speaker_confidence'] = confidence
-                    segment['segment_duration'] = segment_duration
-                    
-                    # Use enhanced speaker if confidence is high enough
-                    if confidence >= self.CONFIDENCE_THRESHOLD:
-                        segment['speaker'] = enhanced_speaker
-                        segment['identification_method'] = 'embedding_enhanced'
+                    if not privacy_mode:
+                        # Normal processing: use existing speaker identification
+                        enhanced_speaker, confidence = self._identify_speaker_from_segment(
+                            segment_waveform, sample_rate
+                        )
+                        
+                        # Apply manual mapping if provided
+                        if speaker_mapping and enhanced_speaker in speaker_mapping:
+                            enhanced_speaker = speaker_mapping[enhanced_speaker]
+                        
+                        segment['enhanced_speaker'] = enhanced_speaker
+                        segment['speaker_confidence'] = confidence
+                        segment['segment_duration'] = segment_duration
+                        
+                        # Use enhanced speaker if confidence is high enough
+                        if confidence >= self.CONFIDENCE_THRESHOLD:
+                            segment['speaker'] = enhanced_speaker
+                            segment['identification_method'] = 'embedding_enhanced'
+                        else:
+                            segment['identification_method'] = 'fallback_diarization'
                     else:
-                        segment['identification_method'] = 'fallback_diarization'
+                        # Privacy mode: anonymize speaker IDs
+                        if original_speaker not in speaker_anonymization_map:
+                            anonymous_id = f"Speaker_{chr(65 + anonymous_speaker_counter)}"  # A, B, C, etc.
+                            speaker_anonymization_map[original_speaker] = anonymous_id
+                            anonymous_speaker_counter += 1
+                        
+                        anonymous_speaker = speaker_anonymization_map[original_speaker]
+                        segment['speaker'] = anonymous_speaker
+                        segment['enhanced_speaker'] = anonymous_speaker
+                        segment['speaker_confidence'] = 0.0  # Don't reveal confidence in privacy mode
+                        segment['identification_method'] = 'privacy_anonymized'
+                        segment['segment_duration'] = segment_duration
                 else:
-                    segment['enhanced_speaker'] = original_speaker
-                    segment['speaker_confidence'] = 0.0
-                    segment['identification_method'] = 'too_short'
+                    if privacy_mode:
+                        # Even for short segments, anonymize in privacy mode
+                        if original_speaker not in speaker_anonymization_map:
+                            anonymous_id = f"Speaker_{chr(65 + anonymous_speaker_counter)}"
+                            speaker_anonymization_map[original_speaker] = anonymous_id
+                            anonymous_speaker_counter += 1
+                        segment['speaker'] = speaker_anonymization_map[original_speaker]
+                        segment['enhanced_speaker'] = speaker_anonymization_map[original_speaker]
+                        segment['identification_method'] = 'privacy_anonymized_short'
+                    else:
+                        segment['enhanced_speaker'] = original_speaker
+                        segment['speaker_confidence'] = 0.0
+                        segment['identification_method'] = 'too_short'
             else:
                 segment['enhanced_speaker'] = original_speaker
                 segment['speaker_confidence'] = 0.0
@@ -330,9 +366,12 @@ class BatchTranscriptionProcessor:
         if improvement_count > 0:
             logger.info(f"Improved speaker models with {improvement_count} segments")
     
-    def _save_results(self, result: Dict[str, Any], audio_path: Path, output_dir: Path):
+    def _save_results(self, result: Dict[str, Any], audio_path: Path, output_dir: Path, privacy_mode: bool):
         """Save transcription results to files"""
         base_name = audio_path.stem
+        
+        # Add privacy mode info to result
+        result['privacy_mode'] = privacy_mode
         
         # Save JSON result
         json_path = output_dir / f"{base_name}_transcription.json"
@@ -344,6 +383,10 @@ class BatchTranscriptionProcessor:
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(f"Transcription for: {audio_path.name}\n")
             f.write(f"Processed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            
+            if privacy_mode:
+                f.write(f"🔒 PRIVACY MODE: Speaker IDs have been anonymized for privacy protection\n")
+            
             f.write("=" * 60 + "\n\n")
             
             for segment in result.get('segments', []):
@@ -355,17 +398,31 @@ class BatchTranscriptionProcessor:
                 method = segment.get('identification_method', 'unknown')
                 
                 f.write(f"[{start_time:.1f}s - {end_time:.1f}s] {speaker}")
-                if confidence > 0:
+                
+                # Only show confidence/method info if not in privacy mode
+                if not privacy_mode and confidence > 0:
                     f.write(f" (conf: {confidence:.2f}, {method})")
+                elif privacy_mode and method.startswith('privacy_'):
+                    f.write(f" (anonymized)")
+                    
                 f.write(f": {text}\n")
             
             # Add summary
             enhancement_info = result.get('enhancement_info', {})
             f.write("\n" + "=" * 60 + "\n")
-            f.write("Enhancement Summary:\n")
+            f.write("Processing Summary:\n")
+            
+            if privacy_mode:
+                f.write("🔒 Privacy Mode: ENABLED\n")
+                f.write("- Speaker IDs anonymized\n")
+                f.write("- Speaker model improvements disabled\n")
+                f.write("- Confidence scores hidden\n\n")
+            
             f.write(f"Total segments: {enhancement_info.get('total_segments', 0)}\n")
             f.write(f"Enhanced segments: {enhancement_info.get('enhanced_segments', 0)}\n")
-            f.write(f"Confidence threshold: {enhancement_info.get('confidence_threshold', 0)}\n")
+            
+            if not privacy_mode:
+                f.write(f"Confidence threshold: {enhancement_info.get('confidence_threshold', 0)}\n")
     
     def _save_batch_summary(self, output_dir: Path):
         """Save summary of batch processing"""

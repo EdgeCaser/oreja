@@ -231,39 +231,58 @@ class EnhancedTranscriptionProcessor:
         """
         Extract various audio features from a segment
         """
-        features = {}
+        try:
+            # Validate inputs
+            if waveform is None or sample_rate is None:
+                logger.warning("Invalid inputs: waveform or sample_rate is None")
+                return {"error": "invalid_inputs"}
+            
+            if start_time is None or end_time is None:
+                logger.warning("Invalid timing: start_time or end_time is None")
+                return {"error": "invalid_timing"}
+            
+            features = {}
+            
+            # Convert to numpy for analysis
+            audio_segment = waveform.squeeze().numpy()
+            duration = len(audio_segment) / sample_rate
+            
+            # Validate audio segment
+            if len(audio_segment) == 0:
+                logger.warning("Empty audio segment")
+                return {"error": "empty_audio"}
+            
+            # 1. Energy/Volume Analysis
+            rms_energy = np.sqrt(np.mean(audio_segment ** 2))
+            peak_amplitude = np.max(np.abs(audio_segment))
+            
+            features["energy"] = {
+                "rms_energy": float(rms_energy),
+                "peak_amplitude": float(peak_amplitude),
+                "volume_level": self._categorize_volume(rms_energy)
+            }
+            
+            # 2. Speaking Rate Analysis
+            speaking_stats = self._analyze_speaking_rate(audio_segment, sample_rate)
+            features["speaking_rate"] = speaking_stats
+            
+            # 3. Spectral Features
+            spectral_features = self._extract_spectral_features(audio_segment, sample_rate)
+            features["spectral"] = spectral_features
+            
+            # 4. Voice Stress Indicators
+            stress_indicators = self._analyze_voice_stress(audio_segment, sample_rate)
+            features["stress"] = stress_indicators
+            
+            # 5. Pause Analysis
+            pause_analysis = self._analyze_pauses(audio_segment, sample_rate)
+            features["pauses"] = pause_analysis
+            
+            return features
         
-        # Convert to numpy for analysis
-        audio_segment = waveform.squeeze().numpy()
-        duration = len(audio_segment) / sample_rate
-        
-        # 1. Energy/Volume Analysis
-        rms_energy = np.sqrt(np.mean(audio_segment ** 2))
-        peak_amplitude = np.max(np.abs(audio_segment))
-        
-        features["energy"] = {
-            "rms_energy": float(rms_energy),
-            "peak_amplitude": float(peak_amplitude),
-            "volume_level": self._categorize_volume(rms_energy)
-        }
-        
-        # 2. Speaking Rate Analysis
-        speaking_stats = self._analyze_speaking_rate(audio_segment, sample_rate)
-        features["speaking_rate"] = speaking_stats
-        
-        # 3. Spectral Features
-        spectral_features = self._extract_spectral_features(audio_segment, sample_rate)
-        features["spectral"] = spectral_features
-        
-        # 4. Voice Stress Indicators
-        stress_indicators = self._analyze_voice_stress(audio_segment, sample_rate)
-        features["stress"] = stress_indicators
-        
-        # 5. Pause Analysis
-        pause_analysis = self._analyze_pauses(audio_segment, sample_rate)
-        features["pauses"] = pause_analysis
-        
-        return features
+        except Exception as e:
+            logger.error(f"Error extracting audio features: {e}")
+            return {"error": str(e)}
     
     def _categorize_volume(self, rms_energy: float) -> str:
         """Categorize volume level"""
@@ -278,44 +297,80 @@ class EnhancedTranscriptionProcessor:
     
     def _analyze_speaking_rate(self, audio: np.ndarray, sample_rate: int) -> Dict[str, Any]:
         """Analyze speaking rate and patterns"""
-        duration = len(audio) / sample_rate
+        try:
+            # Validate inputs
+            if sample_rate is None or sample_rate <= 0:
+                logger.warning("Invalid sample_rate for speaking rate analysis")
+                return {"error": "invalid_sample_rate"}
+            
+            if audio is None or len(audio) == 0:
+                logger.warning("Invalid audio for speaking rate analysis")
+                return {"error": "invalid_audio"}
+            
+            duration = len(audio) / sample_rate
+            
+            # Simple voice activity detection based on energy
+            frame_length = int(0.025 * sample_rate)  # 25ms frames
+            hop_length = int(0.01 * sample_rate)     # 10ms hops
+            
+            # Ensure frame_length is valid
+            if frame_length <= 0 or frame_length >= len(audio):
+                return {
+                    "speech_ratio": 0.0,
+                    "rate_category": "unknown",
+                    "estimated_speech_duration": 0.0
+                }
+            
+            frames = []
+            for i in range(0, len(audio) - frame_length, hop_length):
+                frame = audio[i:i + frame_length]
+                energy = np.sum(frame ** 2)
+                frames.append(energy)
+            
+            # Threshold for voice activity (adaptive)
+            energy_threshold = np.mean(frames) * 0.5 if frames else 0
+            active_frames = np.sum(np.array(frames) > energy_threshold) if frames else 0
+            
+            # Estimate speech activity ratio
+            speech_ratio = active_frames / len(frames) if frames else 0
+            
+            # Categorize speaking rate
+            if speech_ratio > 0.8:
+                rate_category = "fast"
+            elif speech_ratio > 0.5:
+                rate_category = "normal"
+            elif speech_ratio > 0.2:
+                rate_category = "slow"
+            else:
+                rate_category = "very_slow"
+            
+            return {
+                "speech_ratio": float(speech_ratio),
+                "rate_category": rate_category,
+                "estimated_speech_duration": float(speech_ratio * duration)
+            }
         
-        # Simple voice activity detection based on energy
-        frame_length = int(0.025 * sample_rate)  # 25ms frames
-        hop_length = int(0.01 * sample_rate)     # 10ms hops
-        
-        frames = []
-        for i in range(0, len(audio) - frame_length, hop_length):
-            frame = audio[i:i + frame_length]
-            energy = np.sum(frame ** 2)
-            frames.append(energy)
-        
-        # Threshold for voice activity (adaptive)
-        energy_threshold = np.mean(frames) * 0.5
-        active_frames = np.sum(np.array(frames) > energy_threshold)
-        
-        # Estimate speech activity ratio
-        speech_ratio = active_frames / len(frames) if frames else 0
-        
-        # Categorize speaking rate
-        if speech_ratio > 0.8:
-            rate_category = "fast"
-        elif speech_ratio > 0.5:
-            rate_category = "normal"
-        elif speech_ratio > 0.2:
-            rate_category = "slow"
-        else:
-            rate_category = "very_slow"
-        
-        return {
-            "speech_ratio": float(speech_ratio),
-            "rate_category": rate_category,
-            "estimated_speech_duration": float(speech_ratio * duration)
-        }
+        except Exception as e:
+            logger.warning(f"Error in speaking rate analysis: {e}")
+            return {
+                "speech_ratio": 0.0,
+                "rate_category": "unknown",
+                "estimated_speech_duration": 0.0,
+                "error": str(e)
+            }
     
     def _extract_spectral_features(self, audio: np.ndarray, sample_rate: int) -> Dict[str, Any]:
         """Extract spectral features using librosa if available"""
         try:
+            # Validate inputs
+            if sample_rate is None or sample_rate <= 0:
+                logger.warning("Invalid sample_rate for spectral analysis")
+                return {"error": "invalid_sample_rate"}
+            
+            if audio is None or len(audio) == 0:
+                logger.warning("Invalid audio for spectral analysis")
+                return {"error": "invalid_audio"}
+            
             # Compute spectral centroid (brightness)
             spectral_centroids = librosa.feature.spectral_centroid(y=audio, sr=sample_rate)[0]
             spectral_centroid_mean = np.mean(spectral_centroids)
@@ -340,19 +395,27 @@ class EnhancedTranscriptionProcessor:
         except Exception as e:
             logger.debug(f"Librosa not available or spectral analysis failed: {e}")
             
-            # Fallback to basic spectral analysis
-            fft = np.fft.fft(audio)
-            freqs = np.fft.fftfreq(len(fft), 1/sample_rate)
-            magnitude = np.abs(fft)
+            try:
+                # Fallback to basic spectral analysis
+                fft = np.fft.fft(audio)
+                freqs = np.fft.fftfreq(len(fft), 1/sample_rate)
+                magnitude = np.abs(fft)
+                
+                # Find dominant frequency
+                dominant_freq_idx = np.argmax(magnitude[:len(magnitude)//2])
+                dominant_freq = abs(freqs[dominant_freq_idx])
+                
+                return {
+                    "dominant_frequency": float(dominant_freq),
+                    "voice_characteristics": self._categorize_voice_basic(dominant_freq)
+                }
             
-            # Find dominant frequency
-            dominant_freq_idx = np.argmax(magnitude[:len(magnitude)//2])
-            dominant_freq = abs(freqs[dominant_freq_idx])
-            
-            return {
-                "dominant_frequency": float(dominant_freq),
-                "voice_characteristics": self._categorize_voice_basic(dominant_freq)
-            }
+            except Exception as fallback_error:
+                logger.warning(f"Fallback spectral analysis also failed: {fallback_error}")
+                return {
+                    "error": "spectral_analysis_failed",
+                    "voice_characteristics": "unknown"
+                }
     
     def _interpret_spectral_features(self, centroid: float, zcr: float, rolloff: float) -> str:
         """Interpret spectral features to describe voice characteristics"""
@@ -376,87 +439,144 @@ class EnhancedTranscriptionProcessor:
     
     def _analyze_voice_stress(self, audio: np.ndarray, sample_rate: int) -> Dict[str, Any]:
         """Analyze voice stress indicators"""
+        try:
+            # Validate inputs
+            if sample_rate is None or sample_rate <= 0:
+                logger.warning("Invalid sample_rate for voice stress analysis")
+                return {"error": "invalid_sample_rate"}
+            
+            if audio is None or len(audio) == 0:
+                logger.warning("Invalid audio for voice stress analysis")
+                return {"error": "invalid_audio"}
+            
+            # Jitter analysis (frequency variation)
+            # Simple approximation using energy variance
+            frame_size = int(0.02 * sample_rate)  # 20ms frames
+            
+            # Ensure frame_size is valid
+            if frame_size <= 0 or frame_size >= len(audio):
+                return {
+                    "jitter_estimate": 0.0,
+                    "stress_level": "unknown",
+                    "energy_variance": 0.0
+                }
+            
+            frame_energies = []
+            
+            for i in range(0, len(audio) - frame_size, frame_size):
+                frame = audio[i:i + frame_size]
+                energy = np.sum(frame ** 2)
+                frame_energies.append(energy)
+            
+            if len(frame_energies) > 1:
+                energy_variance = np.var(frame_energies)
+                energy_mean = np.mean(frame_energies)
+                jitter_estimate = energy_variance / (energy_mean + 1e-8)
+            else:
+                jitter_estimate = 0.0
+                energy_variance = 0.0
+            
+            # Stress level categorization
+            if jitter_estimate > 0.5:
+                stress_level = "high"
+            elif jitter_estimate > 0.2:
+                stress_level = "moderate"
+            else:
+                stress_level = "low"
+            
+            return {
+                "jitter_estimate": float(jitter_estimate),
+                "stress_level": stress_level,
+                "energy_variance": float(energy_variance)
+            }
         
-        # Jitter analysis (frequency variation)
-        # Simple approximation using energy variance
-        frame_size = int(0.02 * sample_rate)  # 20ms frames
-        frame_energies = []
-        
-        for i in range(0, len(audio) - frame_size, frame_size):
-            frame = audio[i:i + frame_size]
-            energy = np.sum(frame ** 2)
-            frame_energies.append(energy)
-        
-        if len(frame_energies) > 1:
-            energy_variance = np.var(frame_energies)
-            energy_mean = np.mean(frame_energies)
-            jitter_estimate = energy_variance / (energy_mean + 1e-8)
-        else:
-            jitter_estimate = 0.0
-        
-        # Stress level categorization
-        if jitter_estimate > 0.5:
-            stress_level = "high"
-        elif jitter_estimate > 0.2:
-            stress_level = "moderate"
-        else:
-            stress_level = "low"
-        
-        return {
-            "jitter_estimate": float(jitter_estimate),
-            "stress_level": stress_level,
-            "energy_variance": float(energy_variance) if 'energy_variance' in locals() else 0.0
-        }
+        except Exception as e:
+            logger.warning(f"Error in voice stress analysis: {e}")
+            return {
+                "jitter_estimate": 0.0,
+                "stress_level": "unknown",
+                "energy_variance": 0.0,
+                "error": str(e)
+            }
     
     def _analyze_pauses(self, audio: np.ndarray, sample_rate: int) -> Dict[str, Any]:
         """Analyze pauses and silence patterns"""
+        try:
+            # Validate inputs
+            if sample_rate is None or sample_rate <= 0:
+                logger.warning("Invalid sample_rate for pause analysis")
+                return {"error": "invalid_sample_rate"}
+            
+            if audio is None or len(audio) == 0:
+                logger.warning("Invalid audio for pause analysis")
+                return {"error": "invalid_audio"}
+            
+            # Detect silence/pauses
+            frame_length = int(0.01 * sample_rate)  # 10ms frames
+            
+            # Ensure frame_length is valid
+            if frame_length <= 0 or frame_length >= len(audio):
+                return {
+                    "total_pause_time": 0.0,
+                    "average_pause_duration": 0.0,
+                    "pause_count": 0,
+                    "speaking_style": "unknown"
+                }
+            
+            silence_threshold = np.max(np.abs(audio)) * 0.01  # 1% of peak amplitude
+            
+            silence_frames = []
+            for i in range(0, len(audio) - frame_length, frame_length):
+                frame = audio[i:i + frame_length]
+                is_silent = np.max(np.abs(frame)) < silence_threshold
+                silence_frames.append(is_silent)
+            
+            # Count pause segments
+            pause_segments = []
+            in_pause = False
+            pause_start = 0
+            
+            for i, is_silent in enumerate(silence_frames):
+                if is_silent and not in_pause:
+                    in_pause = True
+                    pause_start = i
+                elif not is_silent and in_pause:
+                    in_pause = False
+                    pause_duration = (i - pause_start) * frame_length / sample_rate
+                    if pause_duration > 0.1:  # Only count pauses > 100ms
+                        pause_segments.append(pause_duration)
+            
+            # Analyze pause patterns
+            total_pause_time = sum(pause_segments) if pause_segments else 0
+            avg_pause_duration = np.mean(pause_segments) if pause_segments else 0
+            pause_count = len(pause_segments)
+            
+            # Categorize speaking style based on pauses
+            if pause_count == 0:
+                speaking_style = "continuous"
+            elif avg_pause_duration > 1.0:
+                speaking_style = "deliberate"
+            elif avg_pause_duration > 0.5:
+                speaking_style = "measured"
+            else:
+                speaking_style = "fluent"
+            
+            return {
+                "total_pause_time": float(total_pause_time),
+                "average_pause_duration": float(avg_pause_duration),
+                "pause_count": int(pause_count),
+                "speaking_style": speaking_style
+            }
         
-        # Detect silence/pauses
-        frame_length = int(0.01 * sample_rate)  # 10ms frames
-        silence_threshold = np.max(np.abs(audio)) * 0.01  # 1% of peak amplitude
-        
-        silence_frames = []
-        for i in range(0, len(audio) - frame_length, frame_length):
-            frame = audio[i:i + frame_length]
-            is_silent = np.max(np.abs(frame)) < silence_threshold
-            silence_frames.append(is_silent)
-        
-        # Count pause segments
-        pause_segments = []
-        in_pause = False
-        pause_start = 0
-        
-        for i, is_silent in enumerate(silence_frames):
-            if is_silent and not in_pause:
-                in_pause = True
-                pause_start = i
-            elif not is_silent and in_pause:
-                in_pause = False
-                pause_duration = (i - pause_start) * frame_length / sample_rate
-                if pause_duration > 0.1:  # Only count pauses > 100ms
-                    pause_segments.append(pause_duration)
-        
-        # Analyze pause patterns
-        total_pause_time = sum(pause_segments)
-        avg_pause_duration = np.mean(pause_segments) if pause_segments else 0
-        pause_count = len(pause_segments)
-        
-        # Categorize speaking style based on pauses
-        if pause_count == 0:
-            speaking_style = "continuous"
-        elif avg_pause_duration > 1.0:
-            speaking_style = "deliberate"
-        elif avg_pause_duration > 0.5:
-            speaking_style = "measured"
-        else:
-            speaking_style = "fluent"
-        
-        return {
-            "total_pause_time": float(total_pause_time),
-            "average_pause_duration": float(avg_pause_duration),
-            "pause_count": int(pause_count),
-            "speaking_style": speaking_style
-        }
+        except Exception as e:
+            logger.warning(f"Error in pause analysis: {e}")
+            return {
+                "total_pause_time": 0.0,
+                "average_pause_duration": 0.0,
+                "pause_count": 0,
+                "speaking_style": "unknown",
+                "error": str(e)
+            }
     
     def analyze_conversation_dynamics(self, segments: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Analyze overall conversation dynamics"""
@@ -556,52 +676,94 @@ class EnhancedTranscriptionProcessor:
         """
         Process transcription with enhanced sentiment and audio analysis
         """
-        enhanced_segments = []
+        try:
+            enhanced_segments = []
+            
+            for segment in transcription_result.get("segments", []):
+                start_time = segment.get("start", 0)
+                end_time = segment.get("end", 0)
+                text = segment.get("text", "")
+                speaker = segment.get("speaker", "Unknown")
+                
+                # Validate segment timing
+                if start_time is None or end_time is None:
+                    logger.warning(f"Segment has invalid timing: start={start_time}, end={end_time}")
+                    start_time = 0 if start_time is None else start_time
+                    end_time = 0 if end_time is None else end_time
+                
+                # Ensure valid timing order
+                if start_time > end_time:
+                    logger.warning(f"Segment has invalid timing order: start={start_time} > end={end_time}")
+                    start_time, end_time = end_time, start_time
+                
+                # Extract audio segment
+                start_sample = int(start_time * sample_rate) if sample_rate else 0
+                end_sample = int(end_time * sample_rate) if sample_rate else 0
+                
+                # Create enhanced segment
+                enhanced_segment = segment.copy()
+                
+                # Add sentiment analysis
+                if text.strip():
+                    try:
+                        sentiment_analysis = self.analyze_sentiment(text)
+                        enhanced_segment["sentiment_analysis"] = sentiment_analysis
+                    except Exception as e:
+                        logger.warning(f"Sentiment analysis failed for segment: {e}")
+                        enhanced_segment["sentiment_analysis"] = {"error": str(e)}
+                
+                # Add audio features if segment is long enough and data is valid
+                if (waveform is not None and sample_rate is not None and 
+                    end_sample > start_sample and end_sample <= waveform.shape[1]):
+                    
+                    segment_duration = (end_sample - start_sample) / sample_rate
+                    if segment_duration >= 0.5:  # Only analyze segments >= 0.5 seconds
+                        try:
+                            segment_waveform = waveform[:, start_sample:end_sample]
+                            audio_features = self.extract_audio_features(
+                                segment_waveform, sample_rate, start_time, end_time
+                            )
+                            # Only add if no error occurred
+                            if "error" not in audio_features:
+                                enhanced_segment["audio_features"] = audio_features
+                            else:
+                                logger.debug(f"Audio features extraction failed: {audio_features['error']}")
+                        except Exception as e:
+                            logger.warning(f"Audio features extraction failed for segment: {e}")
+                
+                enhanced_segments.append(enhanced_segment)
+            
+            # Analyze overall conversation dynamics
+            try:
+                conversation_analysis = self.analyze_conversation_dynamics(enhanced_segments)
+            except Exception as e:
+                logger.warning(f"Conversation dynamics analysis failed: {e}")
+                conversation_analysis = {"error": str(e)}
+            
+            # Create enhanced result
+            enhanced_result = transcription_result.copy()
+            enhanced_result["segments"] = enhanced_segments
+            enhanced_result["conversation_analysis"] = conversation_analysis
+            enhanced_result["enhancement_info"] = {
+                "sentiment_model": self.sentiment_model,
+                "features_extracted": ["sentiment", "audio_features", "conversation_dynamics"],
+                "processing_timestamp": datetime.now().isoformat(),
+                "segments_processed": len(enhanced_segments)
+            }
+            
+            return enhanced_result
         
-        for segment in transcription_result.get("segments", []):
-            start_time = segment.get("start", 0)
-            end_time = segment.get("end", 0)
-            text = segment.get("text", "")
-            speaker = segment.get("speaker", "Unknown")
-            
-            # Extract audio segment
-            start_sample = int(start_time * sample_rate)
-            end_sample = int(end_time * sample_rate)
-            
-            # Create enhanced segment
-            enhanced_segment = segment.copy()
-            
-            # Add sentiment analysis
-            if text.strip():
-                sentiment_analysis = self.analyze_sentiment(text)
-                enhanced_segment["sentiment_analysis"] = sentiment_analysis
-            
-            # Add audio features if segment is long enough
-            if end_sample > start_sample and end_sample <= waveform.shape[1]:
-                segment_duration = (end_sample - start_sample) / sample_rate
-                if segment_duration >= 0.5:  # Only analyze segments >= 0.5 seconds
-                    segment_waveform = waveform[:, start_sample:end_sample]
-                    audio_features = self.extract_audio_features(
-                        segment_waveform, sample_rate, start_time, end_time
-                    )
-                    enhanced_segment["audio_features"] = audio_features
-            
-            enhanced_segments.append(enhanced_segment)
-        
-        # Analyze overall conversation dynamics
-        conversation_analysis = self.analyze_conversation_dynamics(enhanced_segments)
-        
-        # Create enhanced result
-        enhanced_result = transcription_result.copy()
-        enhanced_result["segments"] = enhanced_segments
-        enhanced_result["conversation_analysis"] = conversation_analysis
-        enhanced_result["enhancement_info"] = {
-            "sentiment_model": self.sentiment_model,
-            "features_extracted": ["sentiment", "audio_features", "conversation_dynamics"],
-            "processing_timestamp": datetime.now().isoformat()
-        }
-        
-        return enhanced_result
+        except Exception as e:
+            logger.error(f"Enhanced transcription processing failed: {e}")
+            # Return original result with error info
+            error_result = transcription_result.copy()
+            error_result["enhancement_error"] = str(e)
+            error_result["enhancement_info"] = {
+                "enhancement_failed": True,
+                "error": str(e),
+                "processing_timestamp": datetime.now().isoformat()
+            }
+            return error_result
     
     def process_with_summary_and_annotations(self, transcription_result: Dict[str, Any], 
                                            waveform: Any, sample_rate: int,

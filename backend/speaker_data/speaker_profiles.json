@@ -423,11 +423,11 @@
     "speaker_id": "AUTO_SPEAKER_043",
     "name": "Speaker_AUTO_SPEAKER_043",
     "created_date": "2025-06-02T15:23:39.602673",
-    "last_seen": "2025-06-03T17:31:31.770067",
+    "last_seen": "2025-06-03T21:43:47.344525",
     "session_count": 0,
     "total_audio_seconds": 0.0,
-    "embedding_count": 25,
-    "average_confidence": 0.9043177449322584
+    "embedding_count": 26,
+    "average_confidence": 0.9062173373339152
   },
   "AUTO_SPEAKER_044": {
     "speaker_id": "AUTO_SPEAKER_044",
@@ -3193,11 +3193,11 @@
     "speaker_id": "AUTO_SPEAKER_320",
     "name": "Speaker_AUTO_SPEAKER_320",
     "created_date": "2025-06-02T15:41:55.796653",
-    "last_seen": "2025-06-02T21:05:31.017236",
+    "last_seen": "2025-06-03T21:43:17.859921",
     "session_count": 0,
     "total_audio_seconds": 0.0,
-    "embedding_count": 35,
-    "average_confidence": 0.8575749646300528
+    "embedding_count": 36,
+    "average_confidence": 0.854627800653954
   },
   "AUTO_SPEAKER_321": {
     "speaker_id": "AUTO_SPEAKER_321",
@@ -3673,11 +3673,11 @@
     "speaker_id": "AUTO_SPEAKER_368",
     "name": "Speaker_AUTO_SPEAKER_368",
     "created_date": "2025-06-02T18:41:14.711489",
-    "last_seen": "2025-06-02T21:05:18.593854",
+    "last_seen": "2025-06-03T21:43:13.829222",
     "session_count": 0,
     "total_audio_seconds": 0.0,
-    "embedding_count": 6,
-    "average_confidence": 0.9999999772062901
+    "embedding_count": 7,
+    "average_confidence": 0.9705281161741658
   },
   "AUTO_SPEAKER_369": {
     "speaker_id": "AUTO_SPEAKER_369",
@@ -4348,5 +4348,265 @@
     "total_audio_seconds": 0.0,
     "embedding_count": 6,
     "average_confidence": 0.9999999634697575
+  },
+  "AUTO_SPEAKER_436": {
+    "speaker_id": "AUTO_SPEAKER_436",
+    "name": "Speaker_AUTO_SPEAKER_436",
+    "created_date": "2025-06-03T21:43:10.507780",
+    "last_seen": "2025-06-03T21:43:10.507792",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_437": {
+    "speaker_id": "AUTO_SPEAKER_437",
+    "name": "Speaker_AUTO_SPEAKER_437",
+    "created_date": "2025-06-03T21:43:10.866502",
+    "last_seen": "2025-06-03T21:43:10.866516",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_438": {
+    "speaker_id": "AUTO_SPEAKER_438",
+    "name": "Speaker_AUTO_SPEAKER_438",
+    "created_date": "2025-06-03T21:43:11.444828",
+    "last_seen": "2025-06-03T21:43:11.444839",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_439": {
+    "speaker_id": "AUTO_SPEAKER_439",
+    "name": "Speaker_AUTO_SPEAKER_439",
+    "created_date": "2025-06-03T21:43:14.162414",
+    "last_seen": "2025-06-03T21:43:14.162425",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_440": {
+    "speaker_id": "AUTO_SPEAKER_440",
+    "name": "Speaker_AUTO_SPEAKER_440",
+    "created_date": "2025-06-03T21:43:14.487645",
+    "last_seen": "2025-06-03T21:43:22.834870",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 7,
+    "average_confidence": 0.834088068952596
+  },
+  "AUTO_SPEAKER_441": {
+    "speaker_id": "AUTO_SPEAKER_441",
+    "name": "Speaker_AUTO_SPEAKER_441",
+    "created_date": "2025-06-03T21:43:15.200527",
+    "last_seen": "2025-06-03T21:43:15.200538",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_442": {
+    "speaker_id": "AUTO_SPEAKER_442",
+    "name": "Speaker_AUTO_SPEAKER_442",
+    "created_date": "2025-06-03T21:43:18.162320",
+    "last_seen": "2025-06-03T21:43:18.162330",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_443": {
+    "speaker_id": "AUTO_SPEAKER_443",
+    "name": "Speaker_AUTO_SPEAKER_443",
+    "created_date": "2025-06-03T21:43:18.465608",
+    "last_seen": "2025-06-03T21:43:18.465619",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_444": {
+    "speaker_id": "AUTO_SPEAKER_444",
+    "name": "Speaker_AUTO_SPEAKER_444",
+    "created_date": "2025-06-03T21:43:23.211190",
+    "last_seen": "2025-06-03T21:43:23.211200",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_445": {
+    "speaker_id": "AUTO_SPEAKER_445",
+    "name": "Speaker_AUTO_SPEAKER_445",
+    "created_date": "2025-06-03T21:43:23.573484",
+    "last_seen": "2025-06-03T21:43:23.573494",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_446": {
+    "speaker_id": "AUTO_SPEAKER_446",
+    "name": "Speaker_AUTO_SPEAKER_446",
+    "created_date": "2025-06-03T21:43:23.938833",
+    "last_seen": "2025-06-03T21:43:23.938844",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_447": {
+    "speaker_id": "AUTO_SPEAKER_447",
+    "name": "Speaker_AUTO_SPEAKER_447",
+    "created_date": "2025-06-03T21:43:24.318490",
+    "last_seen": "2025-06-03T21:43:24.318501",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_448": {
+    "speaker_id": "AUTO_SPEAKER_448",
+    "name": "Speaker_AUTO_SPEAKER_448",
+    "created_date": "2025-06-03T21:43:25.099314",
+    "last_seen": "2025-06-03T21:43:25.099327",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_449": {
+    "speaker_id": "AUTO_SPEAKER_449",
+    "name": "Speaker_AUTO_SPEAKER_449",
+    "created_date": "2025-06-03T21:43:25.537664",
+    "last_seen": "2025-06-03T21:43:25.537675",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_450": {
+    "speaker_id": "AUTO_SPEAKER_450",
+    "name": "Speaker_AUTO_SPEAKER_450",
+    "created_date": "2025-06-03T21:43:26.001050",
+    "last_seen": "2025-06-03T21:43:26.001061",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_451": {
+    "speaker_id": "AUTO_SPEAKER_451",
+    "name": "Speaker_AUTO_SPEAKER_451",
+    "created_date": "2025-06-03T21:43:26.406519",
+    "last_seen": "2025-06-03T21:43:26.406529",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_452": {
+    "speaker_id": "AUTO_SPEAKER_452",
+    "name": "Speaker_AUTO_SPEAKER_452",
+    "created_date": "2025-06-03T21:43:26.801186",
+    "last_seen": "2025-06-03T21:43:26.801196",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_453": {
+    "speaker_id": "AUTO_SPEAKER_453",
+    "name": "Speaker_AUTO_SPEAKER_453",
+    "created_date": "2025-06-03T21:43:27.202596",
+    "last_seen": "2025-06-03T21:43:27.202608",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_454": {
+    "speaker_id": "AUTO_SPEAKER_454",
+    "name": "Speaker_AUTO_SPEAKER_454",
+    "created_date": "2025-06-03T21:43:27.623646",
+    "last_seen": "2025-06-03T21:43:27.623657",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_455": {
+    "speaker_id": "AUTO_SPEAKER_455",
+    "name": "Speaker_AUTO_SPEAKER_455",
+    "created_date": "2025-06-03T21:43:28.094584",
+    "last_seen": "2025-06-03T21:43:28.094595",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_456": {
+    "speaker_id": "AUTO_SPEAKER_456",
+    "name": "Speaker_AUTO_SPEAKER_456",
+    "created_date": "2025-06-03T21:43:28.476638",
+    "last_seen": "2025-06-03T21:43:28.476648",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_457": {
+    "speaker_id": "AUTO_SPEAKER_457",
+    "name": "Speaker_AUTO_SPEAKER_457",
+    "created_date": "2025-06-03T21:43:28.891704",
+    "last_seen": "2025-06-03T21:43:28.891715",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_458": {
+    "speaker_id": "AUTO_SPEAKER_458",
+    "name": "Speaker_AUTO_SPEAKER_458",
+    "created_date": "2025-06-03T21:43:29.306612",
+    "last_seen": "2025-06-03T21:43:47.738641",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 5,
+    "average_confidence": 0.8739948428108276
+  },
+  "AUTO_SPEAKER_459": {
+    "speaker_id": "AUTO_SPEAKER_459",
+    "name": "Speaker_AUTO_SPEAKER_459",
+    "created_date": "2025-06-03T21:43:30.106227",
+    "last_seen": "2025-06-03T21:43:30.106238",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_460": {
+    "speaker_id": "AUTO_SPEAKER_460",
+    "name": "Speaker_AUTO_SPEAKER_460",
+    "created_date": "2025-06-03T21:43:30.478801",
+    "last_seen": "2025-06-03T21:43:30.478811",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
+  },
+  "AUTO_SPEAKER_461": {
+    "speaker_id": "AUTO_SPEAKER_461",
+    "name": "Speaker_AUTO_SPEAKER_461",
+    "created_date": "2025-06-03T21:43:46.666990",
+    "last_seen": "2025-06-03T21:43:46.667002",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 1.0
   }
 }
