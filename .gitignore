@@ -70,3 +70,6 @@ Thumbs.db
 
 # Transcription output files
 Transcriptions/
+
+# Build output directories
+publish-standalone/
