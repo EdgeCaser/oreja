@@ -1,6 +1,6 @@
 @echo off
-title Oreja Complete Launcher
-echo 🎙️ Starting Oreja Complete Launcher...
+title Oreja Complete Launcher - Updated
+echo 🎙️ Starting Oreja Complete Launcher (Updated with Working Live Transcription)...
 echo.
 
 REM Check if virtual environment exists and use it

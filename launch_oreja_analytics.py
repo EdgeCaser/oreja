@@ -14,10 +14,12 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import webbrowser
+import shutil
 
 class OrejaLauncher:
     def __init__(self):
         self.backend_process = None
+        self.live_transcription_process = None  # Track live transcription process
         self.backend_ready = False
         
         # Setup main window
@@ -96,12 +98,24 @@ class OrejaLauncher:
         
         ttk.Label(live_frame, text="🎙️ Live Transcription", 
                  font=("Arial", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(live_frame, text="Real-time audio capture and transcription", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+        ttk.Label(live_frame, text="✅ WORKING: Full WPF app with independent mic/system audio, volume meters, live transcription", 
+                 font=("Arial", 8), foreground="darkgreen").pack(anchor=tk.W)
         
-        self.live_btn = ttk.Button(live_frame, text="Start Live Transcription", 
+        # Live transcription status and buttons
+        live_controls = ttk.Frame(live_frame)
+        live_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        self.live_btn = ttk.Button(live_controls, text="Start Live Transcription", 
                                   command=self.launch_live_transcription, state="disabled")
-        self.live_btn.pack(anchor=tk.W, pady=(5, 0))
+        self.live_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.stop_live_btn = ttk.Button(live_controls, text="Stop Live Transcription", 
+                                       command=self.stop_live_transcription, state="disabled")
+        self.stop_live_btn.pack(side=tk.LEFT)
+        
+        self.live_status = ttk.Label(live_controls, text="⏸️ Not Running", 
+                                    font=("Arial", 8), foreground="gray")
+        self.live_status.pack(side=tk.RIGHT)
         
         # Speaker Analytics
         analytics_frame = ttk.Frame(frontend_frame)
@@ -201,7 +215,10 @@ class OrejaLauncher:
     
     def enable_frontend_buttons(self):
         """Enable frontend buttons when backend is ready"""
-        self.live_btn.config(state="normal")
+        # Only enable start button if live transcription is not running
+        if not (self.live_transcription_process and self.live_transcription_process.poll() is None):
+            self.live_btn.config(state="normal")
+            
         self.analytics_btn.config(state="normal")
         self.editor_btn.config(state="normal")
         self.file_btn.config(state="normal")
@@ -211,6 +228,8 @@ class OrejaLauncher:
     def disable_frontend_buttons(self):
         """Disable frontend buttons when backend is not ready"""
         self.live_btn.config(state="disabled")
+        self.stop_live_btn.config(state="disabled")
+        self.live_status.config(text="⏸️ Backend Required", foreground="gray")
         self.analytics_btn.config(state="disabled")
         self.editor_btn.config(state="disabled")
         self.file_btn.config(state="disabled")
@@ -295,6 +314,16 @@ class OrejaLauncher:
         self.start_backend_btn.config(state="normal")
         self.stop_backend_btn.config(state="disabled")
         self.disable_frontend_buttons()
+        
+        # Also stop live transcription if running since it needs the backend
+        if self.live_transcription_process and self.live_transcription_process.poll() is None:
+            try:
+                self.live_transcription_process.terminate()
+                self.live_transcription_process = None
+                self.live_status.config(text="⏸️ Stopped (Backend Down)", foreground="gray")
+                self.stop_live_btn.config(state="disabled")
+            except:
+                pass  # Process might already be dead
     
     def launch_analytics(self):
         """Launch speaker analytics GUI"""
@@ -309,24 +338,112 @@ class OrejaLauncher:
             messagebox.showerror("Error", f"Failed to launch analytics: {e}")
     
     def launch_live_transcription(self):
-        """Launch live transcription (C# Standalone App)"""
+        """Launch live transcription (C# WPF App via dotnet run)"""
         if not self.backend_ready:
             messagebox.showerror("Error", "Backend must be running first!")
             return
         
-        standalone_exe = Path("publish-standalone/Oreja.exe")
-        if not standalone_exe.exists():
-            messagebox.showerror("Error", "Live transcription standalone app not found! Build the standalone C# application first.")
+        # Check if dotnet is available
+        if not shutil.which("dotnet"):
+            messagebox.showerror("Error", ".NET SDK not found! Please install .NET 8.0 SDK first.")
             return
         
+        # Check if project file exists
+        project_file = Path("oreja.csproj")
+        if not project_file.exists():
+            messagebox.showerror("Error", "Project file 'oreja.csproj' not found! Make sure you're in the correct directory.")
+            return
+        
+        # Check if there's already a live transcription process running
+        if self.live_transcription_process and self.live_transcription_process.poll() is None:
+            response = messagebox.askyesno("Live Transcription Running", 
+                                         "Live transcription is already running. Do you want to start another instance?")
+            if not response:
+                return
+        
         try:
-            subprocess.Popen([str(standalone_exe)])
+            # Update UI to show starting state
+            self.live_status.config(text="⏳ Starting...", foreground="orange")
+            self.live_btn.config(state="disabled")
+            
+            # Launch using dotnet run (the working method)
+            self.live_transcription_process = subprocess.Popen([
+                "dotnet", "run", "--project", "oreja.csproj"
+            ], cwd=Path.cwd())
+            
             messagebox.showinfo("Live Transcription", 
-                               "Standalone live transcription app launched!\n\n" +
-                               "This is your newer live microphone transcription interface\n" +
-                               "with device selection and real-time processing.")
+                               "✅ Working live transcription GUI launched!\n\n" +
+                               "🎙️ Features:\n" +
+                               "• ✅ Independent microphone & system audio selection\n" +
+                               "• ✅ Real-time volume meters for both sources\n" +
+                               "• ✅ Live transcription with speaker recognition\n" +
+                               "• ✅ Speaker renaming and assignment\n" +
+                               "• ✅ Audio monitoring controls\n" +
+                               "• ✅ Save transcription functionality\n" +
+                               "• ✅ Professional WPF interface\n\n" +
+                               "The window should appear shortly...")
+            
+            # Update UI to show running state
+            self.live_status.config(text="🎙️ Running", foreground="green")
+            self.stop_live_btn.config(state="normal")
+            
+            # Monitor the process in a separate thread
+            threading.Thread(target=self._monitor_live_transcription, daemon=True).start()
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to launch live transcription: {e}")
+            self.live_status.config(text="❌ Failed", foreground="red")
+            self.live_btn.config(state="normal")
+            messagebox.showerror("Error", f"Failed to launch live transcription: {e}\n\n" +
+                               "Make sure .NET 8.0 SDK is installed and the project builds successfully.")
+
+    def stop_live_transcription(self):
+        """Stop the live transcription process"""
+        if self.live_transcription_process and self.live_transcription_process.poll() is None:
+            try:
+                self.live_transcription_process.terminate()
+                self.live_transcription_process = None
+                
+                # Update UI
+                self.live_status.config(text="⏸️ Stopped", foreground="gray")
+                self.live_btn.config(state="normal")
+                self.stop_live_btn.config(state="disabled")
+                
+                messagebox.showinfo("Live Transcription", "Live transcription has been stopped.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to stop live transcription: {e}")
+        else:
+            messagebox.showwarning("Warning", "No live transcription process is currently running.")
+
+    def _monitor_live_transcription(self):
+        """Monitor the live transcription process"""
+        if self.live_transcription_process:
+            # Wait a moment for the process to start
+            time.sleep(2)
+            
+            # Check if process is still running
+            if self.live_transcription_process.poll() is not None:
+                # Process has exited, update UI on main thread
+                self.root.after(0, self._live_transcription_stopped_callback)
+            else:
+                # Process is running, continue monitoring
+                self.root.after(0, lambda: self.live_status.config(text="🎙️ Running", foreground="green"))
+
+    def _live_transcription_stopped_callback(self):
+        """Called when live transcription process stops unexpectedly"""
+        self.live_status.config(text="❌ Stopped Unexpectedly", foreground="red")
+        self.live_btn.config(state="normal")
+        self.stop_live_btn.config(state="disabled")
+        
+        messagebox.showerror(
+            "Live Transcription Error", 
+            "Live transcription process exited unexpectedly.\n\n" +
+            "This might be due to:\n" +
+            "• Missing dependencies\n" +
+            "• Build errors in the project\n" +
+            "• Audio device access issues\n\n" +
+            "Try building the project manually first:\n" +
+            "dotnet build oreja.csproj"
+        )
     
     def launch_file_transcriber(self):
         """Launch file transcription tool"""
@@ -410,8 +527,18 @@ class OrejaLauncher:
     
     def on_closing(self):
         """Handle application closing"""
-        if self.backend_process:
-            self.backend_process.terminate()
+        try:
+            if self.live_transcription_process and self.live_transcription_process.poll() is None:
+                self.live_transcription_process.terminate()
+        except:
+            pass
+            
+        try:
+            if self.backend_process:
+                self.backend_process.terminate()
+        except:
+            pass
+            
         self.root.destroy()
     
     def run(self):
