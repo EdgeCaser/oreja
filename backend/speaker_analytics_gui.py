@@ -302,18 +302,15 @@ class SpeakerAnalyticsDashboard:
     
     def on_batch_privacy_mode_changed(self):
         """Handle privacy mode toggle for batch processing"""
-        privacy_enabled = self.batch_privacy_mode_var.get()
+        privacy_mode = self.batch_privacy_mode_var.get()
         
-        if privacy_enabled:
-            self.batch_privacy_info.config(text="Privacy mode: Speaker IDs will be anonymized (Speaker_A, Speaker_B, etc.)")
+        if privacy_mode:
+            self.batch_privacy_info.config(text="Legal-Safe Mode: Only analysis will be saved (no verbatim transcription)")
         else:
-            self.batch_privacy_info.config(text="Privacy mode disabled: Original speaker IDs will be preserved")
+            self.batch_privacy_info.config(text="Legal-Safe Mode disabled: Full transcription will be saved")
         
-        # Optionally disable speaker mapping when privacy mode is enabled
-        if hasattr(self, 'speaker_mapping_var'):
-            # You might want to disable speaker mapping in privacy mode
-            # since it would conflict with anonymization
-            pass
+        # Optionally disable speaker mapping when legal-safe mode is enabled
+        # Legal-safe mode and speaker mapping can coexist but mapping is less relevant
     
     def analyze_transcription(self):
         """Analyze the selected transcription file"""
@@ -888,16 +885,16 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                                                                sticky=tk.W, padx=5, pady=5)
         
         # Privacy mode toggle
-        self.batch_privacy_mode_var = tk.BooleanVar(value=False)
-        privacy_checkbox = ttk.Checkbutton(settings_grid, text="🔒 Privacy Mode (anonymous speaker IDs)", 
-                                          variable=self.batch_privacy_mode_var,
-                                          command=self.on_batch_privacy_mode_changed)
-        privacy_checkbox.grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        self.batch_privacy_mode_var = tk.BooleanVar()
+        privacy_checkbox = ttk.Checkbutton(settings_grid, text="🔒 Legal-Safe Mode (no verbatim text saved)",
+                                           variable=self.batch_privacy_mode_var,
+                                           command=self.on_batch_privacy_mode_changed)
+        privacy_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=5)
         
         # Privacy mode info label
-        self.batch_privacy_info = ttk.Label(settings_grid, text="Privacy mode disabled: Original speaker IDs will be preserved", 
-                                           font=('Arial', 8), foreground='gray')
-        self.batch_privacy_info.grid(row=1, column=4, columnspan=2, sticky=tk.W, padx=5)
+        self.batch_privacy_info = ttk.Label(settings_grid, text="Legal-Safe Mode disabled: Full transcription will be saved",
+                                            font=("Arial", 8), foreground="gray")
+        self.batch_privacy_info.grid(row=4, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 5))
         
         # Speaker name mapping
         ttk.Label(settings_grid, text="Speaker Mapping:").grid(row=2, column=0, sticky=tk.W, padx=5)

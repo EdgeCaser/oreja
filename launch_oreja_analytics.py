@@ -25,7 +25,7 @@ class OrejaLauncher:
         # Setup main window
         self.root = tk.Tk()
         self.root.title("🎙️ Oreja Launcher")
-        self.root.geometry("600x700")
+        self.root.geometry("600x800")  # Keep original width (600), but taller (800)
         self.root.resizable(True, True)
         
         # Style configuration
@@ -98,8 +98,8 @@ class OrejaLauncher:
         
         ttk.Label(live_frame, text="🎙️ Live Transcription", 
                  font=("Arial", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(live_frame, text="✅ WORKING: Full WPF app with independent mic/system audio, volume meters, live transcription", 
-                 font=("Arial", 8), foreground="darkgreen").pack(anchor=tk.W)
+        ttk.Label(live_frame, text="Full WPF app with independent mic/system audio, volume meters, live transcription", 
+                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
         
         # Live transcription status and buttons
         live_controls = ttk.Frame(live_frame)

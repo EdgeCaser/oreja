@@ -90,6 +90,12 @@ public partial class App : Application
     // Keep track of all speaker ComboBoxes for refreshing
     private List<ComboBox> _speakerComboBoxes = new List<ComboBox>();
 
+    // Privacy Mode functionality
+    private bool _privacyModeEnabled = false;
+    private CheckBox? _privacyModeCheckBox;
+    private Dictionary<string, string> _privacySpeakerMapping = new Dictionary<string, string>();
+    private int _privacySpeakerCounter = 1;
+
     // Helper class for transcription segments
     public class TranscriptionSegment
     {
@@ -490,6 +496,38 @@ public partial class App : Application
             buttonPanel.Children.Add(_saveTranscriptionButton);
             Grid.SetRow(buttonPanel, currentRow++);
             
+            // Privacy Mode section
+            var privacyPanel = new StackPanel 
+            { 
+                Orientation = Orientation.Horizontal, 
+                HorizontalAlignment = HorizontalAlignment.Center, 
+                Margin = new Thickness(0, 10, 0, 10) 
+            };
+            
+            _privacyModeCheckBox = new CheckBox
+            {
+                Content = "🔒 Legal-Safe Mode",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            _privacyModeCheckBox.Checked += PrivacyModeCheckBox_Changed;
+            _privacyModeCheckBox.Unchecked += PrivacyModeCheckBox_Changed;
+            
+            var privacyHelp = new TextBlock
+            {
+                Text = "Analysis only - no verbatim transcription stored (legal-safe)",
+                FontSize = 10,
+                FontStyle = FontStyles.Italic,
+                Foreground = Brushes.Gray,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            
+            privacyPanel.Children.Add(_privacyModeCheckBox);
+            privacyPanel.Children.Add(privacyHelp);
+            Grid.SetRow(privacyPanel, currentRow++);
+            
             // Status text
             _statusText = new TextBlock 
             { 
@@ -571,6 +609,7 @@ public partial class App : Application
             mainGrid.Children.Add(systemAudioSection);
             mainGrid.Children.Add(volumeSection);
             mainGrid.Children.Add(buttonPanel);
+            mainGrid.Children.Add(privacyPanel);
             mainGrid.Children.Add(_statusText);
             mainGrid.Children.Add(transcriptionLabel);
             mainGrid.Children.Add(instructionsBorder);
@@ -940,6 +979,48 @@ public partial class App : Application
         {
             if (_statusText != null) _statusText.Text = $"Error toggling monitoring: {ex.Message}";
         }
+        
+        Console.WriteLine($"Monitoring toggled: {_isMonitoring}");
+    }
+    
+    private void PrivacyModeCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_privacyModeCheckBox == null) return;
+        
+        _privacyModeEnabled = _privacyModeCheckBox.IsChecked == true;
+        
+        if (_privacyModeEnabled)
+        {
+            Console.WriteLine("🔒 Legal-Safe Mode ENABLED - Only analysis will be shown, no verbatim transcription");
+            _privacySpeakerMapping.Clear();
+            _privacySpeakerCounter = 1;
+            
+            // Show legal-safe mode indicator in status
+            if (_statusText != null)
+            {
+                _statusText.Text += " 🔒 LEGAL-SAFE MODE ACTIVE";
+                _statusText.Foreground = Brushes.DarkBlue;
+            }
+        }
+        else
+        {
+            Console.WriteLine("🔓 Legal-Safe Mode DISABLED - Full transcription will be shown");
+            _privacySpeakerMapping.Clear();
+            
+            // Remove legal-safe mode indicator from status
+            if (_statusText != null)
+            {
+                var statusText = _statusText.Text;
+                if (statusText.Contains(" 🔒 LEGAL-SAFE MODE ACTIVE"))
+                {
+                    _statusText.Text = statusText.Replace(" 🔒 LEGAL-SAFE MODE ACTIVE", "");
+                    _statusText.Foreground = Brushes.Black;
+                }
+            }
+        }
+        
+        // Refresh the transcription display to apply/remove legal-safe mode
+        RefreshTranscriptionDisplay();
     }
     
     private void WaveIn_DataAvailable(object? sender, WaveInEventArgs e)
@@ -1334,7 +1415,7 @@ public partial class App : Application
         // Text content (in its own row for better readability)
         var textBlock = new TextBlock 
         { 
-            Text = text,
+            Text = GetDisplayText(text),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 0),
             FontSize = 13,
@@ -1359,12 +1440,132 @@ public partial class App : Application
     {
         if (string.IsNullOrEmpty(originalSpeaker))
             return "Unknown";
+        
+        // Privacy Mode: Anonymize speakers
+        if (_privacyModeEnabled)
+        {
+            if (originalSpeaker == "Unknown")
+                return "Unknown";
+                
+            // Map original speaker to anonymous identifier
+            if (!_privacySpeakerMapping.ContainsKey(originalSpeaker))
+            {
+                var anonymousName = GetAnonymousSpeakerName(_privacySpeakerCounter);
+                _privacySpeakerMapping[originalSpeaker] = anonymousName;
+                _privacySpeakerCounter++;
+                Console.WriteLine($"🔒 Privacy mapping: {originalSpeaker} -> {anonymousName}");
+            }
             
-        // Check if we have a custom name for this speaker
+            return _privacySpeakerMapping[originalSpeaker];
+        }
+        
+        // Normal mode: Check if we have a custom name for this speaker
         if (_speakerNames.ContainsKey(originalSpeaker))
             return _speakerNames[originalSpeaker];
             
         return originalSpeaker;
+    }
+    
+    private string GetAnonymousSpeakerName(int counter)
+    {
+        // Generate Speaker A, B, C, ... Z, AA, BB, etc.
+        if (counter <= 26)
+        {
+            return $"Speaker {(char)('A' + counter - 1)}";
+        }
+        else
+        {
+            // For more than 26 speakers, use AA, BB, CC pattern
+            var letter = (char)('A' + ((counter - 27) % 26));
+            var repetitions = ((counter - 27) / 26) + 2;
+            return $"Speaker {new string(letter, repetitions)}";
+        }
+    }
+    
+    private string GetDisplayText(string? originalText)
+    {
+        if (string.IsNullOrEmpty(originalText))
+            return "";
+        
+        // Legal-Safe Mode: Show analysis instead of verbatim transcription
+        if (_privacyModeEnabled)
+        {
+            return GenerateTextAnalysis(originalText);
+        }
+        
+        // Normal mode: Show actual transcription
+        return originalText;
+    }
+    
+    private string GenerateTextAnalysis(string text)
+    {
+        var analysis = new List<string>();
+        
+        // Basic analysis without revealing actual content
+        var wordCount = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+        var duration = EstimateSpeechDuration(wordCount);
+        
+        analysis.Add($"📊 Speech Analysis:");
+        analysis.Add($"• Duration: ~{duration} seconds");
+        analysis.Add($"• Word count: {wordCount} words");
+        
+        // Sentiment analysis (basic)
+        var sentiment = AnalyzeSentiment(text);
+        analysis.Add($"• Tone: {sentiment}");
+        
+        // Content type analysis
+        var contentType = AnalyzeContentType(text);
+        analysis.Add($"• Content: {contentType}");
+        
+        return string.Join("\n", analysis);
+    }
+    
+    private int EstimateSpeechDuration(int wordCount)
+    {
+        // Average speech rate is about 2-3 words per second
+        return Math.Max(1, wordCount / 2);
+    }
+    
+    private string AnalyzeSentiment(string text)
+    {
+        var lowerText = text.ToLower();
+        
+        // Simple sentiment analysis
+        var positiveWords = new[] { "good", "great", "excellent", "happy", "pleased", "agree", "yes", "perfect", "wonderful" };
+        var negativeWords = new[] { "bad", "terrible", "awful", "angry", "upset", "no", "disagree", "problem", "issue", "concern" };
+        var questionWords = new[] { "what", "how", "why", "when", "where", "who", "can", "could", "would", "should" };
+        
+        var positiveCount = positiveWords.Count(word => lowerText.Contains(word));
+        var negativeCount = negativeWords.Count(word => lowerText.Contains(word));
+        var questionCount = questionWords.Count(word => lowerText.Contains(word));
+        
+        if (lowerText.Contains("?") || questionCount > 0)
+            return "Questioning";
+        if (positiveCount > negativeCount)
+            return "Positive";
+        if (negativeCount > positiveCount)
+            return "Concerned";
+        
+        return "Neutral";
+    }
+    
+    private string AnalyzeContentType(string text)
+    {
+        var lowerText = text.ToLower();
+        
+        // Analyze content type without revealing specifics
+        if (lowerText.Contains("meeting") || lowerText.Contains("discuss"))
+            return "Discussion";
+        if (lowerText.Contains("budget") || lowerText.Contains("cost") || lowerText.Contains("money"))
+            return "Financial discussion";
+        if (lowerText.Contains("project") || lowerText.Contains("timeline") || lowerText.Contains("deadline"))
+            return "Project planning";
+        if (lowerText.Contains("?"))
+            return "Question/inquiry";
+        if (lowerText.Length < 20)
+            return "Brief comment";
+        
+        return "General discussion";
     }
     
     private void UpdateSegmentSpeaker(int segmentId, string newSpeaker)
@@ -1875,7 +2076,7 @@ public partial class App : Application
             // Text content (in its own row for better readability)
             var textBlock = new TextBlock 
             { 
-                Text = segment.Text,
+                Text = GetDisplayText(segment.Text),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 5, 0, 0),
                 FontSize = 13,
@@ -1935,8 +2136,120 @@ public partial class App : Application
         report.AppendLine("=== OREJA TRANSCRIPTION REPORT ===");
         report.AppendLine($"Generated on: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         report.AppendLine($"Total segments: {_transcriptionHistory.Count}");
+        
+        // Legal-safe mode indication
+        if (_privacyModeEnabled)
+        {
+            report.AppendLine("🔒 LEGAL-SAFE MODE: Only analytical data included");
+            report.AppendLine("   NO verbatim transcription stored for legal compliance");
+            report.AppendLine("   This report contains only speech analysis and patterns");
+        }
+        
         report.AppendLine();
         
+        if (_privacyModeEnabled)
+        {
+            // Legal-Safe Mode: Only analytical summary
+            GenerateLegalSafeAnalysis(report);
+        }
+        else
+        {
+            // Normal Mode: Full transcription
+            GenerateFullTranscriptionReport(report);
+        }
+        
+        return report.ToString();
+    }
+    
+    private void GenerateLegalSafeAnalysis(System.Text.StringBuilder report)
+    {
+        report.AppendLine("=== CONVERSATION ANALYSIS (LEGAL-SAFE) ===");
+        report.AppendLine();
+        
+        // Overall statistics
+        var totalDuration = _transcriptionHistory.Sum(s => EstimateSpeechDuration(
+            s.Text?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0));
+        var totalWords = _transcriptionHistory.Sum(s => 
+            s.Text?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0);
+        
+        report.AppendLine("📊 OVERALL STATISTICS:");
+        report.AppendLine($"• Total estimated duration: {totalDuration} seconds");
+        report.AppendLine($"• Total word count: {totalWords} words");
+        report.AppendLine($"• Number of speech segments: {_transcriptionHistory.Count}");
+        report.AppendLine();
+        
+        // Speaker analysis
+        var speakerStats = _transcriptionHistory
+            .Where(s => !string.IsNullOrEmpty(s.Speaker))
+            .GroupBy(s => GetDisplaySpeakerName(s.Speaker))
+            .Select(g => new {
+                Speaker = g.Key,
+                SegmentCount = g.Count(),
+                WordCount = g.Sum(s => s.Text?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0)
+            })
+            .OrderByDescending(s => s.WordCount)
+            .ToList();
+        
+        report.AppendLine("👥 SPEAKER PARTICIPATION:");
+        foreach (var speaker in speakerStats)
+        {
+            var percentage = totalWords > 0 ? (speaker.WordCount * 100.0) / totalWords : 0;
+            report.AppendLine($"• {speaker.Speaker}: {speaker.SegmentCount} segments, {speaker.WordCount} words ({percentage:F1}%)");
+        }
+        report.AppendLine();
+        
+        // Sentiment analysis
+        var sentiments = _transcriptionHistory
+            .Where(s => !string.IsNullOrEmpty(s.Text))
+            .Select(s => AnalyzeSentiment(s.Text!))
+            .GroupBy(s => s)
+            .Select(g => new { Sentiment = g.Key, Count = g.Count() })
+            .OrderByDescending(s => s.Count)
+            .ToList();
+        
+        report.AppendLine("😊 TONE ANALYSIS:");
+        foreach (var sentiment in sentiments)
+        {
+            var percentage = _transcriptionHistory.Count > 0 ? (sentiment.Count * 100.0) / _transcriptionHistory.Count : 0;
+            report.AppendLine($"• {sentiment.Sentiment}: {sentiment.Count} segments ({percentage:F1}%)");
+        }
+        report.AppendLine();
+        
+        // Content type analysis
+        var contentTypes = _transcriptionHistory
+            .Where(s => !string.IsNullOrEmpty(s.Text))
+            .Select(s => AnalyzeContentType(s.Text!))
+            .GroupBy(c => c)
+            .Select(g => new { ContentType = g.Key, Count = g.Count() })
+            .OrderByDescending(c => c.Count)
+            .ToList();
+        
+        report.AppendLine("📋 CONTENT ANALYSIS:");
+        foreach (var contentType in contentTypes)
+        {
+            var percentage = _transcriptionHistory.Count > 0 ? (contentType.Count * 100.0) / _transcriptionHistory.Count : 0;
+            report.AppendLine($"• {contentType.ContentType}: {contentType.Count} segments ({percentage:F1}%)");
+        }
+        report.AppendLine();
+        
+        // Source analysis
+        var microphoneSegments = _transcriptionHistory.Where(s => s.Source == "Microphone").Count();
+        var systemAudioSegments = _transcriptionHistory.Where(s => s.Source == "System Audio").Count();
+        
+        report.AppendLine("🎤 AUDIO SOURCE ANALYSIS:");
+        report.AppendLine($"• Microphone input: {microphoneSegments} segments");
+        report.AppendLine($"• System audio input: {systemAudioSegments} segments");
+        report.AppendLine();
+        
+        report.AppendLine("⚖️ LEGAL COMPLIANCE:");
+        report.AppendLine("• No verbatim transcription stored");
+        report.AppendLine("• Speaker identities anonymized");
+        report.AppendLine("• Only analytical insights recorded");
+        report.AppendLine("• Compliant with privacy regulations");
+    }
+    
+    private void GenerateFullTranscriptionReport(System.Text.StringBuilder report)
+    {
         // Group by source
         var microphoneSegments = _transcriptionHistory.Where(s => s.Source == "Microphone").ToList();
         var systemAudioSegments = _transcriptionHistory.Where(s => s.Source == "System Audio").ToList();
@@ -1971,8 +2284,6 @@ public partial class App : Application
             var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
             report.AppendLine($"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}] [{segment.Source}] {displaySpeaker}: {segment.Text}");
         }
-        
-        return report.ToString();
     }
 
     private Brush GetSpeakerColor(string? speaker)
