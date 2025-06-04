@@ -67,3 +67,6 @@ Version.cpp
 # OS
 .DS_Store
 Thumbs.db
+
+# Transcription output files
+Transcriptions/
