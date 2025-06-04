@@ -1,13 +1,13 @@
 # Oreja
 
-##Why make this?
+## Why make this?
 Oreja is a Windows desktop application for real-time transcription of conference calls (Google Meet, Zoom, Slack, etc.) without storing or sending audio to the cloud. It captures microphone and system audio, uses local Hugging Face models for transcription and diarization, and provides a WPF interface with volume meters, transcription controls, and speaker renaming. Speaker embeddings improve recognition of recurring callers, stored locally in SQLite.
 
-This applicastion was built with the intention of letting a person get a better recollection of calls or conversations while still respecting the privacy of other people in the conversation.  The transcription is done by capturing the sound of the last few seconds, transcribing that, then deleting the audio on the spot so that you are left with a transcript of the call and no full recording having ever touched any computer.
+This application was built with the intention of letting a person get a better recollection of calls or conversations while still respecting the privacy of other people in the conversation.  The transcription is done by capturing the sound of the last few seconds, transcribing that, then deleting the audio on the spot so that you are left with a transcript of the call and no full recording having ever touched any computer.
 
 No data ever touches the cloud. No recording ever lasts more than a few seconds, and is never saved to any disk or server.
 
-##DISCLAIMER
+## DISCLAIMER
 Use this at your own risk, and do not use it in a way that breaches privacy laws. If you live in a jurisdiction with laws around recording conversations there may be further restrictions to how you can use this app.  
 
 My recommendation: keep it simple and just people know you are using a note-taking tool and ask if that is ok. That should cover most of the gray areas. I am not a lawyer, so don't take this as legal advice either.
