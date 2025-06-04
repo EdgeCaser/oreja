@@ -309,24 +309,22 @@ class OrejaLauncher:
             messagebox.showerror("Error", f"Failed to launch analytics: {e}")
     
     def launch_live_transcription(self):
-        """Launch live transcription (C# desktop app)"""
+        """Launch live transcription (C# Standalone App)"""
         if not self.backend_ready:
             messagebox.showerror("Error", "Backend must be running first!")
             return
         
-        csharp_exe = Path("publish/Oreja.exe")
-        if not csharp_exe.exists():
-            messagebox.showerror("Error", "Live transcription app not found! Build the C# application first.")
+        standalone_exe = Path("publish-standalone/Oreja.exe")
+        if not standalone_exe.exists():
+            messagebox.showerror("Error", "Live transcription standalone app not found! Build the standalone C# application first.")
             return
         
         try:
-            subprocess.Popen([str(csharp_exe)])
+            subprocess.Popen([str(standalone_exe)])
             messagebox.showinfo("Live Transcription", 
-                               "Live transcription app launched!\n\n" +
-                               "Tips:\n" +
-                               "• Select your microphone\n" +
-                               "• Click 'Start' to begin real-time transcription\n" +
-                               "• View transcriptions with speaker identification")
+                               "Standalone live transcription app launched!\n\n" +
+                               "This is your newer live microphone transcription interface\n" +
+                               "with device selection and real-time processing.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to launch live transcription: {e}")
     
@@ -370,7 +368,7 @@ class OrejaLauncher:
             messagebox.showerror("Error", f"Failed to launch editor: {e}")
     
     def launch_csharp(self):
-        """Launch C# desktop application"""
+        """Launch desktop application (C# Live Transcription)"""
         if not self.backend_ready:
             messagebox.showerror("Error", "Backend must be running first!")
             return

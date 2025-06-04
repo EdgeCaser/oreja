@@ -1,0 +1,16 @@
+# Testing dependencies for Oreja
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.1
+httpx>=0.24.0
+factory-boy>=3.3.0
+faker>=19.3.0
+coverage>=7.2.0
+
+# Additional testing utilities
+pytest-xdist>=3.3.1  # For parallel test execution
+pytest-html>=3.2.0   # For HTML test reports
+pytest-benchmark>=4.0.0  # For performance testing
+freezegun>=1.2.2     # For time-based testing
+responses>=0.23.0    # For HTTP request mocking 

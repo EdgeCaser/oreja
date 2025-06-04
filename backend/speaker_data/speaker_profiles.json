@@ -423,11 +423,11 @@
     "speaker_id": "AUTO_SPEAKER_043",
     "name": "Speaker_AUTO_SPEAKER_043",
     "created_date": "2025-06-02T15:23:39.602673",
-    "last_seen": "2025-06-02T21:05:41.014485",
+    "last_seen": "2025-06-03T17:31:31.770067",
     "session_count": 0,
     "total_audio_seconds": 0.0,
-    "embedding_count": 21,
-    "average_confidence": 0.8973780770826497
+    "embedding_count": 25,
+    "average_confidence": 0.9043177449322584
   },
   "AUTO_SPEAKER_044": {
     "speaker_id": "AUTO_SPEAKER_044",

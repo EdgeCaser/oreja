@@ -144,7 +144,7 @@ class BatchTranscriptionProcessor:
         self._save_batch_summary(output_dir)
         
         logger.info(f"Batch processing complete. Processed {len(audio_files)} files.")
-        return self.results
+        return results
     
     def _load_audio(self, audio_path: Path) -> Tuple[torch.Tensor, int]:
         """Load and preprocess audio file"""
@@ -474,6 +474,75 @@ def main():
     except Exception as e:
         logger.error(f"Batch processing failed: {e}")
         raise
+
+
+def process_audio_file(audio_path: str, output_dir: str = None) -> Dict[str, Any]:
+    """
+    Wrapper function to process a single audio file.
+    Expected by tests - delegates to BatchTranscriptionProcessor.
+    """
+    processor = BatchTranscriptionProcessor()
+    audio_path_obj = Path(audio_path)
+    output_dir_obj = Path(output_dir) if output_dir else None
+    
+    result = processor.process_recording(
+        audio_path_obj, 
+        output_dir_obj, 
+        improve_speakers=False
+    )
+    
+    return result
+
+
+def save_transcription_result(transcription_result: Dict[str, Any], output_path: str):
+    """
+    Save transcription result to a JSON file.
+    Expected by tests.
+    """
+    output_path_obj = Path(output_path)
+    
+    # Ensure directory exists
+    output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save JSON file
+    with open(output_path_obj, 'w', encoding='utf-8') as f:
+        json.dump(transcription_result, f, indent=2, ensure_ascii=False)
+
+
+def batch_process_directory(input_dir: str, output_dir: str, 
+                          audio_extensions: List[str] = None) -> List[Dict[str, Any]]:
+    """
+    Process all audio files in a directory.
+    Expected by tests - delegates to BatchTranscriptionProcessor.
+    """
+    if audio_extensions is None:
+        audio_extensions = [".wav", ".mp3", ".flac", ".m4a", ".ogg"]
+    
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+    
+    # Find all audio files
+    audio_files = []
+    for ext in audio_extensions:
+        audio_files.extend(input_path.glob(f"*{ext}"))
+        audio_files.extend(input_path.glob(f"*{ext.upper()}"))
+    
+    if not audio_files:
+        return []
+    
+    # Process using BatchTranscriptionProcessor
+    processor = BatchTranscriptionProcessor()
+    results = processor.process_batch(
+        audio_files,
+        output_path,
+        improve_speakers=False,
+        parallel=False
+    )
+    
+    return results
 
 
 if __name__ == "__main__":
