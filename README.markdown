@@ -10,7 +10,7 @@ No data ever touches the cloud. No recording ever lasts more than a few seconds,
 ## DISCLAIMER
 Use this at your own risk, and do not use it in a way that breaches privacy laws. If you live in a jurisdiction with laws around recording conversations there may be further restrictions to how you can use this app.  
 
-My recommendation: keep it simple and just people know you are using a note-taking tool and ask if that is ok. That should cover most of the gray areas. I am not a lawyer, so don't take this as legal advice either.
+My recommendation: keep it simple and just let people know you are using a note-taking tool and ask if that is ok. That should cover most of the gray areas. I am not a lawyer, so don't take this as legal advice either.
 
 ## Features
 - Real-time transcription with speaker diarization using Whisper and pyannote.audio.
