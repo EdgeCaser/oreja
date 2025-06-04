@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Input;
 
 namespace Oreja;
 
@@ -96,15 +97,66 @@ public partial class App : Application
     private Dictionary<string, string> _privacySpeakerMapping = new Dictionary<string, string>();
     private int _privacySpeakerCounter = 1;
 
+    // Enhanced Transcription Editor functionality
+    private double _lastScrollPosition = 0;
+    private bool _userScrolledUp = false;
+    private HashSet<int> _selectedSegments = new HashSet<int>();
+    private bool _multiSelectMode = false;
+    private Button? _multiSelectToggleButton;
+    private Button? _bulkRenameButton;
+    private Button? _selectAllButton;
+    private Button? _clearSelectionButton;
+    private List<CheckBox> _segmentCheckBoxes = new List<CheckBox>();
+    
+    // Speaker color coding
+    private Dictionary<string, Brush> _speakerColors = new Dictionary<string, Brush>();
+    private readonly Brush[] _availableColors = {
+        Brushes.LightBlue, Brushes.LightGreen, Brushes.LightCoral, 
+        Brushes.LightGoldenrodYellow, Brushes.LightPink, Brushes.LightCyan,
+        Brushes.LightSalmon, Brushes.LightSeaGreen, Brushes.Plum, Brushes.Khaki,
+        Brushes.PaleGreen, Brushes.LightSkyBlue, Brushes.PeachPuff, Brushes.Lavender
+    };
+    private int _colorIndex = 0;
+    
+    // Emotional tone indicators
+    private readonly Dictionary<string, string> _emotionIcons = new Dictionary<string, string>
+    {
+        ["positive"] = "😊",
+        ["negative"] = "😔", 
+        ["neutral"] = "😐",
+        ["questioning"] = "🤔",
+        ["concerned"] = "😟",
+        ["excited"] = "🤩",
+        ["angry"] = "😠",
+        ["calm"] = "😌"
+    };
+    
+    private readonly Dictionary<string, Brush> _emotionColors = new Dictionary<string, Brush>
+    {
+        ["positive"] = Brushes.LightGreen,
+        ["negative"] = Brushes.LightCoral,
+        ["neutral"] = Brushes.LightGray,
+        ["questioning"] = Brushes.LightBlue,
+        ["concerned"] = Brushes.Orange,
+        ["excited"] = Brushes.Gold,
+        ["angry"] = Brushes.Red,
+        ["calm"] = Brushes.LightCyan
+    };
+
     // Helper class for transcription segments
     public class TranscriptionSegment
     {
         public string? Speaker { get; set; }
         public string? Text { get; set; }
         public double StartTime { get; set; }
+        public double EndTime { get; set; }
         public string Source { get; set; } = "";
         public DateTime Timestamp { get; set; } = DateTime.Now;
         public int SegmentId { get; set; } // Add unique ID for tracking
+        public string? EmotionalTone { get; set; }
+        public double SentimentConfidence { get; set; }
+        public bool IsSelected { get; set; } = false;
+        public List<TranscriptionSegment>? SplitSegments { get; set; } // For split functionality
     }
 
     // Smart speaker filtering for dropdown
@@ -327,6 +379,7 @@ public partial class App : Application
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Status text
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Transcription label
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Instructions
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Multi-select toolbar
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Transcription area (takes remaining space)
             
             int currentRow = 0;
@@ -583,6 +636,10 @@ public partial class App : Application
             instructionsBorder.Child = instructionsPanel;
             Grid.SetRow(instructionsBorder, currentRow++);
             
+            // Multi-select toolbar
+            var multiSelectToolbar = CreateMultiSelectToolbar();
+            Grid.SetRow(multiSelectToolbar, currentRow++);
+            
             // Transcription area - this will now take up all remaining space
             _transcriptionPanel = new StackPanel 
             { 
@@ -613,6 +670,7 @@ public partial class App : Application
             mainGrid.Children.Add(_statusText);
             mainGrid.Children.Add(transcriptionLabel);
             mainGrid.Children.Add(instructionsBorder);
+            mainGrid.Children.Add(multiSelectToolbar);
             mainGrid.Children.Add(_transcriptionScrollViewer);
             
             window.Content = mainGrid;
@@ -1235,12 +1293,15 @@ public partial class App : Application
         
         var segmentPanel = new StackPanel();
         
-        // Top row: Timestamp, Speaker Assignment, Source, and Controls
+        // Top row: Checkbox, Timestamp, Speaker Assignment, Emotion, Source, and Controls
         var topPanel = new StackPanel 
         { 
             Orientation = Orientation.Horizontal, 
             Margin = new Thickness(0, 0, 0, 5) 
         };
+        
+        // Selection checkbox
+        var selectionCheckBox = CreateSelectionCheckBox(segmentId);
         
         // Timestamp
         var timestampText = new TextBlock 
@@ -1253,7 +1314,7 @@ public partial class App : Application
             Margin = new Thickness(0, 0, 10, 0)
         };
         
-        // Speaker assignment dropdown
+        // Speaker assignment dropdown with color coding
         var speakerComboBox = new ComboBox
         {
             Width = 120,
@@ -1261,8 +1322,12 @@ public partial class App : Application
             SelectedItem = GetDisplaySpeakerName(speaker),
             Margin = new Thickness(0, 0, 10, 0),
             ToolTip = "Select or change speaker",
-            IsEditable = true
+            IsEditable = true,
+            Background = GetSpeakerColorEnhanced(GetDisplaySpeakerName(speaker))
         };
+        
+        // Create emotional tone indicator
+        var emotionIndicator = CreateEmotionalToneIndicator(text ?? "", speaker ?? "");
         
         // Track this ComboBox for refreshing
         _speakerComboBoxes.Add(speakerComboBox);
@@ -1287,6 +1352,8 @@ public partial class App : Application
                     }
                     else
                     {
+                        // Update color when speaker changes
+                        speakerComboBox.Background = GetSpeakerColorEnhanced(newSpeaker);
                         UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
                     }
                 }
@@ -1404,34 +1471,39 @@ public partial class App : Application
         deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
         
         // Add all top row elements
+        topPanel.Children.Add(selectionCheckBox);
         topPanel.Children.Add(timestampText);
         topPanel.Children.Add(speakerComboBox);
+        topPanel.Children.Add(emotionIndicator);
         topPanel.Children.Add(sourceText);
         topPanel.Children.Add(quickSpeakerPanel);
         topPanel.Children.Add(newSpeakerButton);
         topPanel.Children.Add(showAutoSpeakersButton);
         topPanel.Children.Add(deleteSpeakerButton);
         
-        // Text content (in its own row for better readability)
-        var textBlock = new TextBlock 
-        { 
-            Text = GetDisplayText(text),
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 5, 0, 0),
-            FontSize = 13,
-            LineHeight = 18
-        };
+        // Editable text content (in its own row for better readability)
+        var textDisplay = CreateEditableTextDisplay(segment);
         
         // Add both rows to the segment panel
         segmentPanel.Children.Add(topPanel);
-        segmentPanel.Children.Add(textBlock);
+        segmentPanel.Children.Add(textDisplay);
         
         // Add segment panel to border and border to main panel
         segmentBorder.Child = segmentPanel;
         _transcriptionPanel.Children.Add(segmentBorder);
         
-        // Auto-scroll to bottom
-        _transcriptionScrollViewer?.ScrollToEnd();
+        // Smart auto-scroll: only scroll if user was already at bottom
+        if (_transcriptionScrollViewer != null)
+        {
+            var maxScroll = _transcriptionScrollViewer.ScrollableHeight;
+            var currentScroll = _transcriptionScrollViewer.VerticalOffset;
+            var wasAtBottom = currentScroll >= maxScroll - 50; // 50px tolerance
+            
+            if (wasAtBottom)
+            {
+                _transcriptionScrollViewer.ScrollToEnd();
+            }
+        }
         
         Console.WriteLine("Transcription segment added to UI successfully");
     }
@@ -1871,14 +1943,643 @@ public partial class App : Application
         inputWindow.ShowDialog();
     }
     
+    private void PreserveScrollPosition()
+    {
+        if (_transcriptionScrollViewer != null)
+        {
+            _lastScrollPosition = _transcriptionScrollViewer.VerticalOffset;
+            var maxScroll = _transcriptionScrollViewer.ScrollableHeight;
+            _userScrolledUp = _lastScrollPosition < maxScroll - 50; // 50px tolerance
+        }
+    }
+
+    private void RestoreScrollPosition()
+    {
+        if (_transcriptionScrollViewer != null && _userScrolledUp)
+        {
+            _transcriptionScrollViewer.ScrollToVerticalOffset(_lastScrollPosition);
+        }
+        else if (!_userScrolledUp)
+        {
+            _transcriptionScrollViewer?.ScrollToEnd(); // Only auto-scroll if user was at bottom
+        }
+    }
+
+    private Brush GetSpeakerColorEnhanced(string speaker)
+    {
+        if (string.IsNullOrEmpty(speaker))
+            speaker = "Unknown";
+            
+        if (!_speakerColors.ContainsKey(speaker))
+        {
+            _speakerColors[speaker] = _availableColors[_colorIndex % _availableColors.Length];
+            _colorIndex++;
+        }
+        return _speakerColors[speaker];
+    }
+
+    private StackPanel CreateEmotionalToneIndicator(string text, string speaker)
+    {
+        var tonePanel = new StackPanel 
+        { 
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(5, 0, 5, 0)
+        };
+        
+        // Analyze sentiment using existing method
+        var sentiment = AnalyzeSentiment(text).ToLower();
+        var icon = _emotionIcons.GetValueOrDefault(sentiment, "😐");
+        var color = _emotionColors.GetValueOrDefault(sentiment, Brushes.LightGray);
+        
+        var emotionIcon = new Border
+        {
+            Background = color,
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(4, 2, 4, 2),
+            Margin = new Thickness(2, 0, 2, 0),
+            Child = new TextBlock 
+            { 
+                Text = icon,
+                FontSize = 12,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = $"Emotional tone: {sentiment}"
+            }
+        };
+        
+        tonePanel.Children.Add(emotionIcon);
+        return tonePanel;
+    }
+
+    private CheckBox CreateSelectionCheckBox(int segmentId)
+    {
+        var checkbox = new CheckBox
+        {
+            Margin = new Thickness(5, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = _multiSelectMode ? Visibility.Visible : Visibility.Collapsed,
+            IsChecked = _selectedSegments.Contains(segmentId)
+        };
+        
+        checkbox.Checked += (s, e) => {
+            _selectedSegments.Add(segmentId);
+            UpdateMultiSelectButtons();
+        };
+        checkbox.Unchecked += (s, e) => {
+            _selectedSegments.Remove(segmentId);
+            UpdateMultiSelectButtons();
+        };
+        
+        _segmentCheckBoxes.Add(checkbox);
+        return checkbox;
+    }
+
+    private void UpdateMultiSelectButtons()
+    {
+        if (_bulkRenameButton != null)
+        {
+            _bulkRenameButton.IsEnabled = _selectedSegments.Count > 0;
+            _bulkRenameButton.Content = $"Rename Selected ({_selectedSegments.Count})";
+        }
+        if (_clearSelectionButton != null)
+        {
+            _clearSelectionButton.IsEnabled = _selectedSegments.Count > 0;
+        }
+    }
+
+    private Border CreateMultiSelectToolbar()
+    {
+        var toolbar = new Border
+        {
+            Background = Brushes.LightYellow,
+            BorderBrush = Brushes.DarkOrange,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(10, 5, 10, 5),
+            Margin = new Thickness(0, 5, 0, 10),
+            Visibility = Visibility.Visible // Always visible now, but contents change
+        };
+        
+        var toolbarPanel = new StackPanel 
+        { 
+            Orientation = Orientation.Horizontal, 
+            HorizontalAlignment = HorizontalAlignment.Left 
+        };
+        
+        // Multi-select mode toggle
+        _multiSelectToggleButton = new Button
+        {
+            Content = "📋 Multi-Select: OFF",
+            Width = 150,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.LightBlue,
+            ToolTip = "Toggle multi-select mode for bulk operations"
+        };
+        _multiSelectToggleButton.Click += MultiSelectToggle_Click;
+        
+        // Select All button
+        _selectAllButton = new Button
+        {
+            Content = "☑ Select All",
+            Width = 100,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.LightGray,
+            IsEnabled = false
+        };
+        _selectAllButton.Click += SelectAll_Click;
+        
+        // Clear Selection button
+        _clearSelectionButton = new Button
+        {
+            Content = "☐ Clear",
+            Width = 80,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.LightGray,
+            IsEnabled = false
+        };
+        _clearSelectionButton.Click += ClearSelection_Click;
+        
+        // Bulk rename button
+        _bulkRenameButton = new Button
+        {
+            Content = "🏷 Rename Selected (0)",
+            Width = 160,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.LightGreen,
+            IsEnabled = false
+        };
+        _bulkRenameButton.Click += BulkRename_Click;
+        
+        // Status text for selections
+        var selectionStatus = new TextBlock
+        {
+            Text = "Select segments to perform bulk operations",
+            VerticalAlignment = VerticalAlignment.Center,
+            FontStyle = FontStyles.Italic,
+            Foreground = Brushes.DarkOrange,
+            Margin = new Thickness(10, 0, 0, 0)
+        };
+        
+        toolbarPanel.Children.Add(_multiSelectToggleButton);
+        toolbarPanel.Children.Add(_selectAllButton);
+        toolbarPanel.Children.Add(_clearSelectionButton);
+        toolbarPanel.Children.Add(_bulkRenameButton);
+        toolbarPanel.Children.Add(selectionStatus);
+        
+        toolbar.Child = toolbarPanel;
+        return toolbar;
+    }
+
+    private void MultiSelectToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _multiSelectMode = !_multiSelectMode;
+        
+        if (_multiSelectToggleButton != null)
+        {
+            _multiSelectToggleButton.Content = _multiSelectMode ? "📋 Multi-Select: ON" : "📋 Multi-Select: OFF";
+            _multiSelectToggleButton.Background = _multiSelectMode ? Brushes.Orange : Brushes.LightBlue;
+        }
+        
+        // Update button states
+        if (_selectAllButton != null) _selectAllButton.IsEnabled = _multiSelectMode;
+        if (_clearSelectionButton != null) _clearSelectionButton.IsEnabled = _multiSelectMode && _selectedSegments.Count > 0;
+        
+        // Update checkbox visibility
+        foreach (var checkbox in _segmentCheckBoxes)
+        {
+            checkbox.Visibility = _multiSelectMode ? Visibility.Visible : Visibility.Collapsed;
+        }
+        
+        // Clear selections when turning off multi-select mode
+        if (!_multiSelectMode)
+        {
+            _selectedSegments.Clear();
+            UpdateMultiSelectButtons();
+        }
+    }
+
+    private void SelectAll_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var segment in _transcriptionHistory)
+        {
+            _selectedSegments.Add(segment.SegmentId);
+        }
+        
+        foreach (var checkbox in _segmentCheckBoxes)
+        {
+            checkbox.IsChecked = true;
+        }
+        
+        UpdateMultiSelectButtons();
+    }
+
+    private void ClearSelection_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedSegments.Clear();
+        
+        foreach (var checkbox in _segmentCheckBoxes)
+        {
+            checkbox.IsChecked = false;
+        }
+        
+        UpdateMultiSelectButtons();
+    }
+
+    private void BulkRename_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSegments.Count == 0) return;
+        
+        ShowBulkRenameDialog();
+    }
+
+    private void ShowBulkRenameDialog()
+    {
+        var dialog = new Window
+        {
+            Title = "Bulk Rename Speakers",
+            Width = 400,
+            Height = 200,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = Application.Current.MainWindow,
+            ResizeMode = ResizeMode.NoResize
+        };
+        
+        var panel = new StackPanel { Margin = new Thickness(20) };
+        
+        var label = new TextBlock 
+        { 
+            Text = $"Rename {_selectedSegments.Count} selected segments to:",
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        
+        var speakerComboBox = new ComboBox
+        {
+            ItemsSource = _availableSpeakers,
+            IsEditable = true,
+            Margin = new Thickness(0, 0, 0, 20),
+            Padding = new Thickness(5)
+        };
+        speakerComboBox.Focus();
+        
+        var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        
+        var okButton = new Button 
+        { 
+            Content = "Rename All",
+            Width = 100,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsDefault = true,
+            Background = Brushes.LightGreen
+        };
+        
+        var cancelButton = new Button 
+        { 
+            Content = "Cancel",
+            Width = 70,
+            Height = 30,
+            IsCancel = true
+        };
+        
+        okButton.Click += (s, e) =>
+        {
+            var newSpeaker = speakerComboBox.Text.Trim();
+            if (!string.IsNullOrEmpty(newSpeaker))
+            {
+                // Add to available speakers if new
+                if (!_availableSpeakers.Contains(newSpeaker))
+                {
+                    _availableSpeakers.Add(newSpeaker);
+                    SaveSpeakerSettings();
+                }
+                
+                // Update all selected segments
+                foreach (var segmentId in _selectedSegments)
+                {
+                    UpdateSegmentSpeaker(segmentId, newSpeaker);
+                }
+                
+                // Refresh the display
+                RefreshTranscriptionDisplay();
+                
+                // Clear selections
+                _selectedSegments.Clear();
+                UpdateMultiSelectButtons();
+                
+                dialog.DialogResult = true;
+            }
+        };
+        
+        cancelButton.Click += (s, e) => dialog.DialogResult = false;
+        
+        buttonPanel.Children.Add(okButton);
+        buttonPanel.Children.Add(cancelButton);
+        
+        panel.Children.Add(label);
+        panel.Children.Add(speakerComboBox);
+        panel.Children.Add(buttonPanel);
+        
+        dialog.Content = panel;
+        dialog.ShowDialog();
+    }
+
+    private TextBox CreateEditableTextDisplay(TranscriptionSegment segment)
+    {
+        var textBox = new TextBox
+        {
+            Text = GetDisplayText(segment.Text),
+            TextWrapping = TextWrapping.Wrap,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            IsReadOnly = true,
+            Margin = new Thickness(0, 5, 0, 0),
+            FontSize = 13,
+            AcceptsReturn = true
+        };
+        
+        // Add context menu for splitting
+        var contextMenu = new ContextMenu();
+        
+        var splitMenuItem = new MenuItem { Header = "✂️ Split Text Here" };
+        splitMenuItem.Click += (s, e) => {
+            if (textBox.SelectionStart > 0 && textBox.SelectionStart < textBox.Text.Length)
+            {
+                ShowSplitDialog(segment, textBox.SelectionStart);
+            }
+            else
+            {
+                MessageBox.Show("Please place your cursor where you want to split the text.", "Split Text", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        };
+        
+        var editMenuItem = new MenuItem { Header = "✏️ Edit Text" };
+        editMenuItem.Click += (s, e) => EnableTextEditing(textBox, segment);
+        
+        contextMenu.Items.Add(splitMenuItem);
+        contextMenu.Items.Add(editMenuItem);
+        textBox.ContextMenu = contextMenu;
+        
+        // Double-click to enable editing
+        textBox.MouseDoubleClick += (s, e) => EnableTextEditing(textBox, segment);
+        
+        return textBox;
+    }
+
+    private void EnableTextEditing(TextBox textBox, TranscriptionSegment segment)
+    {
+        textBox.IsReadOnly = false;
+        textBox.Background = Brushes.LightYellow;
+        textBox.BorderThickness = new Thickness(1);
+        textBox.BorderBrush = Brushes.Orange;
+        textBox.Focus();
+        textBox.SelectAll();
+        
+        // Handle when editing is finished
+        textBox.LostFocus += (s, e) => {
+            FinishTextEditing(textBox, segment);
+        };
+        
+        textBox.KeyDown += (s, e) => {
+            if (e.Key == System.Windows.Input.Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            {
+                FinishTextEditing(textBox, segment);
+            }
+            else if (e.Key == System.Windows.Input.Key.Escape)
+            {
+                // Cancel editing
+                textBox.Text = GetDisplayText(segment.Text);
+                FinishTextEditing(textBox, segment);
+            }
+        };
+    }
+
+    private void FinishTextEditing(TextBox textBox, TranscriptionSegment segment)
+    {
+        textBox.IsReadOnly = true;
+        textBox.Background = Brushes.Transparent;
+        textBox.BorderThickness = new Thickness(0);
+        
+        // Update the segment text if changed
+        var newText = textBox.Text.Trim();
+        if (!string.IsNullOrEmpty(newText) && newText != segment.Text)
+        {
+            segment.Text = newText;
+            Console.WriteLine($"Updated segment {segment.SegmentId} text");
+        }
+    }
+
+    private void ShowSplitDialog(TranscriptionSegment segment, int splitPosition)
+    {
+        var originalText = segment.Text ?? "";
+        if (splitPosition <= 0 || splitPosition >= originalText.Length)
+        {
+            MessageBox.Show("Invalid split position.", "Split Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        
+        var firstPart = originalText.Substring(0, splitPosition).Trim();
+        var secondPart = originalText.Substring(splitPosition).Trim();
+        
+        var dialog = new Window
+        {
+            Title = "Split Text Segment",
+            Width = 500,
+            Height = 400,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = Application.Current.MainWindow,
+            ResizeMode = ResizeMode.CanResize
+        };
+        
+        var panel = new StackPanel { Margin = new Thickness(20) };
+        
+        var titleLabel = new TextBlock 
+        { 
+            Text = "Split text into two segments:",
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 15)
+        };
+        
+        // First segment
+        var firstSegmentPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 15) };
+        
+        var firstSpeakerPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 5) };
+        firstSpeakerPanel.Children.Add(new TextBlock { Text = "First segment speaker:", Width = 150, VerticalAlignment = VerticalAlignment.Center });
+        
+        var firstSpeakerCombo = new ComboBox
+        {
+            ItemsSource = _availableSpeakers,
+            SelectedItem = GetDisplaySpeakerName(segment.Speaker),
+            IsEditable = true,
+            Width = 200
+        };
+        firstSpeakerPanel.Children.Add(firstSpeakerCombo);
+        
+        var firstTextBox = new TextBox
+        {
+            Text = firstPart,
+            TextWrapping = TextWrapping.Wrap,
+            Height = 60,
+            AcceptsReturn = true,
+            Margin = new Thickness(0, 5, 0, 0)
+        };
+        
+        firstSegmentPanel.Children.Add(firstSpeakerPanel);
+        firstSegmentPanel.Children.Add(new TextBlock { Text = "First segment text:" });
+        firstSegmentPanel.Children.Add(firstTextBox);
+        
+        // Second segment
+        var secondSegmentPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 15) };
+        
+        var secondSpeakerPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 5) };
+        secondSpeakerPanel.Children.Add(new TextBlock { Text = "Second segment speaker:", Width = 150, VerticalAlignment = VerticalAlignment.Center });
+        
+        var secondSpeakerCombo = new ComboBox
+        {
+            ItemsSource = _availableSpeakers,
+            SelectedItem = GetDisplaySpeakerName(segment.Speaker),
+            IsEditable = true,
+            Width = 200
+        };
+        secondSpeakerPanel.Children.Add(secondSpeakerCombo);
+        
+        var secondTextBox = new TextBox
+        {
+            Text = secondPart,
+            TextWrapping = TextWrapping.Wrap,
+            Height = 60,
+            AcceptsReturn = true,
+            Margin = new Thickness(0, 5, 0, 0)
+        };
+        
+        secondSegmentPanel.Children.Add(secondSpeakerPanel);
+        secondSegmentPanel.Children.Add(new TextBlock { Text = "Second segment text:" });
+        secondSegmentPanel.Children.Add(secondTextBox);
+        
+        // Buttons
+        var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        
+        var okButton = new Button 
+        { 
+            Content = "Split",
+            Width = 80,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsDefault = true,
+            Background = Brushes.LightGreen
+        };
+        
+        var cancelButton = new Button 
+        { 
+            Content = "Cancel",
+            Width = 80,
+            Height = 30,
+            IsCancel = true
+        };
+        
+        okButton.Click += (s, e) =>
+        {
+            var firstSpeaker = firstSpeakerCombo.Text.Trim();
+            var secondSpeaker = secondSpeakerCombo.Text.Trim();
+            var firstText = firstTextBox.Text.Trim();
+            var secondText = secondTextBox.Text.Trim();
+            
+            if (!string.IsNullOrEmpty(firstText) && !string.IsNullOrEmpty(secondText))
+            {
+                SplitSegment(segment, firstSpeaker, firstText, secondSpeaker, secondText);
+                dialog.DialogResult = true;
+            }
+            else
+            {
+                MessageBox.Show("Both text segments must contain text.", "Split Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        };
+        
+        cancelButton.Click += (s, e) => dialog.DialogResult = false;
+        
+        buttonPanel.Children.Add(okButton);
+        buttonPanel.Children.Add(cancelButton);
+        
+        panel.Children.Add(titleLabel);
+        panel.Children.Add(firstSegmentPanel);
+        panel.Children.Add(secondSegmentPanel);
+        panel.Children.Add(buttonPanel);
+        
+        dialog.Content = panel;
+        dialog.ShowDialog();
+    }
+
+    private void SplitSegment(TranscriptionSegment originalSegment, string firstSpeaker, string firstText, string secondSpeaker, string secondText)
+    {
+        // Update original segment with first part
+        originalSegment.Text = firstText;
+        originalSegment.Speaker = firstSpeaker;
+        
+        // Calculate timing for the split
+        var totalDuration = originalSegment.EndTime - originalSegment.StartTime;
+        var firstPartLength = firstText.Length;
+        var totalLength = firstText.Length + secondText.Length;
+        var firstPartDuration = totalDuration * (firstPartLength / (double)totalLength);
+        
+        var splitTime = originalSegment.StartTime + firstPartDuration;
+        originalSegment.EndTime = splitTime;
+        
+        // Create new segment for second part
+        var newSegment = new TranscriptionSegment
+        {
+            Speaker = secondSpeaker,
+            Text = secondText,
+            StartTime = splitTime,
+            EndTime = originalSegment.StartTime + totalDuration,
+            Source = originalSegment.Source,
+            Timestamp = originalSegment.Timestamp,
+            SegmentId = _transcriptionHistory.Count,
+            EmotionalTone = AnalyzeSentiment(secondText),
+            SentimentConfidence = 0.5 // Default confidence for user-edited content
+        };
+        
+        // Add new speakers to available list if needed
+        if (!string.IsNullOrEmpty(firstSpeaker) && !_availableSpeakers.Contains(firstSpeaker))
+        {
+            _availableSpeakers.Add(firstSpeaker);
+        }
+        if (!string.IsNullOrEmpty(secondSpeaker) && !_availableSpeakers.Contains(secondSpeaker))
+        {
+            _availableSpeakers.Add(secondSpeaker);
+        }
+        
+        // Insert the new segment after the original one
+        var originalIndex = _transcriptionHistory.FindIndex(s => s.SegmentId == originalSegment.SegmentId);
+        if (originalIndex >= 0 && originalIndex < _transcriptionHistory.Count - 1)
+        {
+            _transcriptionHistory.Insert(originalIndex + 1, newSegment);
+        }
+        else
+        {
+            _transcriptionHistory.Add(newSegment);
+        }
+        
+        SaveSpeakerSettings();
+        RefreshTranscriptionDisplay();
+        
+        Console.WriteLine($"Split segment {originalSegment.SegmentId} into two segments");
+    }
+
     private void RefreshTranscriptionDisplay()
     {
         if (_transcriptionPanel == null)
             return;
             
-        // Clear current display and ComboBox tracking
+        // Preserve scroll position before refresh
+        PreserveScrollPosition();
+            
+        // Clear current display and tracking lists
         _transcriptionPanel.Children.Clear();
         _speakerComboBoxes.Clear();
+        _segmentCheckBoxes.Clear();
         
         // Redraw all segments with updated layout
         foreach (var segment in _transcriptionHistory)
@@ -1896,12 +2597,15 @@ public partial class App : Application
             
             var segmentPanel = new StackPanel();
             
-            // Top row: Timestamp, Speaker Assignment, Source, and Controls
+            // Top row: Checkbox, Timestamp, Speaker Assignment, Emotion, Source, and Controls
             var topPanel = new StackPanel 
             { 
                 Orientation = Orientation.Horizontal, 
                 Margin = new Thickness(0, 0, 0, 5) 
             };
+            
+            // Selection checkbox
+            var selectionCheckBox = CreateSelectionCheckBox(segment.SegmentId);
             
             // Timestamp
             var timestampText = new TextBlock 
@@ -1914,7 +2618,7 @@ public partial class App : Application
                 Margin = new Thickness(0, 0, 10, 0)
             };
             
-            // Speaker assignment dropdown
+            // Speaker assignment dropdown with color coding
             var speakerComboBox = new ComboBox
             {
                 Width = 120,
@@ -1922,8 +2626,12 @@ public partial class App : Application
                 SelectedItem = GetDisplaySpeakerName(segment.Speaker),
                 Margin = new Thickness(0, 0, 10, 0),
                 ToolTip = "Select or change speaker",
-                IsEditable = true
+                IsEditable = true,
+                Background = GetSpeakerColorEnhanced(GetDisplaySpeakerName(segment.Speaker))
             };
+            
+            // Create emotional tone indicator
+            var emotionIndicator = CreateEmotionalToneIndicator(segment.Text ?? "", segment.Speaker ?? "");
             
             // Track this ComboBox for refreshing
             _speakerComboBoxes.Add(speakerComboBox);
@@ -1948,6 +2656,8 @@ public partial class App : Application
                         }
                         else
                         {
+                            // Update color when speaker changes
+                            speakerComboBox.Background = GetSpeakerColorEnhanced(newSpeaker);
                             UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
                         }
                     }
@@ -2065,35 +2775,30 @@ public partial class App : Application
             deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
             
             // Add all top row elements
+            topPanel.Children.Add(selectionCheckBox);
             topPanel.Children.Add(timestampText);
             topPanel.Children.Add(speakerComboBox);
+            topPanel.Children.Add(emotionIndicator);
             topPanel.Children.Add(sourceText);
             topPanel.Children.Add(quickSpeakerPanel);
             topPanel.Children.Add(newSpeakerButton);
             topPanel.Children.Add(showAutoSpeakersButton);
             topPanel.Children.Add(deleteSpeakerButton);
             
-            // Text content (in its own row for better readability)
-            var textBlock = new TextBlock 
-            { 
-                Text = GetDisplayText(segment.Text),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 5, 0, 0),
-                FontSize = 13,
-                LineHeight = 18
-            };
+            // Editable text content (in its own row for better readability)
+            var textDisplay = CreateEditableTextDisplay(segment);
             
             // Add both rows to the segment panel
             segmentPanel.Children.Add(topPanel);
-            segmentPanel.Children.Add(textBlock);
+            segmentPanel.Children.Add(textDisplay);
             
             // Add segment panel to border and border to main panel
             segmentBorder.Child = segmentPanel;
             _transcriptionPanel.Children.Add(segmentBorder);
         }
         
-        // Auto-scroll to bottom
-        _transcriptionScrollViewer?.ScrollToEnd();
+        // Restore scroll position instead of always auto-scrolling
+        RestoreScrollPosition();
     }
     
     private void SaveTranscriptionButton_Click(object sender, RoutedEventArgs e)
