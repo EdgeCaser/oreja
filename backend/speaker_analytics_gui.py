@@ -865,55 +865,55 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         file_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Settings section
-        settings_section = ttk.LabelFrame(top_frame, text="Processing Settings", padding=10)
-        settings_section.pack(fill=tk.X, pady=(10, 0))
+        settings_section = ttk.LabelFrame(top_frame, text="Processing Settings", padding=15)
+        settings_section.pack(fill=tk.X, pady=(10, 10))
         
         settings_grid = ttk.Frame(settings_section)
-        settings_grid.pack(fill=tk.X)
+        settings_grid.pack(fill=tk.X, pady=(0, 10))
         
         # Output directory
-        ttk.Label(settings_grid, text="Output Directory:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Label(settings_grid, text="Output Directory:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.batch_output_var = tk.StringVar(value="transcription_results")
         output_entry = ttk.Entry(settings_grid, textvariable=self.batch_output_var, width=40)
-        output_entry.grid(row=0, column=1, padx=5, sticky=tk.W)
+        output_entry.grid(row=0, column=1, padx=5, sticky=tk.W, pady=5)
         ttk.Button(settings_grid, text="Browse", 
-                  command=self.select_output_directory).grid(row=0, column=2, padx=5)
+                  command=self.select_output_directory).grid(row=0, column=2, padx=5, pady=5)
         
         # Improve speakers checkbox
         self.improve_speakers_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(settings_grid, text="Use recordings to improve speaker models", 
                        variable=self.improve_speakers_var).grid(row=1, column=0, columnspan=2, 
-                                                               sticky=tk.W, padx=5, pady=5)
+                                                               sticky=tk.W, padx=5, pady=8)
+        
+        # Speaker name mapping
+        ttk.Label(settings_grid, text="Speaker Mapping:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.speaker_mapping_var = tk.StringVar()
+        mapping_entry = ttk.Entry(settings_grid, textvariable=self.speaker_mapping_var, width=40)
+        mapping_entry.grid(row=2, column=1, padx=5, sticky=tk.W, pady=5)
+        ttk.Button(settings_grid, text="Browse", 
+                  command=self.select_speaker_mapping).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Button(settings_grid, text="Create", 
+                  command=self.create_speaker_mapping).grid(row=2, column=3, padx=5, pady=5)
         
         # Privacy mode toggle
         self.batch_privacy_mode_var = tk.BooleanVar()
         privacy_checkbox = ttk.Checkbutton(settings_grid, text="🔒 Legal-Safe Mode (no verbatim text saved)",
                                            variable=self.batch_privacy_mode_var,
                                            command=self.on_batch_privacy_mode_changed)
-        privacy_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        privacy_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=8)
         
         # Privacy mode info label
         self.batch_privacy_info = ttk.Label(settings_grid, text="Legal-Safe Mode disabled: Full transcription will be saved",
                                             font=("Arial", 8), foreground="gray")
-        self.batch_privacy_info.grid(row=4, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 5))
-        
-        # Speaker name mapping
-        ttk.Label(settings_grid, text="Speaker Mapping:").grid(row=2, column=0, sticky=tk.W, padx=5)
-        self.speaker_mapping_var = tk.StringVar()
-        mapping_entry = ttk.Entry(settings_grid, textvariable=self.speaker_mapping_var, width=40)
-        mapping_entry.grid(row=2, column=1, padx=5, sticky=tk.W)
-        ttk.Button(settings_grid, text="Browse", 
-                  command=self.select_speaker_mapping).grid(row=2, column=2, padx=5)
-        ttk.Button(settings_grid, text="Create", 
-                  command=self.create_speaker_mapping).grid(row=2, column=3, padx=5)
+        self.batch_privacy_info.grid(row=4, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 10))
         
         # Processing controls
         process_controls = ttk.Frame(settings_section)
-        process_controls.pack(fill=tk.X, pady=(10, 0))
+        process_controls.pack(fill=tk.X, pady=(15, 10))
         
         self.batch_process_btn = ttk.Button(process_controls, text="🚀 Start Processing", 
                                            command=self.start_batch_processing)
-        self.batch_process_btn.pack(side=tk.LEFT, padx=5)
+        self.batch_process_btn.pack(side=tk.LEFT, padx=(5, 10))
         
         self.batch_stop_btn = ttk.Button(process_controls, text="⏹️ Stop", 
                                         command=self.stop_batch_processing, state=tk.DISABLED)
@@ -921,11 +921,11 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         # Progress bar
         self.batch_progress = ttk.Progressbar(process_controls, mode='determinate')
-        self.batch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.batch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=15)
         
         # Progress label
         self.batch_progress_label = ttk.Label(process_controls, text="Ready")
-        self.batch_progress_label.pack(side=tk.RIGHT, padx=5)
+        self.batch_progress_label.pack(side=tk.RIGHT, padx=(10, 5))
         
         # Bottom section: Results and log
         bottom_frame = ttk.LabelFrame(main_paned, text="Processing Results", padding=10)
