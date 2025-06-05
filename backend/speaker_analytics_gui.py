@@ -22,6 +22,9 @@ import pandas as pd
 # Import enhanced transcription processor for conversation analysis
 from enhanced_transcription_processor import EnhancedTranscriptionProcessor
 
+# Import enhanced speaker database
+from speaker_database_v2 import EnhancedSpeakerDatabase
+
 class SpeakerAnalyticsDashboard:
     def __init__(self):
         self.root = tk.Tk()
@@ -29,7 +32,10 @@ class SpeakerAnalyticsDashboard:
         self.root.geometry("1400x1000")
         self.root.configure(bg='#f0f0f0')
         
-        # Database path - use enhanced database v2
+        # Initialize enhanced speaker database
+        self.speaker_db = EnhancedSpeakerDatabase()
+        
+        # Legacy database path for compatibility
         self.db_path = Path("speaker_data_v2/speaker_records.json")
         
         # Backend URL
@@ -78,6 +84,9 @@ class SpeakerAnalyticsDashboard:
         
         # Tab 6: Database Management
         self.setup_management_tab()
+        
+        # Tab 7: User Training (NEW)
+        self.setup_user_training_tab()
         
         # Status bar
         self.setup_status_bar()
@@ -1123,6 +1132,36 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         self.mgmt_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def setup_user_training_tab(self):
+        """Setup the user training tab"""
+        try:
+            # Import the user embedding trainer
+            from user_embedding_trainer import UserEmbeddingTrainer
+            
+            # Create the trainer module as a tab, sharing our database instance
+            self.user_trainer = UserEmbeddingTrainer(self.notebook, shared_db=self.speaker_db)
+            
+        except ImportError as e:
+            # Fallback if dependencies are missing
+            training_frame = ttk.Frame(self.notebook)
+            self.notebook.add(training_frame, text="🎯 User Training")
+            
+            error_label = ttk.Label(training_frame, 
+                                  text=f"User Training module not available.\n\nMissing dependencies: {e}\n\nPlease install: pip install sounddevice soundfile librosa",
+                                  font=('Arial', 12),
+                                  justify=tk.CENTER)
+            error_label.pack(expand=True)
+        except Exception as e:
+            # Other errors
+            training_frame = ttk.Frame(self.notebook)
+            self.notebook.add(training_frame, text="🎯 User Training")
+            
+            error_label = ttk.Label(training_frame, 
+                                  text=f"Error loading User Training module:\n\n{e}",
+                                  font=('Arial', 12),
+                                  justify=tk.CENTER)
+            error_label.pack(expand=True)
         
     def setup_status_bar(self):
         """Setup the status bar"""
@@ -1172,18 +1211,29 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             messagebox.showerror("Error", f"Failed to refresh data: {str(e)}")
     
     def load_speaker_data(self):
-        """Load speaker data from the database"""
-        if not self.db_path.exists():
-            self.speaker_data = {}
-            return
-        
+        """Load speaker data from the enhanced database"""
         try:
-            with open(self.db_path, 'r', encoding='utf-8') as f:
-                self.speaker_data = json.load(f)
+            # Get all speakers from the enhanced database
+            speakers = self.speaker_db.get_all_speakers()
             
-            # Add type field to each speaker since it's not in the JSON
-            for speaker_id, data in self.speaker_data.items():
-                data['type'] = self.get_speaker_type(speaker_id)
+            # Convert to the format expected by the dashboard
+            self.speaker_data = {}
+            for speaker in speakers:
+                speaker_id = speaker['speaker_id']
+                self.speaker_data[speaker_id] = {
+                    'speaker_id': speaker_id,
+                    'display_name': speaker['display_name'],
+                    'embedding_count': speaker['embedding_count'],
+                    'average_confidence': speaker['average_confidence'],
+                    'last_seen': speaker['last_seen'],
+                    'created_date': speaker['created_date'],
+                    'is_enrolled': speaker['is_enrolled'],
+                    'is_verified': speaker['is_verified'],
+                    'source_type': speaker['source_type'],
+                    'type': self.get_speaker_type(speaker_id),
+                    'total_audio_seconds': 0.0,  # Add missing field with default value
+                    'session_count': 1  # Add missing field with default value
+                }
             
             # Load embeddings for selected speaker if any
             if self.selected_speaker and self.selected_speaker in self.speaker_data:
@@ -1196,13 +1246,9 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     def load_speaker_embeddings(self, speaker_id):
         """Load embedding history for a specific speaker"""
         try:
-            with open(self.db_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if speaker_id in data and 'embeddings' in data[speaker_id]:
-                self.speaker_data[speaker_id]['embeddings'] = data[speaker_id]['embeddings']
-            else:
-                self.speaker_data[speaker_id]['embeddings'] = []
+            # For now, just set empty embeddings since we don't track embedding history in the enhanced database
+            # The enhanced database focuses on aggregated stats rather than individual embedding history
+            self.speaker_data[speaker_id]['embeddings'] = []
             
         except Exception as e:
             print(f"Error loading embeddings for {speaker_id}: {e}")
@@ -1525,8 +1571,10 @@ Quality Assessment:
                             key=lambda x: x[1]['embedding_count'], 
                             reverse=True)[:10]
         
-        names = [s[1]['name'][:15] + '...' if len(s[1]['name']) > 15 else s[1]['name'] 
-                for s in top_speakers]
+        names = [s[1].get('display_name', s[1].get('name', 'Unknown'))[:15] + '...' 
+                 if len(s[1].get('display_name', s[1].get('name', 'Unknown'))) > 15 
+                 else s[1].get('display_name', s[1].get('name', 'Unknown')) 
+                 for s in top_speakers]
         counts = [s[1]['embedding_count'] for s in top_speakers]
         
         if names and counts:
@@ -1560,7 +1608,8 @@ Quality Assessment:
         for speaker in self.speaker_data.values():
             try:
                 last_seen = datetime.fromisoformat(speaker['last_seen'])
-                recent_speakers.append((last_seen, speaker['name']))
+                display_name = speaker.get('display_name', speaker.get('name', 'Unknown'))
+                recent_speakers.append((last_seen, display_name))
             except:
                 pass
         
@@ -1722,11 +1771,11 @@ Quality Assessment:
                 for speaker_id, data in self.speaker_data.items():
                     df_data.append({
                         'speaker_id': speaker_id,
-                        'name': data['name'],
+                        'name': data.get('display_name', data.get('name', 'Unknown')),
                         'type': data['type'],
                         'embedding_count': data['embedding_count'],
                         'average_confidence': data['average_confidence'],
-                        'total_audio_seconds': data['total_audio_seconds'],
+                        'total_audio_seconds': data.get('total_audio_seconds', 0.0),
                         'created_date': data['created_date'],
                         'last_seen': data['last_seen']
                     })
@@ -1778,12 +1827,12 @@ SPEAKER BREAKDOWN
                                      key=lambda x: x[1]['embedding_count'], 
                                      reverse=True):
             report += f"""
-Speaker: {data['name']}
+Speaker: {data.get('display_name', data.get('name', 'Unknown'))}
 ├─ ID: {data['speaker_id']}
 ├─ Type: {data['type']}
 ├─ Samples: {data['embedding_count']}
 ├─ Confidence: {data['average_confidence']:.3f}
-├─ Audio Time: {data['total_audio_seconds']:.1f}s
+├─ Audio Time: {data.get('total_audio_seconds', 0.0):.1f}s
 └─ Last Seen: {data['last_seen']}
 """
         
@@ -2477,11 +2526,12 @@ This feature allows you to transcribe recorded calls using your existing speaker
         
         # Sort speakers by name for easier management
         sorted_speakers = sorted(self.speaker_data.items(), 
-                               key=lambda x: x[1]['name'].lower())
+                               key=lambda x: x[1].get('display_name', x[1].get('name', 'Unknown')).lower())
         
         for speaker_id, data in sorted_speakers:
             # Apply filter if provided
-            if filter_term and filter_term not in data['name'].lower() and filter_term not in speaker_id.lower():
+            display_name = data.get('display_name', data.get('name', 'Unknown'))
+            if filter_term and filter_term not in display_name.lower() and filter_term not in speaker_id.lower():
                 continue
             
             # Format data
@@ -2503,7 +2553,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
                                           confidence,
                                           last_seen,
                                           speaker_id),
-                                   text=data['name'],
+                                   text=display_name,
                                    tags=(data['type'], speaker_id))
         
         # Configure tag colors and update selection info
@@ -2560,7 +2610,8 @@ This feature allows you to transcribe recorded calls using your existing speaker
         for speaker_id in self.selected_speakers:
             if speaker_id in self.speaker_data:
                 data = self.speaker_data[speaker_id]
-                info += f"• {data['name']} ({speaker_id[:12]}...)\n"
+                display_name = data.get('display_name', data.get('name', 'Unknown'))
+                info += f"• {display_name} ({speaker_id[:12]}...)\n"
                 info += f"  Type: {data['type']} | Samples: {data['embedding_count']}\n\n"
                 
                 total_samples += data['embedding_count']
@@ -2610,7 +2661,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
         
         # Speaker name
         tk.Label(info_frame, text="Speaker Name:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky=tk.W, pady=5)
-        name_var = tk.StringVar(value=speaker_data['name'])
+        name_var = tk.StringVar(value=speaker_data.get('display_name', speaker_data.get('name', 'Unknown')))
         name_entry = tk.Entry(info_frame, textvariable=name_var, width=40, font=("Arial", 11))
         name_entry.grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=5)
         
@@ -2639,14 +2690,16 @@ This feature allows you to transcribe recorded calls using your existing speaker
                 messagebox.showerror("Error", "Speaker name cannot be empty.")
                 return
             
-            if new_name != speaker_data['name']:
+            current_name = speaker_data.get('display_name', speaker_data.get('name', 'Unknown'))
+            if new_name != current_name:
                 self.update_speaker_name_in_backend(speaker_id, new_name, dialog)
             else:
                 dialog.destroy()
         
         def delete_speaker():
+            display_name = speaker_data.get('display_name', speaker_data.get('name', 'Unknown'))
             if messagebox.askyesno("Confirm Delete", 
-                                 f"Are you sure you want to delete speaker '{speaker_data['name']}'?\n\n"
+                                 f"Are you sure you want to delete speaker '{display_name}'?\n\n"
                                  f"This will permanently remove:\n"
                                  f"• {speaker_data['embedding_count']} voice samples\n"
                                  f"• All learning data\n"
@@ -2753,7 +2806,8 @@ This feature allows you to transcribe recorded calls using your existing speaker
         for speaker_id in self.selected_speakers:
             if speaker_id in self.speaker_data:
                 data = self.speaker_data[speaker_id]
-                display_text = f"{data['name']} ({speaker_id[:12]}...) - {data['embedding_count']} samples"
+                display_name = data.get('display_name', data.get('name', 'Unknown'))
+                display_text = f"{display_name} ({speaker_id[:12]}...) - {data['embedding_count']} samples"
                 speakers_listbox.insert(tk.END, display_text)
                 speaker_list.append((speaker_id, data))
                 total_samples += data['embedding_count']
@@ -2766,7 +2820,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
         
         target_var = tk.StringVar()
         target_dropdown = ttk.Combobox(target_frame, textvariable=target_var, width=50)
-        target_values = [f"{data['name']} ({speaker_id[:12]}...)" for speaker_id, data in speaker_list]
+        target_values = [f"{data.get('display_name', data.get('name', 'Unknown'))} ({speaker_id[:12]}...)" for speaker_id, data in speaker_list]
         target_dropdown['values'] = target_values
         target_dropdown.pack(fill=tk.X, pady=5)
         
@@ -2780,7 +2834,8 @@ This feature allows you to transcribe recorded calls using your existing speaker
             selection = target_dropdown.current()
             if selection >= 0:
                 _, data = speaker_list[selection]
-                final_name_var.set(data['name'])
+                display_name = data.get('display_name', data.get('name', 'Unknown'))
+                final_name_var.set(display_name)
         
         target_dropdown.bind('<<ComboboxSelected>>', on_target_change)
         
@@ -2868,7 +2923,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
             return
         
         # Confirm deletion
-        speaker_names = [self.speaker_data[sid]['name'] for sid in self.selected_speakers if sid in self.speaker_data]
+        speaker_names = [self.speaker_data[sid].get('display_name', self.speaker_data[sid].get('name', 'Unknown')) for sid in self.selected_speakers if sid in self.speaker_data]
         total_samples = sum(self.speaker_data[sid]['embedding_count'] for sid in self.selected_speakers if sid in self.speaker_data)
         
         confirm_msg = (
@@ -2913,7 +2968,8 @@ This feature allows you to transcribe recorded calls using your existing speaker
         
         # Group speakers by similarity
         for speaker_id, data in self.speaker_data.items():
-            name = data['name'].lower().strip()
+            display_name = data.get('display_name', data.get('name', 'Unknown'))
+            name = display_name.lower().strip()
             
             # Simple similarity - same first 3 characters or contains same words
             found_group = False
@@ -2984,8 +3040,9 @@ This feature allows you to transcribe recorded calls using your existing speaker
             
             # Add speakers in group
             for speaker_id, data in speakers:
+                display_name = data.get('display_name', data.get('name', 'Unknown'))
                 groups_tree.insert(group_item, tk.END,
-                                 text=f"  • {data['name']} ({speaker_id[:12]}...)",
+                                 text=f"  • {display_name} ({speaker_id[:12]}...)",
                                  values=('', data['embedding_count']),
                                  tags=('speaker', speaker_id))
         

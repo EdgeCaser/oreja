@@ -1,0 +1,26 @@
+# Audio Recording and Processing Dependencies for User Training Module
+# Install with: pip install -r requirements_user_training.txt
+
+# Core audio recording
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Audio processing
+librosa>=0.10.1
+numpy>=1.21.0
+
+# HTTP requests for transcription
+requests>=2.28.0
+
+# Optional: Enhanced audio processing
+noisereduce>=3.0.0
+
+# GUI dependencies (if not already installed)
+tkinter  # Usually comes with Python
+
+# Existing Oreja dependencies should already be installed:
+# torch
+# torchaudio 
+# speechbrain
+# scipy
+# scikit-learn 

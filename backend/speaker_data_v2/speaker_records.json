@@ -1,1 +1,54 @@
-{}
+{
+  "spk_4399fa1e4b47": {
+    "speaker_id": "spk_4399fa1e4b47",
+    "created_date": "2025-06-05T14:34:11.563519",
+    "display_name": "Ian",
+    "last_seen": "2025-06-05T15:42:32.374245",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 2,
+    "average_confidence": 0.9,
+    "is_enrolled": true,
+    "is_verified": false,
+    "source_type": "enrolled"
+  },
+  "spk_ec7c4c622052": {
+    "speaker_id": "spk_ec7c4c622052",
+    "created_date": "2025-06-05T14:34:11.567378",
+    "display_name": "Test User",
+    "last_seen": "2025-06-05T15:42:32.374250",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 0,
+    "average_confidence": 0.0,
+    "is_enrolled": true,
+    "is_verified": false,
+    "source_type": "enrolled"
+  },
+  "spk_35ceb353a676": {
+    "speaker_id": "spk_35ceb353a676",
+    "created_date": "2025-06-05T15:42:32.373610",
+    "display_name": "Imported Speaker b353a676",
+    "last_seen": "2025-06-05T15:42:32.374261",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 1,
+    "average_confidence": 0.9,
+    "is_enrolled": false,
+    "is_verified": false,
+    "source_type": "imported"
+  },
+  "spk_9dd722e9aa62": {
+    "speaker_id": "spk_9dd722e9aa62",
+    "created_date": "2025-06-05T15:42:32.374124",
+    "display_name": "Imported Speaker 22e9aa62",
+    "last_seen": "2025-06-05T15:42:32.374271",
+    "session_count": 0,
+    "total_audio_seconds": 0.0,
+    "embedding_count": 7,
+    "average_confidence": 0.8499999999999999,
+    "is_enrolled": false,
+    "is_verified": false,
+    "source_type": "imported"
+  }
+}

@@ -25,7 +25,7 @@ class OrejaLauncher:
         # Setup main window
         self.root = tk.Tk()
         self.root.title("🎙️ Oreja Launcher")
-        self.root.geometry("600x800")  # Keep original width (600), but taller (800)
+        self.root.geometry("450x700")  # Narrower width (450) and shorter height (700)
         self.root.resizable(True, True)
         
         # Style configuration
@@ -53,135 +53,135 @@ class OrejaLauncher:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Main content frame
-        main_frame = ttk.Frame(scrollable_frame, padding="20")
+        # Main content frame - reduced padding
+        main_frame = ttk.Frame(scrollable_frame, padding="10")  # Reduced from 20 to 10
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Title
+        # Title - reduced spacing
         title_label = ttk.Label(main_frame, text="🎙️ Oreja Transcription System", 
-                               font=("Arial", 16, "bold"))
-        title_label.pack(pady=(0, 20))
+                               font=("Arial", 14, "bold"))  # Reduced font size from 16 to 14
+        title_label.pack(pady=(0, 10))  # Reduced spacing from 20 to 10
         
-        # Status frame
-        status_frame = ttk.LabelFrame(main_frame, text="System Status", padding="10")
-        status_frame.pack(fill=tk.X, pady=(0, 20))
+        # Status frame - reduced padding
+        status_frame = ttk.LabelFrame(main_frame, text="System Status", padding="8")  # Reduced from 10 to 8
+        status_frame.pack(fill=tk.X, pady=(0, 10))  # Reduced spacing from 20 to 10
         
         self.backend_status = ttk.Label(status_frame, text="❌ Backend: Not Running", 
-                                       font=("Arial", 10))
+                                       font=("Arial", 9))  # Reduced font size from 10 to 9
         self.backend_status.pack(anchor=tk.W)
         
-        # Backend controls
-        backend_frame = ttk.LabelFrame(main_frame, text="Backend Server", padding="10")
-        backend_frame.pack(fill=tk.X, pady=(0, 20))
+        # Backend controls - reduced padding
+        backend_frame = ttk.LabelFrame(main_frame, text="Backend Server", padding="8")  # Reduced from 10 to 8
+        backend_frame.pack(fill=tk.X, pady=(0, 10))  # Reduced spacing from 20 to 10
         
         backend_buttons = ttk.Frame(backend_frame)
         backend_buttons.pack(fill=tk.X)
         
         self.start_backend_btn = ttk.Button(backend_buttons, text="🚀 Start Backend", 
                                           command=self.start_backend)
-        self.start_backend_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.start_backend_btn.pack(side=tk.LEFT, padx=(0, 8))  # Reduced padding from 10 to 8
         
         self.stop_backend_btn = ttk.Button(backend_buttons, text="⏹️ Stop Backend", 
                                          command=self.stop_backend, state="disabled")
-        self.stop_backend_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.stop_backend_btn.pack(side=tk.LEFT, padx=(0, 8))  # Reduced padding from 10 to 8
         
         ttk.Button(backend_buttons, text="🌐 Open API Docs", 
                   command=self.open_api_docs).pack(side=tk.LEFT)
         
-        # Frontend options
-        frontend_frame = ttk.LabelFrame(main_frame, text="Frontend Applications", padding="10")
-        frontend_frame.pack(fill=tk.X, pady=(0, 20))
+        # Frontend options - reduced padding
+        frontend_frame = ttk.LabelFrame(main_frame, text="Frontend Applications", padding="8")  # Reduced from 10 to 8
+        frontend_frame.pack(fill=tk.X, pady=(0, 10))  # Reduced spacing from 20 to 10
         
-        # Live Transcription (Primary Tool)
+        # Live Transcription (Primary Tool) - reduced spacing
         live_frame = ttk.Frame(frontend_frame)
-        live_frame.pack(fill=tk.X, pady=(0, 10))
+        live_frame.pack(fill=tk.X, pady=(0, 8))  # Reduced spacing from 10 to 8
         
         ttk.Label(live_frame, text="🎙️ Live Transcription", 
-                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)  # Reduced font size from 10 to 9
         ttk.Label(live_frame, text="Full WPF app with independent mic/system audio, volume meters, live transcription", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+                 font=("Arial", 7), foreground="gray").pack(anchor=tk.W)  # Reduced font size from 8 to 7
         
         # Live transcription status and buttons
         live_controls = ttk.Frame(live_frame)
-        live_controls.pack(fill=tk.X, pady=(5, 0))
+        live_controls.pack(fill=tk.X, pady=(3, 0))  # Reduced spacing from 5 to 3
         
         self.live_btn = ttk.Button(live_controls, text="Start Live Transcription", 
                                   command=self.launch_live_transcription, state="disabled")
-        self.live_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.live_btn.pack(side=tk.LEFT, padx=(0, 8))  # Reduced padding from 10 to 8
         
         self.stop_live_btn = ttk.Button(live_controls, text="Stop Live Transcription", 
                                        command=self.stop_live_transcription, state="disabled")
         self.stop_live_btn.pack(side=tk.LEFT)
         
         self.live_status = ttk.Label(live_controls, text="⏸️ Not Running", 
-                                    font=("Arial", 8), foreground="gray")
+                                    font=("Arial", 7), foreground="gray")  # Reduced font size from 8 to 7
         self.live_status.pack(side=tk.RIGHT)
         
-        # Speaker Analytics
+        # Speaker Analytics - reduced spacing
         analytics_frame = ttk.Frame(frontend_frame)
-        analytics_frame.pack(fill=tk.X, pady=(0, 10))
+        analytics_frame.pack(fill=tk.X, pady=(0, 8))  # Reduced spacing from 10 to 8
         
         ttk.Label(analytics_frame, text="📊 Speaker Analytics Dashboard", 
-                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)  # Reduced font size from 10 to 9
         ttk.Label(analytics_frame, text="View and manage speaker profiles, analyze conversations", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+                 font=("Arial", 7), foreground="gray").pack(anchor=tk.W)  # Reduced font size from 8 to 7
         
         self.analytics_btn = ttk.Button(analytics_frame, text="Launch Analytics GUI", 
                                        command=self.launch_analytics, state="disabled")
-        self.analytics_btn.pack(anchor=tk.W, pady=(5, 0))
+        self.analytics_btn.pack(anchor=tk.W, pady=(3, 0))  # Reduced spacing from 5 to 3
         
-        # Transcription Editor
+        # Transcription Editor - reduced spacing
         editor_frame = ttk.Frame(frontend_frame)
-        editor_frame.pack(fill=tk.X, pady=(0, 10))
+        editor_frame.pack(fill=tk.X, pady=(0, 8))  # Reduced spacing from 10 to 8
         
         ttk.Label(editor_frame, text="✏️ Transcription Editor", 
-                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)  # Reduced font size from 10 to 9
         ttk.Label(editor_frame, text="Edit and correct transcription results", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+                 font=("Arial", 7), foreground="gray").pack(anchor=tk.W)  # Reduced font size from 8 to 7
         
         self.editor_btn = ttk.Button(editor_frame, text="Launch Editor", 
                                     command=self.launch_editor, state="disabled")
-        self.editor_btn.pack(anchor=tk.W, pady=(5, 0))
+        self.editor_btn.pack(anchor=tk.W, pady=(3, 0))  # Reduced spacing from 5 to 3
         
-        # File Transcription Tool
+        # File Transcription Tool - reduced spacing
         file_frame = ttk.Frame(frontend_frame)
-        file_frame.pack(fill=tk.X, pady=(0, 10))
+        file_frame.pack(fill=tk.X, pady=(0, 8))  # Reduced spacing from 10 to 8
         
         ttk.Label(file_frame, text="📁 File Transcription", 
-                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)  # Reduced font size from 10 to 9
         ttk.Label(file_frame, text="Transcribe individual audio files", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+                 font=("Arial", 7), foreground="gray").pack(anchor=tk.W)  # Reduced font size from 8 to 7
         
         self.file_btn = ttk.Button(file_frame, text="Launch File Transcriber", 
                                   command=self.launch_file_transcriber, state="disabled")
-        self.file_btn.pack(anchor=tk.W, pady=(5, 0))
+        self.file_btn.pack(anchor=tk.W, pady=(3, 0))  # Reduced spacing from 5 to 3
         
-        # C# Frontend (if available)
+        # C# Frontend (if available) - no additional spacing at end
         csharp_frame = ttk.Frame(frontend_frame)
         csharp_frame.pack(fill=tk.X)
         
         ttk.Label(csharp_frame, text="🖥️ Desktop Application", 
-                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)  # Reduced font size from 10 to 9
         ttk.Label(csharp_frame, text="Alternative desktop interface", 
-                 font=("Arial", 8), foreground="gray").pack(anchor=tk.W)
+                 font=("Arial", 7), foreground="gray").pack(anchor=tk.W)  # Reduced font size from 8 to 7
         
         self.csharp_btn = ttk.Button(csharp_frame, text="Launch Desktop App", 
                                     command=self.launch_csharp, state="disabled")
-        self.csharp_btn.pack(anchor=tk.W, pady=(5, 0))
+        self.csharp_btn.pack(anchor=tk.W, pady=(3, 0))  # Reduced spacing from 5 to 3
         
-        # Quick start button
+        # Quick start button - reduced spacing
         quick_frame = ttk.Frame(main_frame)
-        quick_frame.pack(fill=tk.X, pady=(10, 0))
+        quick_frame.pack(fill=tk.X, pady=(8, 0))  # Reduced spacing from 10 to 8
         
         quick_buttons = ttk.Frame(quick_frame)
         quick_buttons.pack(fill=tk.X)
         
         ttk.Button(quick_buttons, text="⚡ Quick Start: Live Transcription", 
                   command=self.quick_start_live, 
-                  style="Accent.TButton").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+                  style="Accent.TButton").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))  # Reduced padding from 5 to 3
         
         ttk.Button(quick_buttons, text="📊 Quick Start: Analytics", 
-                  command=self.quick_start_analytics).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+                  command=self.quick_start_analytics).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(3, 0))  # Reduced padding from 5 to 3
         
         # Check initial state
         self.check_backend_status()
