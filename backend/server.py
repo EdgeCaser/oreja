@@ -12,6 +12,8 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 import warnings
+from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -37,6 +39,12 @@ except ImportError:
     ENHANCED_FEATURES_AVAILABLE = False
     logger = logging.getLogger(__name__)
     logger.warning("Enhanced transcription features not available - install with: pip install -r requirements_enhanced.txt")
+
+# Import enhanced segment splitting
+from enhanced_segment_splitting import AudioSegmentSplitter, SegmentSplitValidator
+
+# Import enhanced speaker server integration
+from enhanced_speaker_server_integration import EnhancedSpeakerServerIntegration
 
 # Load environment variables from .env file
 try:
@@ -86,12 +94,14 @@ whisper_model = None
 diarization_pipeline = None
 embedding_model = None
 speaker_embedding_manager = None
+enhanced_speaker_database = None
 enhanced_service = None
+enhanced_speaker_integration = None
 
 
 def initialize_models():
     """Initialize all models and set up the device."""
-    global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager, enhanced_service
+    global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager, enhanced_speaker_database, enhanced_service
     
     # Set up device (GPU if available, otherwise CPU)
     if torch.cuda.is_available():
@@ -143,15 +153,19 @@ def initialize_models():
         logger.warning("Continuing without speaker embeddings")
         embedding_model = None
     
-    # Initialize offline speaker embedding manager
+    # Initialize enhanced speaker database as primary system
     try:
-        logger.info("Initializing offline speaker embedding manager...")
-        speaker_embedding_manager = OfflineSpeakerEmbeddingManager()
-        logger.info("✓ Offline speaker embedding manager initialized successfully")
+        logger.info("Initializing enhanced speaker database v2...")
+        from speaker_database_v2 import EnhancedSpeakerDatabase
+        enhanced_speaker_database = EnhancedSpeakerDatabase("speaker_data_v2")
+        logger.info("✓ Enhanced speaker database v2 initialized successfully")
     except Exception as e:
-        logger.warning(f"Failed to initialize speaker embedding manager: {e}")
-        logger.warning("Continuing without offline speaker embeddings")
-        speaker_embedding_manager = None
+        logger.warning(f"Failed to initialize enhanced speaker database: {e}")
+        enhanced_speaker_database = None
+    
+    # Legacy speaker embedding manager disabled - using enhanced database only
+    speaker_embedding_manager = None
+    logger.info("Legacy speaker embedding manager disabled - using enhanced database v2 only")
     
     # Initialize enhanced transcription features
     if ENHANCED_FEATURES_AVAILABLE:
@@ -176,7 +190,21 @@ def initialize_models():
 @app.on_event("startup")
 async def startup_event():
     """Initialize models when the server starts."""
+    global speaker_embedding_manager, enhanced_speaker_database, enhanced_speaker_integration
+    
     initialize_models()
+    
+    # Initialize enhanced speaker integration
+    try:
+        enhanced_speaker_integration = EnhancedSpeakerServerIntegration(
+            legacy_speaker_manager=speaker_embedding_manager
+        )
+        # Override to use enhanced database directly if available
+        if enhanced_speaker_database is not None:
+            enhanced_speaker_integration.enhanced_db = enhanced_speaker_database
+        logger.info("Enhanced speaker integration initialized")
+    except Exception as e:
+        logger.warning(f"Enhanced speaker integration failed to initialize: {e}")
 
 
 @app.get("/")
@@ -218,8 +246,30 @@ async def health_check():
 @app.get("/speakers")
 async def get_speaker_stats():
     """Get statistics about known speakers."""
+    # Use enhanced database as primary, fallback to legacy
+    if enhanced_speaker_database is not None:
+        try:
+            speakers = enhanced_speaker_database.get_all_speakers()
+            # Convert to legacy format for compatibility
+            stats = {
+                'total_speakers': len(speakers),
+                'speakers': [
+                    {
+                        'id': s['speaker_id'],
+                        'name': s['display_name'],
+                        'embedding_count': s['embedding_count'],
+                        'last_seen': s['last_seen'],
+                        'avg_confidence': s['average_confidence']
+                    }
+                    for s in speakers
+                ]
+            }
+            return stats
+        except Exception as e:
+            logger.warning(f"Enhanced database failed, falling back to legacy: {e}")
+    
     if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+        raise HTTPException(status_code=503, detail="No speaker database available")
     
     try:
         stats = speaker_embedding_manager.get_speaker_stats()
@@ -852,6 +902,399 @@ async def extract_speaker_embeddings(audio: UploadFile = File(...)) -> Dict[str,
         raise HTTPException(status_code=500, detail=f"Embedding extraction failed: {str(e)}")
 
 
+@app.post("/speakers/real_time_feedback")
+async def real_time_speaker_feedback(feedback_data: dict):
+    """
+    Process real-time speaker corrections and immediately update embeddings for learning.
+    
+    This endpoint receives speaker corrections from the transcription editor and:
+    1. Updates the speaker embeddings with the corrected attribution
+    2. Returns status indicating what learning occurred
+    
+    Args:
+        feedback_data: Dictionary containing:
+            - old_speaker_id: The incorrect speaker ID
+            - correct_speaker_name: The correct speaker name
+            - audio_segments: List of audio segment data for learning
+            - transcription_file: Path to transcription file
+            - audio_file: Path to audio file
+    
+    Returns:
+        Status of the learning update
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        old_speaker_id = feedback_data.get("old_speaker_id")
+        correct_speaker_name = feedback_data.get("correct_speaker_name")
+        audio_segments = feedback_data.get("audio_segments", [])
+        audio_file = feedback_data.get("audio_file")
+        
+        if not old_speaker_id or not correct_speaker_name:
+            raise HTTPException(status_code=400, detail="Missing required fields: old_speaker_id, correct_speaker_name")
+        
+        logger.info(f"Processing real-time feedback: {old_speaker_id} → {correct_speaker_name}")
+        
+        # Check if the correct speaker already exists
+        existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(correct_speaker_name)
+        
+        if existing_speaker_id:
+            # Merge the old speaker into the existing one
+            success = speaker_embedding_manager.merge_speakers(old_speaker_id, existing_speaker_id, correct_speaker_name)
+            if success:
+                # Learn from the audio segments
+                if audio_file and audio_segments:
+                    for segment in audio_segments:
+                        try:
+                            start_time = float(segment.get('start', 0))
+                            end_time = float(segment.get('end', start_time + 1))
+                            
+                            # Extract and learn from this audio segment
+                            speaker_embedding_manager.learn_from_segment(
+                                audio_file, start_time, end_time, existing_speaker_id
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not learn from segment: {e}")
+                
+                return {
+                    "status": "speakers_merged",
+                    "message": f"Merged {old_speaker_id} into existing speaker {correct_speaker_name}",
+                    "target_speaker_id": existing_speaker_id
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Failed to merge speakers")
+        else:
+            # Update the speaker name and learn from segments
+            success = speaker_embedding_manager.update_speaker_name(old_speaker_id, correct_speaker_name)
+            if success:
+                # Learn from the audio segments to improve the model
+                if audio_file and audio_segments:
+                    for segment in audio_segments:
+                        try:
+                            start_time = float(segment.get('start', 0))
+                            end_time = float(segment.get('end', start_time + 1))
+                            
+                            # Extract and learn from this audio segment
+                            speaker_embedding_manager.learn_from_segment(
+                                audio_file, start_time, end_time, old_speaker_id
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not learn from segment: {e}")
+                
+                return {
+                    "status": "learned",
+                    "message": f"Updated speaker name and learned from {len(audio_segments)} segments",
+                    "speaker_id": old_speaker_id,
+                    "new_name": correct_speaker_name
+                }
+            else:
+                return {
+                    "status": "name_updated", 
+                    "message": f"Updated speaker name to {correct_speaker_name}",
+                    "speaker_id": old_speaker_id
+                }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in real-time speaker feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reattribute_speakers")
+async def reattribute_speakers(reattribution_data: dict):
+    """
+    Re-run speaker attribution on segments that could benefit from improved models.
+    
+    This endpoint takes segments with low confidence or unknown speakers and
+    re-runs the speaker identification using the updated embeddings.
+    
+    Args:
+        reattribution_data: Dictionary containing:
+            - audio_file: Path to the audio file
+            - segments: List of segments to re-attribute
+            - transcription_context: Context about the transcription
+    
+    Returns:
+        Updated speaker attributions with improved confidence scores
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        audio_file = reattribution_data.get("audio_file")
+        segments = reattribution_data.get("segments", [])
+        context = reattribution_data.get("transcription_context", {})
+        
+        if not audio_file or not segments:
+            raise HTTPException(status_code=400, detail="Missing audio_file or segments")
+        
+        logger.info(f"Re-attributing {len(segments)} segments from {audio_file}")
+        
+        updated_segments = []
+        
+        for segment in segments:
+            try:
+                start_time = float(segment.get('start', 0))
+                end_time = float(segment.get('end', start_time + 1))
+                current_speaker = segment.get('current_speaker', 'Unknown')
+                current_confidence = float(segment.get('current_confidence', 0))
+                
+                # Re-run speaker identification on this segment
+                new_attribution = speaker_embedding_manager.identify_speaker_in_segment(
+                    audio_file, start_time, end_time
+                )
+                
+                if new_attribution:
+                    new_speaker = new_attribution.get('speaker_id', current_speaker)
+                    new_confidence = float(new_attribution.get('confidence', current_confidence))
+                    
+                    # Only include if confidence improved significantly
+                    if new_confidence > current_confidence + 0.1:
+                        # Get the display name for the speaker
+                        speaker_name = speaker_embedding_manager.get_speaker_name(new_speaker) or new_speaker
+                        
+                        updated_segments.append({
+                            'segment_index': segment.get('segment_index'),
+                            'new_speaker': speaker_name,
+                            'new_confidence': new_confidence,
+                            'old_speaker': current_speaker,
+                            'old_confidence': current_confidence,
+                            'improvement': new_confidence - current_confidence
+                        })
+                        
+                        logger.info(f"Improved segment {segment.get('segment_index')}: {current_speaker} ({current_confidence:.3f}) → {speaker_name} ({new_confidence:.3f})")
+            
+            except Exception as e:
+                logger.warning(f"Could not re-attribute segment: {e}")
+                continue
+        
+        logger.info(f"Re-attribution complete: {len(updated_segments)} segments improved")
+        
+        return {
+            "status": "success",
+            "updated_segments": updated_segments,
+            "total_segments_processed": len(segments),
+            "improvements_found": len(updated_segments)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in speaker re-attribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/segments/split_with_audio_analysis")
+async def split_segment_with_audio_analysis(
+    audio_file: str,
+    original_segment: dict,
+    split_text_position: float,
+    first_speaker: str,
+    second_speaker: str
+):
+    """
+    Split a segment with proper audio re-analysis and embedding extraction.
+    
+    This endpoint addresses the critical flaw where split segments don't get 
+    proper embedding extraction from their actual audio portions.
+    
+    Args:
+        audio_file: Path to the audio file
+        original_segment: The original segment to split
+        split_text_position: Position in text (0.0-1.0) where to split
+        first_speaker: Speaker name for first part
+        second_speaker: Speaker name for second part
+        
+    Returns:
+        Enhanced split results with audio analysis and embedding extraction
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        # Validate inputs
+        if not (0.0 <= split_text_position <= 1.0):
+            raise HTTPException(status_code=400, detail="Split position must be between 0.0 and 1.0")
+        
+        if not audio_file or not Path(audio_file).exists():
+            raise HTTPException(status_code=400, detail="Audio file not found")
+        
+        # Create the enhanced splitter
+        splitter = AudioSegmentSplitter(speaker_embedding_manager)
+        
+        # Perform the split with audio analysis
+        first_segment, second_segment, success = splitter.split_segment_with_audio_analysis(
+            audio_file=audio_file,
+            original_segment=original_segment,
+            split_text_position=split_text_position,
+            first_speaker=first_speaker,
+            second_speaker=second_speaker
+        )
+        
+        if not success or first_segment is None or second_segment is None:
+            raise HTTPException(status_code=500, detail="Failed to split segment with audio analysis")
+        
+        # Validate the split
+        validator = SegmentSplitValidator(splitter)
+        validation_result = validator.validate_split(first_segment, second_segment, audio_file)
+        
+        # Prepare response
+        response = {
+            "status": "split_successful",
+            "first_segment": first_segment,
+            "second_segment": second_segment,
+            "validation": validation_result,
+            "audio_analysis_performed": True,
+            "embeddings_extracted": {
+                "first_segment": first_segment.get('embedding_extracted', False),
+                "second_segment": second_segment.get('embedding_extracted', False)
+            },
+            "split_confidence": {
+                "first_segment": first_segment.get('split_confidence', 0.0),
+                "second_segment": second_segment.get('split_confidence', 0.0),
+                "overall": validation_result.get('confidence', 0.0)
+            },
+            "speaker_models_updated": success,
+            "message": f"Segment split with audio re-analysis. Confidence: {validation_result.get('confidence', 0.0):.2f}"
+        }
+        
+        # Add warnings if validation found issues
+        if validation_result.get('issues'):
+            response["warnings"] = validation_result['issues']
+        
+        # Add suggestions
+        if validation_result.get('suggestions'):
+            response["suggestions"] = validation_result['suggestions']
+        
+        logger.info(f"Enhanced segment split completed: {first_speaker} | {second_speaker} "
+                   f"(confidence: {validation_result.get('confidence', 0.0):.2f})")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in enhanced segment splitting: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/segments/reprocess_embeddings") 
+async def reprocess_segment_embeddings(
+    audio_file: str,
+    segments: List[dict],
+    force_update: bool = False
+):
+    """
+    Reprocess embeddings for existing segments.
+    
+    This is useful when speaker names have been corrected and you want to 
+    re-extract embeddings with the updated speaker assignments.
+    
+    Args:
+        audio_file: Path to the audio file
+        segments: List of segments to reprocess
+        force_update: Whether to update even if embeddings already exist
+        
+    Returns:
+        Results of the reprocessing operation
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        if not audio_file or not Path(audio_file).exists():
+            raise HTTPException(status_code=400, detail="Audio file not found")
+        
+        results = {
+            "total_segments": len(segments),
+            "processed_segments": 0,
+            "updated_speakers": [],
+            "failed_extractions": 0,
+            "improvements": []
+        }
+        
+        # Load audio file
+        waveform, sr = torchaudio.load(audio_file)
+        
+        for segment in segments:
+            try:
+                start_time = segment.get('start', 0)
+                end_time = segment.get('end', start_time + 1)
+                speaker_name = segment.get('speaker', 'Unknown')
+                
+                # Skip if no meaningful speaker name
+                if not speaker_name or speaker_name in ['Unknown', '']:
+                    continue
+                
+                # Extract audio segment
+                start_sample = int(start_time * sr)
+                end_sample = int(end_time * sr)
+                
+                if start_sample >= waveform.shape[1] or end_sample > waveform.shape[1]:
+                    logger.warning(f"Segment bounds invalid: {start_sample}-{end_sample}")
+                    continue
+                
+                segment_waveform = waveform[:, start_sample:end_sample]
+                
+                # Check if segment is long enough
+                duration = (end_sample - start_sample) / sr
+                if duration < 0.5:  # Minimum 0.5 seconds
+                    logger.debug(f"Segment too short for embedding: {duration:.2f}s")
+                    continue
+                
+                # Convert to numpy
+                if segment_waveform.dim() > 1:
+                    audio_numpy = segment_waveform.mean(dim=0).cpu().numpy()
+                else:
+                    audio_numpy = segment_waveform.cpu().numpy()
+                
+                # Extract and update embedding
+                success = speaker_embedding_manager.provide_correction_feedback(
+                    speaker_name, audio_numpy
+                )
+                
+                if success:
+                    results["processed_segments"] += 1
+                    if speaker_name not in results["updated_speakers"]:
+                        results["updated_speakers"].append(speaker_name)
+                    
+                    results["improvements"].append({
+                        "segment_start": start_time,
+                        "segment_end": end_time,
+                        "speaker": speaker_name,
+                        "duration": duration,
+                        "status": "embedding_updated"
+                    })
+                else:
+                    results["failed_extractions"] += 1
+                    
+            except Exception as e:
+                logger.warning(f"Failed to process segment {segment.get('start', 0)}: {e}")
+                results["failed_extractions"] += 1
+                continue
+        
+        # Save the updated speaker database
+        if results["processed_segments"] > 0:
+            speaker_embedding_manager._save_speaker_database()
+        
+        response = {
+            "status": "reprocessing_complete",
+            "results": results,
+            "message": f"Reprocessed {results['processed_segments']} segments for {len(results['updated_speakers'])} speakers"
+        }
+        
+        logger.info(f"Reprocessed embeddings for {results['processed_segments']} segments")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reprocessing segment embeddings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def load_audio_from_bytes(audio_data: bytes) -> tuple[torch.Tensor, int]:
     """Load audio from bytes without writing to disk."""
     try:
@@ -1223,6 +1666,261 @@ def find_speaker_for_segment(diarization: Any, start_time: float, end_time: floa
     except Exception as e:
         logger.warning(f"Error finding speaker: {e}")
         return "Unknown Speaker"
+
+
+@app.post("/speakers/migrate_to_enhanced")
+async def migrate_to_enhanced_database(dry_run: bool = False):
+    """
+    Migrate from legacy speaker database to enhanced v2 architecture
+    
+    Args:
+        dry_run: If True, only analyze what would be migrated without making changes
+        
+    Returns:
+        Migration results and statistics
+    """
+    if enhanced_speaker_integration is None:
+        raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
+    
+    try:
+        results = await enhanced_speaker_integration.migrate_from_legacy_database(dry_run=dry_run)
+        
+        if dry_run:
+            return {
+                "status": "migration_analysis_complete",
+                "results": results,
+                "message": f"Analysis complete: {results['total_speakers_found']} speakers found, "
+                          f"{results['speakers_migrated']} would be migrated"
+            }
+        else:
+            return {
+                "status": "migration_complete",
+                "results": results,
+                "message": f"Migration complete: {results['speakers_migrated']} speakers migrated, "
+                          f"{results['speakers_merged']} duplicates merged"
+            }
+            
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/speakers/enhanced_stats")
+async def get_enhanced_speaker_statistics():
+    """
+    Get comprehensive statistics from the enhanced speaker database
+    
+    Returns:
+        Detailed speaker statistics including migration status
+    """
+    if enhanced_speaker_integration is None:
+        raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
+    
+    try:
+        stats = await enhanced_speaker_integration.get_enhanced_speaker_stats()
+        
+        return {
+            "status": "statistics_retrieved",
+            "enhanced_database_active": True,
+            "statistics": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get enhanced statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/speakers/enhanced_feedback")
+async def enhanced_speaker_feedback(corrections: Dict[str, str]):
+    """
+    Process speaker corrections using the enhanced database architecture
+    
+    This provides better handling of speaker merging, immutable IDs, and 
+    separation of save vs feedback operations.
+    
+    Args:
+        corrections: Mapping of old speaker IDs/names to new display names
+        
+    Returns:
+        Enhanced feedback processing results
+    """
+    if enhanced_speaker_integration is None:
+        # Fallback to legacy feedback processing
+        logger.warning("Enhanced integration not available, falling back to legacy processing")
+        return await provide_speaker_name_mapping_feedback(corrections)
+    
+    try:
+        results = await enhanced_speaker_integration.enhanced_speaker_correction_feedback(corrections)
+        
+        return {
+            "status": "enhanced_feedback_complete",
+            "results": results,
+            "enhanced_processing": True,
+            "message": f"Processed {len(corrections)} corrections using enhanced database"
+        }
+        
+    except Exception as e:
+        logger.error(f"Enhanced feedback failed: {e}")
+        # Fallback to legacy processing
+        logger.info("Falling back to legacy feedback processing")
+        try:
+            legacy_results = await provide_speaker_name_mapping_feedback(corrections)
+            legacy_results["fallback_used"] = True
+            return legacy_results
+        except Exception as fallback_error:
+            logger.error(f"Legacy fallback also failed: {fallback_error}")
+            raise HTTPException(status_code=500, detail=f"Both enhanced and legacy feedback failed: {e}")
+
+
+@app.post("/speakers/save_transcription_enhanced")
+async def save_transcription_with_enhanced_corrections(
+    transcription_data: dict,
+    speaker_corrections: Dict[str, str],
+    output_file: str = None
+):
+    """
+    Save transcription with corrections using enhanced database - SEPARATE from feedback
+    
+    This addresses the confusion between saving files and sending learning feedback.
+    This endpoint ONLY saves the file with corrections applied.
+    
+    Args:
+        transcription_data: The transcription data to save
+        speaker_corrections: Speaker name corrections to apply
+        output_file: Optional output file path
+        
+    Returns:
+        File save results WITHOUT triggering learning
+    """
+    if enhanced_speaker_integration is None:
+        raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
+    
+    try:
+        # Use enhanced database to save with corrections (no learning feedback)
+        saved_file = enhanced_speaker_integration.enhanced_db.save_transcription_with_corrections(
+            transcription_data=transcription_data,
+            speaker_corrections=speaker_corrections,
+            output_file=output_file
+        )
+        
+        return {
+            "status": "transcription_saved",
+            "file_path": saved_file,
+            "corrections_applied": len(speaker_corrections),
+            "learning_feedback_sent": False,  # Explicitly false - separate operation
+            "message": f"Transcription saved to {saved_file} with {len(speaker_corrections)} corrections. "
+                      f"Use /speakers/enhanced_feedback to send learning feedback separately."
+        }
+        
+    except Exception as e:
+        logger.error(f"Enhanced transcription save failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/speakers/system_status")
+async def get_speaker_system_status():
+    """
+    Get comprehensive status of the speaker management system
+    
+    Returns:
+        Status of both legacy and enhanced systems, migration recommendations
+    """
+    try:
+        status = {
+            "legacy_system": {
+                "available": speaker_embedding_manager is not None,
+                "speaker_count": 0,
+                "total_embeddings": 0
+            },
+            "enhanced_system": {
+                "available": enhanced_speaker_integration is not None,
+                "speaker_count": 0,
+                "migration_completed": False
+            },
+            "recommendations": []
+        }
+        
+        # Check legacy system
+        if speaker_embedding_manager:
+            legacy_speakers = speaker_embedding_manager.speaker_profiles
+            status["legacy_system"]["speaker_count"] = len(legacy_speakers)
+            status["legacy_system"]["total_embeddings"] = sum(
+                len(profile.embeddings) for profile in legacy_speakers.values()
+            )
+        
+        # Check enhanced system
+        if enhanced_speaker_integration:
+            enhanced_stats = await enhanced_speaker_integration.get_enhanced_speaker_stats()
+            status["enhanced_system"]["speaker_count"] = enhanced_stats["total_speakers"]
+            status["enhanced_system"]["migration_completed"] = enhanced_stats["migration_completed"]
+        
+        # Generate recommendations
+        if (status["legacy_system"]["speaker_count"] > 0 and 
+            status["enhanced_system"]["speaker_count"] == 0):
+            status["recommendations"].append("Migration to enhanced database recommended")
+        
+        if (status["legacy_system"]["speaker_count"] > 0 and 
+            status["enhanced_system"]["speaker_count"] > 0 and
+            not status["enhanced_system"]["migration_completed"]):
+            status["recommendations"].append("Complete migration to enhanced database")
+        
+        if status["enhanced_system"]["speaker_count"] > 0:
+            status["recommendations"].append("Enhanced speaker management active")
+        
+        return {
+            "status": "system_status_retrieved",
+            "system_status": status,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get system status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Helper function for legacy fallback
+async def provide_speaker_name_mapping_feedback(corrections: Dict[str, str]):
+    """Legacy speaker name mapping feedback - for fallback use"""
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        results = {
+            'processed_corrections': 0,
+            'speakers_created': 0,
+            'speakers_merged': 0,
+            'speakers_renamed': 0,
+            'errors': []
+        }
+        
+        for old_speaker_id, new_display_name in corrections.items():
+            try:
+                existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(new_display_name)
+                
+                if existing_speaker_id and existing_speaker_id != old_speaker_id:
+                    # Merge speakers
+                    if speaker_embedding_manager.merge_speakers(old_speaker_id, existing_speaker_id):
+                        results['speakers_merged'] += 1
+                elif old_speaker_id in speaker_embedding_manager.speaker_profiles:
+                    # Rename existing speaker
+                    if speaker_embedding_manager.update_speaker_name(old_speaker_id, new_display_name):
+                        results['speakers_renamed'] += 1
+                
+                results['processed_corrections'] += 1
+                
+            except Exception as e:
+                results['errors'].append(f"Error processing {old_speaker_id}: {e}")
+        
+        return {
+            "status": "legacy_feedback_processed",
+            "results": results,
+            "enhanced_processing": False
+        }
+        
+    except Exception as e:
+        logger.error(f"Legacy feedback processing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

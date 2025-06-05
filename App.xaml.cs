@@ -351,9 +351,9 @@ public partial class App : Application
             Directory.CreateDirectory(orejaFolderPath); // Ensure directory exists
             _settingsFilePath = System.IO.Path.Combine(orejaFolderPath, SETTINGS_FILE);
             
-            // Load speaker settings from file
-            LoadSpeakerSettings();
-            Console.WriteLine($"Loaded {_availableSpeakers.Count} speaker names from settings");
+            // Load speakers from enhanced backend (with fallback to local settings)
+            Console.WriteLine("🔄 Initializing enhanced speaker system...");
+            _ = LoadSpeakersFromBackend();
             
             Console.WriteLine("Creating window...");
             // Create window entirely in code to bypass XAML issues
@@ -3276,6 +3276,64 @@ public partial class App : Application
             SaveSpeakerSettings();
             
             Console.WriteLine($"Deleted speaker: {selectedSpeaker}");
+        }
+    }
+
+    // Add after the existing LoadSpeakerSettings method
+    private async Task LoadSpeakersFromBackend()
+    {
+        try
+        {
+            Console.WriteLine("🔄 Loading speakers from enhanced backend...");
+            
+            if (_httpClient == null)
+            {
+                Console.WriteLine("❌ HTTP client not initialized, falling back to local settings");
+                LoadSpeakerSettings();
+                return;
+            }
+            
+            var response = await _httpClient.GetAsync($"{BACKEND_URL}/speakers");
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var speakerData = JsonSerializer.Deserialize<JsonElement>(content);
+                
+                var speakers = speakerData.GetProperty("speakers").EnumerateArray();
+                _availableSpeakers.Clear();
+                _availableSpeakers.Add("Unknown"); // Always keep Unknown
+                
+                Console.WriteLine("✅ Loading speakers from enhanced backend:");
+                foreach (var speaker in speakers)
+                {
+                    var name = speaker.GetProperty("name").GetString();
+                    var speakerId = speaker.GetProperty("id").GetString();
+                    var embeddingCount = speaker.GetProperty("embedding_count").GetInt32();
+                    
+                    if (!string.IsNullOrEmpty(name) && !_availableSpeakers.Contains(name))
+                    {
+                        _availableSpeakers.Add(name);
+                        Console.WriteLine($"   📢 {name} ({speakerId}, {embeddingCount} embeddings)");
+                    }
+                }
+                
+                Console.WriteLine($"✅ Loaded {_availableSpeakers.Count - 1} speakers from enhanced backend");
+                RefreshAllSpeakerDropdowns();
+                
+                // Save the loaded speakers to local settings as backup
+                SaveSpeakerSettings();
+            }
+            else
+            {
+                Console.WriteLine($"❌ Backend responded with {response.StatusCode}, falling back to local settings");
+                LoadSpeakerSettings();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Error loading speakers from backend: {ex.Message}");
+            Console.WriteLine("📁 Falling back to local speaker settings");
+            LoadSpeakerSettings();
         }
     }
 } 

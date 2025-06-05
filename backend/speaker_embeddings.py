@@ -84,7 +84,7 @@ class OfflineSpeakerEmbeddingManager:
     PRIVACY GUARANTEE: No audio data ever leaves this machine
     """
     
-    def __init__(self, data_dir: str = "speaker_data"):
+    def __init__(self, data_dir: str = "speaker_data_v2_legacy_compatibility"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         

@@ -26,11 +26,11 @@ class SpeakerAnalyticsDashboard:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Oreja Speaker Analytics Dashboard")
-        self.root.geometry("1400x900")
+        self.root.geometry("1400x1000")
         self.root.configure(bg='#f0f0f0')
         
-        # Database path - use JSON file that Oreja actually uses
-        self.db_path = Path("speaker_data/speaker_profiles.json")
+        # Database path - use enhanced database v2
+        self.db_path = Path("speaker_data_v2/speaker_records.json")
         
         # Backend URL
         self.backend_url = "http://127.0.0.1:8000"
@@ -907,25 +907,35 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                                             font=("Arial", 8), foreground="gray")
         self.batch_privacy_info.grid(row=4, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 10))
         
-        # Processing controls
-        process_controls = ttk.Frame(settings_section)
-        process_controls.pack(fill=tk.X, pady=(15, 10))
+        # Processing controls section with better spacing
+        controls_section = ttk.LabelFrame(settings_section, text="Processing Controls", padding=15)
+        controls_section.pack(fill=tk.X, pady=15)
         
-        self.batch_process_btn = ttk.Button(process_controls, text="🚀 Start Processing", 
+        # Button row
+        button_frame = ttk.Frame(controls_section)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.batch_process_btn = ttk.Button(button_frame, text="🚀 Start Processing", 
                                            command=self.start_batch_processing)
-        self.batch_process_btn.pack(side=tk.LEFT, padx=(5, 10))
+        self.batch_process_btn.pack(side=tk.LEFT, padx=(0, 10))
         
-        self.batch_stop_btn = ttk.Button(process_controls, text="⏹️ Stop", 
+        self.batch_stop_btn = ttk.Button(button_frame, text="⏹️ Stop", 
                                         command=self.stop_batch_processing, state=tk.DISABLED)
-        self.batch_stop_btn.pack(side=tk.LEFT, padx=5)
+        self.batch_stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Progress row
+        progress_frame = ttk.Frame(controls_section)
+        progress_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(progress_frame, text="Progress:").pack(side=tk.LEFT, padx=(0, 10))
         
         # Progress bar
-        self.batch_progress = ttk.Progressbar(process_controls, mode='determinate')
-        self.batch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=15)
+        self.batch_progress = ttk.Progressbar(progress_frame, mode='determinate')
+        self.batch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
         # Progress label
-        self.batch_progress_label = ttk.Label(process_controls, text="Ready")
-        self.batch_progress_label.pack(side=tk.RIGHT, padx=(10, 5))
+        self.batch_progress_label = ttk.Label(progress_frame, text="Ready")
+        self.batch_progress_label.pack(side=tk.RIGHT)
         
         # Bottom section: Results and log
         bottom_frame = ttk.LabelFrame(main_paned, text="Processing Results", padding=10)
@@ -1200,7 +1210,11 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     
     def get_speaker_type(self, speaker_id):
         """Determine speaker type based on ID"""
-        if speaker_id.startswith('AUTO_SPEAKER'):
+        # Enhanced database speaker IDs start with 'spk_' (UUID-based)
+        if speaker_id.startswith('spk_'):
+            # For enhanced database, check the source_type field
+            return '✅ Enhanced'
+        elif speaker_id.startswith('AUTO_SPEAKER'):
             return '🤖 Auto'
         elif speaker_id.startswith('CORRECTED_SPEAKER'):
             return '✅ Corrected'
@@ -1230,18 +1244,22 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             except:
                 last_seen = "Never"
             
+            # Get display name (enhanced database uses 'display_name', legacy uses 'name')
+            display_name = data.get('display_name', data.get('name', 'Unknown'))
+            
             # Insert into tree
             self.speaker_tree.insert('', tk.END, 
                                    values=(data['type'], 
                                           data['embedding_count'],
                                           confidence,
                                           last_seen),
-                                   text=data['name'],
+                                   text=display_name,
                                    tags=(data['type'],))
         
         # Configure tag colors
         self.speaker_tree.tag_configure('🤖 Auto', background='#ffe6e6')
         self.speaker_tree.tag_configure('✅ Corrected', background='#e6ffe6')
+        self.speaker_tree.tag_configure('✅ Enhanced', background='#e6f7ff')
         self.speaker_tree.tag_configure('👤 Enrolled', background='#e6f3ff')
     
     def update_statistics(self):
@@ -1255,6 +1273,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         total_speakers = len(self.speaker_data)
         auto_speakers = sum(1 for s in self.speaker_data.values() if s['type'] == '🤖 Auto')
         corrected_speakers = sum(1 for s in self.speaker_data.values() if s['type'] == '✅ Corrected')
+        enhanced_speakers = sum(1 for s in self.speaker_data.values() if s['type'] == '✅ Enhanced')
         enrolled_speakers = sum(1 for s in self.speaker_data.values() if s['type'] == '👤 Enrolled')
         
         total_embeddings = sum(s['embedding_count'] for s in self.speaker_data.values())
@@ -1263,6 +1282,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         # Find most active speaker
         most_active = max(self.speaker_data.values(), key=lambda x: x['embedding_count'])
+        most_active_name = most_active.get('display_name', most_active.get('name', 'Unknown'))
         
         # Generate statistics text
         stats = f"""📊 SPEAKER DATABASE STATISTICS
@@ -1271,12 +1291,13 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Total Speakers: {total_speakers}
 ├─ 🤖 Auto-generated: {auto_speakers}
 ├─ ✅ User-corrected: {corrected_speakers}
+├─ ✅ Enhanced: {enhanced_speakers}
 └─ 👤 Enrolled: {enrolled_speakers}
 
 Training Data:
 ├─ Total audio samples: {total_embeddings:,}
 ├─ Average confidence: {avg_confidence:.3f}
-└─ Most active speaker: {most_active['name']}
+└─ Most active speaker: {most_active_name}
    ({most_active['embedding_count']} samples)
 
 Recent Activity:
@@ -1347,9 +1368,10 @@ Storage:
         item = self.speaker_tree.item(selection[0])
         speaker_name = item['text']
         
-        # Find speaker by name
+        # Find speaker by name (check both display_name and name for compatibility)
         for speaker_id, data in self.speaker_data.items():
-            if data['name'] == speaker_name:
+            display_name = data.get('display_name', data.get('name', 'Unknown'))
+            if display_name == speaker_name:
                 self.selected_speaker = speaker_id
                 self.load_speaker_embeddings(speaker_id)
                 self.update_speaker_details()
@@ -1363,7 +1385,8 @@ Storage:
         data = self.speaker_data[self.selected_speaker]
         
         # Update details text
-        details = f"""🎤 SPEAKER PROFILE: {data['name']}
+        display_name = data.get('display_name', data.get('name', 'Unknown'))
+        details = f"""🎤 SPEAKER PROFILE: {display_name}
 {'='*60}
 
 Basic Information:
@@ -2040,7 +2063,7 @@ This feature allows you to transcribe recorded calls using your existing speaker
             self.batch_process_btn.config(state=tk.DISABLED)
             self.batch_stop_btn.config(state=tk.NORMAL)
             self.batch_progress['value'] = 0
-            self.batch_progress['maximum'] = len(self.batch_files)
+            self.batch_progress['maximum'] = 100
             self.batch_progress_label.config(text="Starting...")
             
             # Clear previous results
@@ -2065,18 +2088,37 @@ This feature allows you to transcribe recorded calls using your existing speaker
     def run_batch_processing(self, output_dir: Path, improve_speakers: bool, speaker_mapping: dict, privacy_mode: bool):
         """Run batch processing in background thread"""
         try:
+            total_files = len(self.batch_files)
+            
             for i, audio_file in enumerate(self.batch_files):
                 if not hasattr(self, 'batch_processor') or self.batch_processor is None:
                     break  # Processing was stopped
                 
-                # Update progress
-                self.root.after(0, lambda i=i, f=audio_file: self.update_batch_progress(i, f))
+                # Update overall file progress
+                file_progress = (i / total_files) * 100
+                self.root.after(0, lambda prog=file_progress, f=audio_file, idx=i: 
+                    self.update_batch_progress(prog, f, idx, total_files))
                 
-                # Process file
+                # Process file with detailed progress tracking
                 try:
-                    result = self.batch_processor.process_recording(
-                        audio_file, output_dir, improve_speakers, speaker_mapping, privacy_mode
-                    )
+                    # Create progress callback for this file
+                    def progress_callback(stage: str, progress: float):
+                        # Calculate overall progress: file progress + current file internal progress
+                        overall_progress = (i / total_files) * 100 + (progress / total_files)
+                        self.root.after(0, lambda: self.update_transcription_progress(
+                            overall_progress, audio_file, stage, i, total_files))
+                    
+                    # Try the new progress method first, fallback to old method
+                    if hasattr(self.batch_processor, 'process_recording_with_progress'):
+                        result = self.batch_processor.process_recording_with_progress(
+                            audio_file, output_dir, improve_speakers, speaker_mapping, 
+                            privacy_mode, progress_callback
+                        )
+                    else:
+                        # Fallback to old method without progress
+                        result = self.batch_processor.process_recording(
+                            audio_file, output_dir, improve_speakers, speaker_mapping, privacy_mode
+                        )
                     
                     # Update results in UI thread
                     self.root.after(0, lambda r=result, f=audio_file: self.add_batch_result(r, f))
@@ -2093,10 +2135,10 @@ This feature allows you to transcribe recorded calls using your existing speaker
             self.root.after(0, lambda: self.log_batch(error_msg))
             self.root.after(0, self.reset_batch_ui)
     
-    def update_batch_progress(self, index: int, current_file: Path):
-        """Update progress bar and label"""
-        self.batch_progress['value'] = index + 1
-        self.batch_progress_label.config(text=f"Processing {current_file.name} ({index + 1}/{len(self.batch_files)})")
+    def update_batch_progress(self, progress: float, current_file: Path, file_index: int, total_files: int):
+        """Update progress bar and label for file-level progress"""
+        self.batch_progress['value'] = progress
+        self.batch_progress_label.config(text=f"Processing {current_file.name} ({file_index + 1}/{total_files})")
         
         # Update file status in tree
         for item in self.batch_file_tree.get_children():
@@ -2105,6 +2147,22 @@ This feature allows you to transcribe recorded calls using your existing speaker
                 values[2] = "Processing..."  # Status column
                 self.batch_file_tree.item(item, values=values)
                 break
+    
+    def update_transcription_progress(self, overall_progress: float, current_file: Path, stage: str, file_index: int, total_files: int):
+        """Update progress bar with detailed transcription progress"""
+        self.batch_progress['value'] = overall_progress
+        stage_text = {
+            'loading': 'Loading audio',
+            'transcribing': 'Transcribing audio',
+            'diarizing': 'Identifying speakers',
+            'enhancing': 'Enhancing speakers',
+            'improving': 'Improving models',
+            'saving': 'Saving results'
+        }.get(stage, stage)
+        
+        self.batch_progress_label.config(
+            text=f"{stage_text}: {current_file.name} ({file_index + 1}/{total_files}) - {overall_progress:.1f}%"
+        )
     
     def add_batch_result(self, result: dict, audio_file: Path):
         """Add processing result to results tree"""

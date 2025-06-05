@@ -285,7 +285,22 @@ class TranscriptionEditor:
         """Load transcription from JSON or TXT file"""
         try:
             self.transcription_file = file_path
+            self.current_transcription_file = file_path  # For backend reference
             self.file_label.config(text=f"File: {Path(file_path).name}")
+            
+            # Try to find corresponding audio file for real-time learning
+            audio_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg']
+            base_name = os.path.splitext(file_path)[0]
+            
+            for ext in audio_extensions:
+                potential_audio = base_name + ext
+                if os.path.exists(potential_audio):
+                    self.current_audio_file = potential_audio
+                    print(f"🎵 Found corresponding audio file: {potential_audio}")
+                    break
+            else:
+                self.current_audio_file = None
+                print("ℹ️ No corresponding audio file found - real-time learning will be limited")
             
             if file_path.endswith('.json'):
                 # Load JSON format (structured data)
@@ -325,6 +340,10 @@ class TranscriptionEditor:
             self.update_stats()
             self.setup_speaker_mapping()
             self.update_preview()
+            
+            # Update status with audio file info
+            audio_status = f" (🎵 Audio: {os.path.basename(self.current_audio_file)})" if self.current_audio_file else " (🔇 No audio)"
+            print(f"✅ Loaded {len(self.segments)} segments{audio_status}")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transcription: {e}")
@@ -657,19 +676,32 @@ class TranscriptionEditor:
         return []
     
     def send_speaker_changes_to_backend(self):
-        """Send speaker name changes to backend for permanent storage"""
+        """Send speaker name changes to backend for permanent storage and trigger real-time learning"""
         try:
             mapping = self.get_speaker_mapping()
+            changes_made = False
+            
             for original_id, new_name in mapping.items():
                 if original_id != new_name:  # Only send changes
+                    # Send the speaker correction with audio segments for learning
+                    segments_for_speaker = [seg for seg in self.segments if seg.get('speaker') == original_id]
+                    
                     response = requests.post(
-                        "http://127.0.0.1:8000/speakers/name_mapping",
-                        params={
+                        "http://127.0.0.1:8000/speakers/real_time_feedback",
+                        json={
                             "old_speaker_id": original_id,
-                            "new_speaker_name": new_name
+                            "correct_speaker_name": new_name,
+                            "audio_segments": [{
+                                "start": seg.get('start', 0),
+                                "end": seg.get('end', 0),
+                                "text": seg.get('text', ''),
+                                "audio_file": getattr(self, 'current_audio_file', None)
+                            } for seg in segments_for_speaker[:5]],  # Send up to 5 segments for learning
+                            "transcription_file": getattr(self, 'current_transcription_file', None)
                         },
-                        timeout=5
+                        timeout=10
                     )
+                    
                     if response.status_code == 200:
                         result = response.json()
                         status = result.get("status", "unknown")
@@ -677,10 +709,109 @@ class TranscriptionEditor:
                             print(f"✅ Merged speaker {original_id} into existing {new_name}")
                         elif status == "name_updated":
                             print(f"✅ Updated speaker {original_id} name to {new_name}")
+                        elif status == "learned":
+                            print(f"🧠 System learned from correction: {original_id} → {new_name}")
+                        changes_made = True
                     else:
                         print(f"⚠️ Failed to update speaker {original_id}: {response.status_code}")
+            
+            # If we made changes, trigger re-attribution on the transcription
+            if changes_made:
+                self.trigger_reattribution()
+                
         except Exception as e:
             print(f"⚠️ Could not sync speaker changes to backend: {e}")
+    
+    def trigger_reattribution(self):
+        """Trigger re-attribution of speakers on segments with low confidence or unknown speakers"""
+        try:
+            # Find segments that could benefit from re-attribution
+            reattribution_candidates = []
+            
+            for i, segment in enumerate(self.segments):
+                speaker = segment.get('speaker', 'Unknown')
+                confidence = segment.get('confidence', 0)
+                
+                # Target segments with:
+                # 1. Unknown/auto speakers
+                # 2. Low confidence (< 0.7)
+                # 3. Generic names like "SPEAKER_00"
+                if (speaker.startswith(('SPEAKER_', 'AUTO_SPEAKER')) or 
+                    confidence < 0.7 or 
+                    speaker in ['Unknown', 'Speaker', '']):
+                    
+                    reattribution_candidates.append({
+                        'segment_index': i,
+                        'start': segment.get('start', 0),
+                        'end': segment.get('end', 0),
+                        'text': segment.get('text', ''),
+                        'current_speaker': speaker,
+                        'current_confidence': confidence
+                    })
+            
+            if not reattribution_candidates:
+                print("ℹ️ No segments need re-attribution")
+                return
+            
+            print(f"🔄 Re-attributing {len(reattribution_candidates)} segments...")
+            
+            # Send re-attribution request to backend
+            response = requests.post(
+                "http://127.0.0.1:8000/reattribute_speakers",
+                json={
+                    "audio_file": getattr(self, 'current_audio_file', None),
+                    "segments": reattribution_candidates,
+                    "transcription_context": {
+                        "total_segments": len(self.segments),
+                        "known_speakers": list(self.speaker_names)
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                updated_segments = result.get('updated_segments', [])
+                
+                # Apply the updated attributions
+                improvements = 0
+                for update in updated_segments:
+                    seg_index = update['segment_index']
+                    new_speaker = update['new_speaker']
+                    new_confidence = update['new_confidence']
+                    
+                    if seg_index < len(self.segments):
+                        old_speaker = self.segments[seg_index].get('speaker', 'Unknown')
+                        old_confidence = self.segments[seg_index].get('confidence', 0)
+                        
+                        # Only update if confidence improved significantly
+                        if new_confidence > old_confidence + 0.1:
+                            self.segments[seg_index]['speaker'] = new_speaker
+                            self.segments[seg_index]['confidence'] = new_confidence
+                            self.speaker_names.add(new_speaker)  # Add to known speakers
+                            improvements += 1
+                            print(f"✨ Improved segment {seg_index}: {old_speaker} ({old_confidence:.3f}) → {new_speaker} ({new_confidence:.3f})")
+                
+                if improvements > 0:
+                    print(f"🎉 Re-attribution improved {improvements} segments!")
+                    self.has_unsaved_changes = True
+                    self.update_stats()
+                    self.setup_speaker_mapping()  # Refresh speaker mapping with new speakers
+                    self.update_preview()
+                    
+                    # Show notification to user
+                    messagebox.showinfo("🧠 Smart Re-attribution", 
+                        f"🎉 Found {improvements} improved speaker attributions!\n\n"
+                        f"The system learned from your corrections and\n"
+                        f"automatically improved {improvements} other segments.\n\n"
+                        f"Keep making corrections - each one makes the system smarter!")
+                else:
+                    print("ℹ️ Re-attribution complete, no improvements found")
+            else:
+                print(f"❌ Re-attribution failed: HTTP {response.status_code}")
+                
+        except Exception as e:
+            print(f"❌ Error during re-attribution: {e}")
     
     def add_new_speaker_globally(self):
         """Add a new speaker to the system globally"""
