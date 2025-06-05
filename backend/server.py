@@ -472,6 +472,139 @@ async def provide_batch_speaker_feedback(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/speakers/merge")
+async def merge_speakers(source_speaker_id: str, target_speaker_id: str, target_name: str = None):
+    """
+    Manually merge two speaker profiles.
+    
+    Args:
+        source_speaker_id: The speaker ID to merge from (will be deleted)
+        target_speaker_id: The speaker ID to merge into (will be kept)
+        target_name: Optional new name for the target speaker
+        
+    Returns:
+        Status of the merge operation
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        # Validate inputs
+        if source_speaker_id == target_speaker_id:
+            raise HTTPException(status_code=400, detail="Cannot merge speaker with itself")
+        
+        # Check if both speakers exist
+        if source_speaker_id not in speaker_embedding_manager.speaker_profiles:
+            raise HTTPException(status_code=404, detail=f"Source speaker {source_speaker_id} not found")
+        
+        if target_speaker_id not in speaker_embedding_manager.speaker_profiles:
+            raise HTTPException(status_code=404, detail=f"Target speaker {target_speaker_id} not found")
+        
+        # Perform the merge
+        success = speaker_embedding_manager.merge_speakers(source_speaker_id, target_speaker_id)
+        
+        if success:
+            # Update target speaker name if provided
+            if target_name and target_name.strip():
+                speaker_embedding_manager.update_speaker_name(target_speaker_id, target_name.strip())
+            
+            return {
+                "status": "merged_successfully",
+                "source_speaker_id": source_speaker_id,
+                "target_speaker_id": target_speaker_id,
+                "target_name": target_name or speaker_embedding_manager.speaker_profiles[target_speaker_id].name,
+                "message": f"Successfully merged {source_speaker_id} into {target_speaker_id}"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to merge speakers")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error merging speakers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/speakers/{speaker_id}/name")
+async def update_speaker_name(speaker_id: str, new_name: str):
+    """
+    Update a speaker's display name.
+    
+    Args:
+        speaker_id: The speaker ID to update
+        new_name: The new display name for the speaker
+        
+    Returns:
+        Status of the name update operation
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        # Check if speaker exists
+        if not speaker_embedding_manager.speaker_exists(speaker_id):
+            raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
+        
+        # Update the speaker name
+        success = speaker_embedding_manager.update_speaker_name(speaker_id, new_name)
+        
+        if success:
+            logger.info(f"Updated speaker name: {speaker_id} -> {new_name}")
+            return {
+                "status": "success",
+                "message": f"Speaker name updated to: {new_name}",
+                "speaker_id": speaker_id,
+                "new_name": new_name
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update speaker name")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating speaker name: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/speakers/{speaker_id}")
+async def delete_speaker(speaker_id: str):
+    """
+    Delete a speaker profile completely.
+    
+    Args:
+        speaker_id: The speaker ID to delete
+        
+    Returns:
+        Status of the deletion operation
+    """
+    if speaker_embedding_manager is None:
+        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
+    
+    try:
+        # Check if speaker exists
+        if not speaker_embedding_manager.speaker_exists(speaker_id):
+            raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
+        
+        # Delete the speaker
+        success = speaker_embedding_manager.delete_speaker(speaker_id)
+        
+        if success:
+            logger.info(f"Deleted speaker: {speaker_id}")
+            return {
+                "status": "success",
+                "message": f"Speaker {speaker_id} deleted successfully",
+                "speaker_id": speaker_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete speaker")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting speaker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/speakers/name_mapping")
 async def update_speaker_name_mapping(
     old_speaker_id: str,
@@ -495,6 +628,11 @@ async def update_speaker_name_mapping(
         raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
     
     try:
+        # Validate speaker name is not empty
+        new_speaker_name = new_speaker_name.strip()
+        if not new_speaker_name:
+            raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
+        
         # Check if there's already a speaker with the new name
         existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(new_speaker_name)
         
@@ -506,7 +644,8 @@ async def update_speaker_name_mapping(
                     "status": "speakers_merged",
                     "old_speaker_id": old_speaker_id,
                     "target_speaker_id": existing_speaker_id,
-                    "speaker_name": new_speaker_name
+                    "speaker_name": new_speaker_name,
+                    "message": f"Merged {old_speaker_id} into existing speaker {new_speaker_name}"
                 }
             else:
                 return {

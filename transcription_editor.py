@@ -187,6 +187,22 @@ class TranscriptionEditor:
         tk.Label(header_frame, text="→ Corrected Name", font=("Arial", 10, "bold"), 
                 bg='#ecf0f1', fg='#34495e').pack(side=tk.RIGHT)
         
+        # Add New Speaker button
+        add_speaker_frame = tk.Frame(speaker_panel, bg='#ecf0f1')
+        add_speaker_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        add_speaker_btn = tk.Button(add_speaker_frame, text="✨ Add New Speaker", 
+                                   command=self.add_new_speaker_globally,
+                                   bg='#3498db', fg='white', font=("Arial", 10, "bold"),
+                                   relief=tk.FLAT, padx=15, pady=5)
+        add_speaker_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        merge_speaker_btn = tk.Button(add_speaker_frame, text="🔗 Merge Speakers", 
+                                     command=self.show_merge_speakers_dialog,
+                                     bg='#9b59b6', fg='white', font=("Arial", 10, "bold"),
+                                     relief=tk.FLAT, padx=15, pady=5)
+        merge_speaker_btn.pack(side=tk.LEFT, padx=5)
+        
         # Scrollable speaker mapping area
         mapping_frame = tk.Frame(speaker_panel, bg='#ecf0f1')
         mapping_frame.pack(fill=tk.BOTH, expand=True)
@@ -460,7 +476,9 @@ class TranscriptionEditor:
         self.speaker_canvas.configure(scrollregion=self.speaker_canvas.bbox("all"))
     
     def on_name_change(self, event=None):
-        """Handle speaker name changes"""
+        """Handle speaker name changes and sync with backend"""
+        self.has_unsaved_changes = True
+        self.send_speaker_changes_to_backend()
         self.update_preview()
     
     def get_speaker_mapping(self):
@@ -497,6 +515,366 @@ class TranscriptionEditor:
                     changes[orig_speaker] = curr_speaker
         
         return changes
+    
+    def show_new_speaker_dialog(self):
+        """Show dialog to select existing speaker or create a new one"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Speaker")
+        dialog.geometry("500x400")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100))
+        
+        result = tk.StringVar()
+        
+        # Header
+        tk.Label(dialog, text="✨ Add Speaker", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Tab 1: Select from existing enrolled speakers
+        existing_frame = tk.Frame(notebook, bg='#f0f0f0')
+        notebook.add(existing_frame, text="📋 Select Existing")
+        
+        tk.Label(existing_frame, text="Select from enrolled speakers in database:", 
+                font=("Arial", 11), bg='#f0f0f0').pack(pady=(15, 10))
+        
+        # Listbox for existing speakers
+        listbox_frame = tk.Frame(existing_frame, bg='#f0f0f0')
+        listbox_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        speaker_listbox = tk.Listbox(listbox_frame, font=("Arial", 10), height=8)
+        scrollbar_existing = ttk.Scrollbar(listbox_frame, orient="vertical", command=speaker_listbox.yview)
+        speaker_listbox.configure(yscrollcommand=scrollbar_existing.set)
+        
+        speaker_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_existing.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Load existing speakers from backend
+        existing_speakers = self.get_enrolled_speakers()
+        if existing_speakers:
+            for speaker in existing_speakers:
+                name = speaker.get('name', 'Unknown')
+                speaker_id = speaker.get('id', '')
+                display_text = f"{name} ({speaker_id[:8]}...)"
+                speaker_listbox.insert(tk.END, display_text)
+        else:
+            speaker_listbox.insert(tk.END, "No enrolled speakers found")
+            speaker_listbox.config(state=tk.DISABLED)
+        
+        # Tab 2: Create new speaker
+        new_frame = tk.Frame(notebook, bg='#f0f0f0')
+        notebook.add(new_frame, text="✨ Create New")
+        
+        tk.Label(new_frame, text="Enter name for completely new speaker:", 
+                font=("Arial", 11), bg='#f0f0f0').pack(pady=(30, 10))
+        
+        name_entry = tk.Entry(new_frame, width=30, font=("Arial", 11))
+        name_entry.pack(pady=10)
+        
+        tk.Label(new_frame, text="(This creates a new speaker not in the database)", 
+                font=("Arial", 9), bg='#f0f0f0', fg='#7f8c8d').pack(pady=5)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=15)
+        
+        def select_existing():
+            selection = speaker_listbox.curselection()
+            if selection and existing_speakers:
+                speaker = existing_speakers[selection[0]]
+                result.set(speaker.get('name', 'Unknown'))
+                dialog.destroy()
+            else:
+                messagebox.showerror("Error", "Please select a speaker from the list.")
+        
+        def create_new():
+            name = name_entry.get().strip()
+            if name:
+                result.set(name)
+                dialog.destroy()
+            else:
+                messagebox.showerror("Error", "Please enter a speaker name.")
+        
+        def cancel():
+            result.set("")
+            dialog.destroy()
+        
+        # Determine which button to show based on current tab
+        def on_tab_change(event):
+            current_tab = notebook.index(notebook.select())
+            for widget in button_frame.winfo_children():
+                widget.destroy()
+            
+            if current_tab == 0:  # Existing speakers tab
+                select_btn = tk.Button(button_frame, text="✅ Select Speaker", command=select_existing,
+                                      bg='#3498db', fg='white', font=("Arial", 10, "bold"),
+                                      padx=20, pady=5)
+                select_btn.pack(side=tk.LEFT, padx=(0, 10))
+            else:  # Create new tab
+                create_btn = tk.Button(button_frame, text="✅ Create", command=create_new,
+                                      bg='#2ecc71', fg='white', font=("Arial", 10, "bold"),
+                                      padx=20, pady=5)
+                create_btn.pack(side=tk.LEFT, padx=(0, 10))
+                name_entry.focus()
+            
+            cancel_btn = tk.Button(button_frame, text="❌ Cancel", command=cancel,
+                                  bg='#e74c3c', fg='white', font=("Arial", 10, "bold"),
+                                  padx=20, pady=5)
+            cancel_btn.pack(side=tk.LEFT)
+        
+        notebook.bind("<<NotebookTabChanged>>", on_tab_change)
+        
+        # Initialize with first tab
+        on_tab_change(None)
+        
+        # Allow Enter key in new speaker entry
+        name_entry.bind('<Return>', lambda e: create_new())
+        
+        # Allow double-click on listbox
+        speaker_listbox.bind('<Double-Button-1>', lambda e: select_existing())
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result.get() if result.get() else None
+    
+    def get_enrolled_speakers(self):
+        """Get list of enrolled speakers from the backend"""
+        try:
+            response = requests.get("http://127.0.0.1:8000/speakers", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('speakers', [])
+        except Exception as e:
+            print(f"Could not fetch enrolled speakers: {e}")
+        return []
+    
+    def send_speaker_changes_to_backend(self):
+        """Send speaker name changes to backend for permanent storage"""
+        try:
+            mapping = self.get_speaker_mapping()
+            for original_id, new_name in mapping.items():
+                if original_id != new_name:  # Only send changes
+                    response = requests.post(
+                        "http://127.0.0.1:8000/speakers/name_mapping",
+                        params={
+                            "old_speaker_id": original_id,
+                            "new_speaker_name": new_name
+                        },
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        result = response.json()
+                        status = result.get("status", "unknown")
+                        if status == "speakers_merged":
+                            print(f"✅ Merged speaker {original_id} into existing {new_name}")
+                        elif status == "name_updated":
+                            print(f"✅ Updated speaker {original_id} name to {new_name}")
+                    else:
+                        print(f"⚠️ Failed to update speaker {original_id}: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Could not sync speaker changes to backend: {e}")
+    
+    def add_new_speaker_globally(self):
+        """Add a new speaker to the system globally"""
+        new_speaker = self.show_new_speaker_dialog()
+        if new_speaker:
+            # Add to speaker names
+            self.speaker_names.add(new_speaker)
+            
+            # Mark as changed and refresh
+            self.has_unsaved_changes = True
+            self.update_stats()
+            self.setup_speaker_mapping()
+            self.update_preview()
+            
+            messagebox.showinfo("Success", f"Added new speaker: {new_speaker}\n\nYou can now assign segments to this speaker using the dropdown menus.")
+    
+    def show_merge_speakers_dialog(self):
+        """Show dialog to merge duplicate speaker profiles"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Merge Speaker Profiles")
+        dialog.geometry("600x500")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        # Header
+        tk.Label(dialog, text="🔗 Merge Speaker Profiles", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+        
+        tk.Label(dialog, text="Select speakers to merge (combines voice profiles & transcription history):", 
+                font=("Arial", 11), bg='#f0f0f0').pack(pady=(0, 15))
+        
+        # Get enrolled speakers with more details
+        enrolled_speakers = self.get_enrolled_speakers()
+        if not enrolled_speakers:
+            tk.Label(dialog, text="No speakers found in database to merge.", 
+                    font=("Arial", 11), bg='#f0f0f0', fg='#e74c3c').pack(pady=20)
+            
+            tk.Button(dialog, text="Close", command=dialog.destroy,
+                     bg='#95a5a6', fg='white', font=("Arial", 10, "bold"),
+                     padx=20, pady=5).pack(pady=10)
+            return
+        
+        # Two-column layout for source and target selection
+        selection_frame = tk.Frame(dialog, bg='#f0f0f0')
+        selection_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Source speaker (to be merged and deleted)
+        source_frame = tk.Frame(selection_frame, bg='#f0f0f0')
+        source_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        
+        tk.Label(source_frame, text="Source Speaker (will be deleted):", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0', fg='#e74c3c').pack(pady=(0, 5))
+        
+        source_listbox = tk.Listbox(source_frame, font=("Arial", 9), height=12)
+        source_scrollbar = ttk.Scrollbar(source_frame, orient="vertical", command=source_listbox.yview)
+        source_listbox.configure(yscrollcommand=source_scrollbar.set)
+        source_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        source_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Target speaker (will be kept)
+        target_frame = tk.Frame(selection_frame, bg='#f0f0f0')
+        target_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        
+        tk.Label(target_frame, text="Target Speaker (will be kept):", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0', fg='#2ecc71').pack(pady=(0, 5))
+        
+        target_listbox = tk.Listbox(target_frame, font=("Arial", 9), height=12)
+        target_scrollbar = ttk.Scrollbar(target_frame, orient="vertical", command=target_listbox.yview)
+        target_listbox.configure(yscrollcommand=target_scrollbar.set)
+        target_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        target_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populate both lists with speaker information
+        for speaker in enrolled_speakers:
+            name = speaker.get('name', 'Unknown')
+            speaker_id = speaker.get('id', '')
+            embedding_count = speaker.get('embedding_count', 0)
+            display_text = f"{name}\n  ID: {speaker_id[:12]}...\n  Samples: {embedding_count}\n"
+            
+            source_listbox.insert(tk.END, display_text)
+            target_listbox.insert(tk.END, display_text)
+        
+        # Name entry for merged speaker
+        name_frame = tk.Frame(dialog, bg='#f0f0f0')
+        name_frame.pack(pady=10)
+        
+        tk.Label(name_frame, text="Final speaker name:", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0').pack(side=tk.LEFT, padx=(0, 10))
+        
+        final_name_entry = tk.Entry(name_frame, width=25, font=("Arial", 10))
+        final_name_entry.pack(side=tk.LEFT)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=15)
+        
+        def perform_merge():
+            source_selection = source_listbox.curselection()
+            target_selection = target_listbox.curselection()
+            
+            if not source_selection or not target_selection:
+                messagebox.showerror("Error", "Please select both source and target speakers.")
+                return
+            
+            if source_selection[0] == target_selection[0]:
+                messagebox.showerror("Error", "Cannot merge a speaker with itself. Please select different speakers.")
+                return
+            
+            source_speaker = enrolled_speakers[source_selection[0]]
+            target_speaker = enrolled_speakers[target_selection[0]]
+            final_name = final_name_entry.get().strip()
+            
+            if not final_name:
+                final_name = target_speaker.get('name', 'Merged Speaker')
+            
+            # Confirm the merge
+            confirm_msg = (
+                f"Merge '{source_speaker.get('name')}' into '{target_speaker.get('name')}'?\n\n"
+                f"• Source speaker ({source_speaker.get('id', '')[:12]}...) will be DELETED\n"
+                f"• All voice data will be moved to target speaker\n"
+                f"• Final name will be: {final_name}\n\n"
+                f"This action cannot be undone!"
+            )
+            
+            if messagebox.askyesno("Confirm Merge", confirm_msg):
+                self.merge_speakers_in_backend(
+                    source_speaker.get('id'),
+                    target_speaker.get('id'),
+                    final_name,
+                    dialog
+                )
+        
+        merge_btn = tk.Button(button_frame, text="🔗 Merge Speakers", command=perform_merge,
+                             bg='#e74c3c', fg='white', font=("Arial", 10, "bold"),
+                             padx=20, pady=5)
+        merge_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        cancel_btn = tk.Button(button_frame, text="❌ Cancel", command=dialog.destroy,
+                              bg='#95a5a6', fg='white', font=("Arial", 10, "bold"),
+                              padx=20, pady=5)
+        cancel_btn.pack(side=tk.LEFT)
+        
+        # Set initial target name when target is selected
+        def on_target_select(event):
+            selection = target_listbox.curselection()
+            if selection:
+                target_speaker = enrolled_speakers[selection[0]]
+                final_name_entry.delete(0, tk.END)
+                final_name_entry.insert(0, target_speaker.get('name', ''))
+        
+        target_listbox.bind('<<ListboxSelect>>', on_target_select)
+    
+    def merge_speakers_in_backend(self, source_id, target_id, final_name, dialog):
+        """Perform the actual speaker merge via backend API"""
+        try:
+            response = requests.post(
+                "http://127.0.0.1:8000/speakers/merge",
+                params={
+                    "source_speaker_id": source_id,
+                    "target_speaker_id": target_id,
+                    "target_name": final_name
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                messagebox.showinfo("Success", 
+                    f"✅ Successfully merged speakers!\n\n"
+                    f"• {source_id[:12]}... has been deleted\n"
+                    f"• All data merged into: {final_name}\n"
+                    f"• Voice profiles combined\n\n"
+                    f"The speaker database has been updated.")
+                dialog.destroy()
+                
+                # Refresh the speaker mapping to reflect changes
+                self.setup_speaker_mapping()
+                self.update_preview()
+                
+            else:
+                error_msg = f"Failed to merge speakers: HTTP {response.status_code}"
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    error_msg += f"\n{error_detail}"
+                except:
+                    pass
+                messagebox.showerror("Merge Failed", error_msg)
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge speakers:\n{str(e)}")
     
     def update_preview(self):
         """Update the enhanced transcription preview with colors and emotions"""
@@ -558,6 +936,9 @@ class TranscriptionEditor:
                     else:
                         available_speakers.append(orig_id)  # Show original ID
                 
+                # Add option to create new speaker
+                available_speakers.append("+ Add New Speaker...")
+                
                 # Set current value to mapped name if available
                 current_display_name = mapping.get(speaker, speaker)
                 
@@ -570,6 +951,17 @@ class TranscriptionEditor:
                 def make_speaker_change_handler(seg_id, var, current_mapping):
                     def on_speaker_change(event=None):
                         selected_name = var.get()
+                        
+                        # Check if user selected "Add New Speaker"
+                        if selected_name == "+ Add New Speaker...":
+                            new_speaker = self.show_new_speaker_dialog()
+                            if new_speaker:
+                                var.set(new_speaker)
+                                selected_name = new_speaker
+                            else:
+                                # User cancelled, restore original value
+                                var.set(current_display_name)
+                                return
                         
                         # Convert from display name back to original speaker ID if needed
                         target_speaker = selected_name
@@ -726,6 +1118,9 @@ class TranscriptionEditor:
             else:
                 available_speakers.append(orig_id)
         
+        # Add option to create new speaker
+        available_speakers.append("+ Add New Speaker...")
+        
         new_speaker_var = tk.StringVar()
         speaker_combo = ttk.Combobox(dialog, textvariable=new_speaker_var, 
                                    values=available_speakers, width=30)
@@ -743,6 +1138,14 @@ class TranscriptionEditor:
             if not selected_name:
                 messagebox.showerror("Error", "Please select or enter a speaker name.")
                 return
+            
+            # Check if user selected "Add New Speaker"
+            if selected_name == "+ Add New Speaker...":
+                new_speaker = self.show_new_speaker_dialog()
+                if new_speaker:
+                    selected_name = new_speaker
+                else:
+                    return  # User cancelled
             
             # Convert from display name back to original speaker ID if needed
             target_speaker = selected_name

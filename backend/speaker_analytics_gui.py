@@ -42,6 +42,7 @@ class SpeakerAnalyticsDashboard:
         # Data storage
         self.speaker_data = {}
         self.selected_speaker = None
+        self.selected_speakers = set()  # For management tab multi-select
         
         # Initialize enhanced transcription processor
         try:
@@ -972,39 +973,139 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         self.processing_thread = None
         
     def setup_management_tab(self):
-        """Setup the database management tab"""
+        """Setup the enhanced database management tab"""
         mgmt_frame = ttk.Frame(self.notebook)
         self.notebook.add(mgmt_frame, text="⚙️ Management")
         
-        # Management controls
-        controls_frame = ttk.LabelFrame(mgmt_frame, text="Database Management", padding=10)
-        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Create paned window for better layout
+        mgmt_paned = ttk.PanedWindow(mgmt_frame, orient=tk.HORIZONTAL)
+        mgmt_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Row 1: Speaker operations
-        row1 = ttk.Frame(controls_frame)
-        row1.pack(fill=tk.X, pady=5)
+        # Left panel: Speaker management
+        left_mgmt_frame = ttk.LabelFrame(mgmt_paned, text="Speaker Profile Management", padding=10)
+        mgmt_paned.add(left_mgmt_frame, weight=2)
         
-        ttk.Button(row1, text="🔄 Refresh All Data", 
-                  command=self.refresh_data).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="🧹 Cleanup Empty Speakers", 
-                  command=self.cleanup_speakers).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="📊 Generate Report", 
+        # Search and filter controls
+        search_frame = ttk.Frame(left_mgmt_frame)
+        search_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(search_frame, text="🔍 Search/Filter:").pack(side=tk.LEFT, padx=(0, 5))
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=(0, 5))
+        search_entry.bind('<KeyRelease>', self.filter_speakers)
+        
+        ttk.Button(search_frame, text="Clear", 
+                  command=lambda: (self.search_var.set(""), self.filter_speakers())).pack(side=tk.LEFT, padx=5)
+        
+        # Speaker management controls
+        mgmt_controls = ttk.Frame(left_mgmt_frame)
+        mgmt_controls.pack(fill=tk.X, pady=(0, 10))
+        
+        # Row 1: Individual operations
+        row1 = ttk.Frame(mgmt_controls)
+        row1.pack(fill=tk.X, pady=2)
+        
+        ttk.Button(row1, text="✏️ Edit Selected", 
+                  command=self.edit_selected_speaker).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(row1, text="🔗 Merge Selected", 
+                  command=self.merge_selected_speakers).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="🗑️ Delete Selected", 
+                  command=self.delete_selected_speakers).pack(side=tk.LEFT, padx=5)
+        
+        # Row 2: Bulk operations
+        row2 = ttk.Frame(mgmt_controls)
+        row2.pack(fill=tk.X, pady=2)
+        
+        ttk.Button(row2, text="🔍 Find Similar Names", 
+                  command=self.find_similar_speakers).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(row2, text="🧹 Bulk Cleanup", 
+                  command=self.show_bulk_cleanup_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row2, text="📋 Bulk Rename", 
+                  command=self.show_bulk_rename_dialog).pack(side=tk.LEFT, padx=5)
+        
+        # Enhanced speaker list with checkboxes for multi-select
+        list_frame = ttk.Frame(left_mgmt_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create enhanced treeview with checkboxes
+        self.mgmt_speaker_tree = ttk.Treeview(list_frame, 
+                                             columns=('select', 'type', 'samples', 'confidence', 'last_seen', 'id'), 
+                                             show='tree headings', height=20)
+        
+        # Configure columns
+        self.mgmt_speaker_tree.heading('#0', text='Speaker Name')
+        self.mgmt_speaker_tree.heading('select', text='☐')
+        self.mgmt_speaker_tree.heading('type', text='Type')
+        self.mgmt_speaker_tree.heading('samples', text='Samples')
+        self.mgmt_speaker_tree.heading('confidence', text='Confidence')
+        self.mgmt_speaker_tree.heading('last_seen', text='Last Seen')
+        self.mgmt_speaker_tree.heading('id', text='Speaker ID')
+        
+        self.mgmt_speaker_tree.column('#0', width=200)
+        self.mgmt_speaker_tree.column('select', width=30)
+        self.mgmt_speaker_tree.column('type', width=80)
+        self.mgmt_speaker_tree.column('samples', width=70)
+        self.mgmt_speaker_tree.column('confidence', width=80)
+        self.mgmt_speaker_tree.column('last_seen', width=100)
+        self.mgmt_speaker_tree.column('id', width=150)
+        
+        # Scrollbars
+        tree_scroll_y = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.mgmt_speaker_tree.yview)
+        tree_scroll_x = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.mgmt_speaker_tree.xview)
+        self.mgmt_speaker_tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
+        
+        self.mgmt_speaker_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Bind events for multi-select
+        self.mgmt_speaker_tree.bind('<Button-1>', self.on_tree_click)
+        self.mgmt_speaker_tree.bind('<Double-Button-1>', self.on_tree_double_click)
+        
+        # Track selected speakers
+        self.selected_speakers = set()
+        
+        # Right panel: Operations and logs
+        right_mgmt_frame = ttk.Frame(mgmt_paned)
+        mgmt_paned.add(right_mgmt_frame, weight=1)
+        
+        # Database operations
+        db_ops_frame = ttk.LabelFrame(right_mgmt_frame, text="Database Operations", padding=10)
+        db_ops_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Row 1: Data operations
+        db_row1 = ttk.Frame(db_ops_frame)
+        db_row1.pack(fill=tk.X, pady=2)
+        
+        ttk.Button(db_row1, text="🔄 Refresh", 
+                  command=self.refresh_data).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(db_row1, text="📊 Report", 
                   command=self.generate_report).pack(side=tk.LEFT, padx=5)
         
-        # Row 2: Data operations
-        row2 = ttk.Frame(controls_frame)
-        row2.pack(fill=tk.X, pady=5)
+        # Row 2: Export/Import
+        db_row2 = ttk.Frame(db_ops_frame)
+        db_row2.pack(fill=tk.X, pady=2)
         
-        ttk.Button(row2, text="💾 Export Database", 
-                  command=self.export_database).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row2, text="📈 Export Analytics", 
-                  command=self.export_analytics).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row2, text="⚠️ Reset Database", 
+        ttk.Button(db_row2, text="💾 Export", 
+                  command=self.export_database).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(db_row2, text="⚠️ Reset", 
                   command=self.reset_database).pack(side=tk.LEFT, padx=5)
         
+        # Selection info
+        info_frame = ttk.LabelFrame(right_mgmt_frame, text="Selection Info", padding=10)
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.selection_info = tk.Text(info_frame, height=8, font=('Consolas', 9))
+        info_scroll = ttk.Scrollbar(info_frame, orient=tk.VERTICAL, command=self.selection_info.yview)
+        self.selection_info.configure(yscrollcommand=info_scroll.set)
+        
+        self.selection_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        info_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
         # Management log
-        log_frame = ttk.LabelFrame(mgmt_frame, text="Management Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        log_frame = ttk.LabelFrame(right_mgmt_frame, text="Management Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True)
         
         self.mgmt_log = tk.Text(log_frame, height=15, font=('Consolas', 9))
         log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.mgmt_log.yview)
@@ -1050,6 +1151,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             self.update_speaker_list()
             self.update_statistics()
             self.update_analytics()
+            self.update_management_speaker_list()  # Update management tab
             
             # Update status
             self.update_status("Data refreshed successfully")
@@ -2295,6 +2397,625 @@ This feature allows you to transcribe recorded calls using your existing speaker
         )
         if file_path:
             self.conv_file_var.set(file_path)
+    
+    # Enhanced speaker management methods
+    
+    def filter_speakers(self, event=None):
+        """Filter speakers based on search term"""
+        search_term = self.search_var.get().lower()
+        self.update_management_speaker_list(filter_term=search_term)
+    
+    def update_management_speaker_list(self, filter_term=""):
+        """Update the management speaker list with optional filtering"""
+        if not hasattr(self, 'mgmt_speaker_tree'):
+            return
+            
+        # Clear existing items
+        for item in self.mgmt_speaker_tree.get_children():
+            self.mgmt_speaker_tree.delete(item)
+        
+        if not hasattr(self, 'speaker_data'):
+            return
+        
+        # Sort speakers by name for easier management
+        sorted_speakers = sorted(self.speaker_data.items(), 
+                               key=lambda x: x[1]['name'].lower())
+        
+        for speaker_id, data in sorted_speakers:
+            # Apply filter if provided
+            if filter_term and filter_term not in data['name'].lower() and filter_term not in speaker_id.lower():
+                continue
+            
+            # Format data
+            confidence = f"{data['average_confidence']:.3f}" if data['average_confidence'] else "0.000"
+            
+            try:
+                last_seen = datetime.fromisoformat(data['last_seen']).strftime('%m/%d %H:%M')
+            except:
+                last_seen = "Never"
+            
+            # Check if selected
+            checkbox = "☑" if speaker_id in self.selected_speakers else "☐"
+            
+            # Insert into tree
+            item_id = self.mgmt_speaker_tree.insert('', tk.END, 
+                                   values=(checkbox,
+                                          data['type'], 
+                                          data['embedding_count'],
+                                          confidence,
+                                          last_seen,
+                                          speaker_id),
+                                   text=data['name'],
+                                   tags=(data['type'], speaker_id))
+        
+        # Configure tag colors and update selection info
+        self.mgmt_speaker_tree.tag_configure('🤖 Auto', background='#ffe6e6')
+        self.mgmt_speaker_tree.tag_configure('✅ Corrected', background='#e6ffe6')
+        self.mgmt_speaker_tree.tag_configure('👤 Enrolled', background='#e6f3ff')
+        
+        self.update_selection_info()
+    
+    def on_tree_click(self, event):
+        """Handle tree item click for selection"""
+        item = self.mgmt_speaker_tree.identify('item', event.x, event.y)
+        if item:
+            # Get speaker ID from values
+            values = self.mgmt_speaker_tree.item(item, 'values')
+            if len(values) >= 6:
+                speaker_id = values[5]  # Speaker ID is in the 6th column
+                
+                # Toggle selection
+                if speaker_id in self.selected_speakers:
+                    self.selected_speakers.remove(speaker_id)
+                else:
+                    self.selected_speakers.add(speaker_id)
+                
+                # Update display
+                self.update_management_speaker_list(self.search_var.get().lower())
+    
+    def on_tree_double_click(self, event):
+        """Handle double-click to edit speaker"""
+        item = self.mgmt_speaker_tree.identify('item', event.x, event.y)
+        if item:
+            values = self.mgmt_speaker_tree.item(item, 'values')
+            if len(values) >= 6:
+                speaker_id = values[5]
+                self.selected_speakers = {speaker_id}
+                self.edit_selected_speaker()
+    
+    def update_selection_info(self):
+        """Update the selection info panel"""
+        if not hasattr(self, 'selection_info'):
+            return
+            
+        self.selection_info.delete(1.0, tk.END)
+        
+        if not self.selected_speakers:
+            self.selection_info.insert(tk.END, "No speakers selected\n\nClick speakers to select them for operations.")
+            return
+        
+        info = f"📋 Selected: {len(self.selected_speakers)} speakers\n\n"
+        
+        total_samples = 0
+        speaker_types = {}
+        
+        for speaker_id in self.selected_speakers:
+            if speaker_id in self.speaker_data:
+                data = self.speaker_data[speaker_id]
+                info += f"• {data['name']} ({speaker_id[:12]}...)\n"
+                info += f"  Type: {data['type']} | Samples: {data['embedding_count']}\n\n"
+                
+                total_samples += data['embedding_count']
+                speaker_type = data['type']
+                speaker_types[speaker_type] = speaker_types.get(speaker_type, 0) + 1
+        
+        info += f"📊 Total samples: {total_samples}\n"
+        for stype, count in speaker_types.items():
+            info += f"   {stype}: {count}\n"
+        
+        self.selection_info.insert(tk.END, info)
+    
+    def edit_selected_speaker(self):
+        """Edit the selected speaker (single selection only)"""
+        if len(self.selected_speakers) != 1:
+            messagebox.showerror("Error", "Please select exactly one speaker to edit.")
+            return
+        
+        speaker_id = list(self.selected_speakers)[0]
+        if speaker_id not in self.speaker_data:
+            messagebox.showerror("Error", "Speaker not found in database.")
+            return
+        
+        self.show_edit_speaker_dialog(speaker_id)
+    
+    def show_edit_speaker_dialog(self, speaker_id):
+        """Show dialog to edit speaker details"""
+        speaker_data = self.speaker_data[speaker_id]
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Speaker Profile")
+        dialog.geometry("500x400")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100))
+        
+        # Header
+        tk.Label(dialog, text="✏️ Edit Speaker Profile", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 15))
+        
+        # Speaker info frame
+        info_frame = ttk.LabelFrame(dialog, text="Speaker Information", padding=15)
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Speaker name
+        tk.Label(info_frame, text="Speaker Name:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky=tk.W, pady=5)
+        name_var = tk.StringVar(value=speaker_data['name'])
+        name_entry = tk.Entry(info_frame, textvariable=name_var, width=40, font=("Arial", 11))
+        name_entry.grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        
+        # Speaker ID (read-only)
+        tk.Label(info_frame, text="Speaker ID:", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky=tk.W, pady=5)
+        tk.Label(info_frame, text=speaker_id, font=("Arial", 10)).grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        
+        # Statistics (read-only)
+        tk.Label(info_frame, text="Type:", font=("Arial", 10, "bold")).grid(row=2, column=0, sticky=tk.W, pady=5)
+        tk.Label(info_frame, text=speaker_data['type'], font=("Arial", 10)).grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        
+        tk.Label(info_frame, text="Samples:", font=("Arial", 10, "bold")).grid(row=3, column=0, sticky=tk.W, pady=5)
+        tk.Label(info_frame, text=str(speaker_data['embedding_count']), font=("Arial", 10)).grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        
+        tk.Label(info_frame, text="Confidence:", font=("Arial", 10, "bold")).grid(row=4, column=0, sticky=tk.W, pady=5)
+        confidence = f"{speaker_data['average_confidence']:.3f}" if speaker_data['average_confidence'] else "0.000"
+        tk.Label(info_frame, text=confidence, font=("Arial", 10)).grid(row=4, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=20)
+        
+        def save_changes():
+            new_name = name_var.get().strip()
+            if not new_name:
+                messagebox.showerror("Error", "Speaker name cannot be empty.")
+                return
+            
+            if new_name != speaker_data['name']:
+                self.update_speaker_name_in_backend(speaker_id, new_name, dialog)
+            else:
+                dialog.destroy()
+        
+        def delete_speaker():
+            if messagebox.askyesno("Confirm Delete", 
+                                 f"Are you sure you want to delete speaker '{speaker_data['name']}'?\n\n"
+                                 f"This will permanently remove:\n"
+                                 f"• {speaker_data['embedding_count']} voice samples\n"
+                                 f"• All learning data\n"
+                                 f"• Speaker profile\n\n"
+                                 f"This action cannot be undone!"):
+                self.delete_speaker_from_backend(speaker_id, dialog)
+        
+        ttk.Button(button_frame, text="💾 Save Changes", command=save_changes).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="🗑️ Delete Speaker", command=delete_speaker).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="❌ Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=10)
+        
+        name_entry.focus()
+        name_entry.bind('<Return>', lambda e: save_changes())
+    
+    def update_speaker_name_in_backend(self, speaker_id, new_name, dialog):
+        """Update speaker name via backend API"""
+        try:
+            response = requests.put(
+                f"{self.backend_url}/speakers/{speaker_id}/name",
+                params={"new_name": new_name},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                self.log_management(f"✅ Updated speaker name: {speaker_id} -> {new_name}")
+                messagebox.showinfo("Success", f"Speaker name updated to: {new_name}")
+                dialog.destroy()
+                self.refresh_data()
+            else:
+                error_msg = f"Failed to update speaker name: HTTP {response.status_code}"
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    error_msg += f"\n{error_detail}"
+                except:
+                    pass
+                messagebox.showerror("Update Failed", error_msg)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update speaker name:\n{str(e)}")
+    
+    def delete_speaker_from_backend(self, speaker_id, dialog):
+        """Delete speaker via backend API"""
+        try:
+            response = requests.delete(f"{self.backend_url}/speakers/{speaker_id}", timeout=10)
+            
+            if response.status_code == 200:
+                self.log_management(f"🗑️ Deleted speaker: {speaker_id}")
+                messagebox.showinfo("Success", "Speaker deleted successfully.")
+                dialog.destroy()
+                self.selected_speakers.discard(speaker_id)
+                self.refresh_data()
+            else:
+                error_msg = f"Failed to delete speaker: HTTP {response.status_code}"
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    error_msg += f"\n{error_detail}"
+                except:
+                    pass
+                messagebox.showerror("Delete Failed", error_msg)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete speaker:\n{str(e)}")
+    
+    def merge_selected_speakers(self):
+        """Merge selected speakers"""
+        if len(self.selected_speakers) < 2:
+            messagebox.showerror("Error", "Please select at least 2 speakers to merge.")
+            return
+        
+        self.show_merge_speakers_dialog()
+    
+    def show_merge_speakers_dialog(self):
+        """Show dialog to merge selected speakers"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Merge Speaker Profiles")
+        dialog.geometry("700x600")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        # Header
+        tk.Label(dialog, text="🔗 Merge Speaker Profiles", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+        
+        tk.Label(dialog, text=f"Selected {len(self.selected_speakers)} speakers to merge:", 
+                font=("Arial", 11), bg='#f0f0f0').pack(pady=(0, 15))
+        
+        # Show selected speakers
+        speakers_frame = ttk.LabelFrame(dialog, text="Speakers to Merge", padding=10)
+        speakers_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Create listbox for speakers
+        speakers_listbox = tk.Listbox(speakers_frame, font=("Arial", 10), height=8)
+        speakers_scroll = ttk.Scrollbar(speakers_frame, orient="vertical", command=speakers_listbox.yview)
+        speakers_listbox.configure(yscrollcommand=speakers_scroll.set)
+        
+        speakers_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        speakers_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populate with selected speakers
+        speaker_list = []
+        total_samples = 0
+        for speaker_id in self.selected_speakers:
+            if speaker_id in self.speaker_data:
+                data = self.speaker_data[speaker_id]
+                display_text = f"{data['name']} ({speaker_id[:12]}...) - {data['embedding_count']} samples"
+                speakers_listbox.insert(tk.END, display_text)
+                speaker_list.append((speaker_id, data))
+                total_samples += data['embedding_count']
+        
+        # Target selection
+        target_frame = ttk.LabelFrame(dialog, text="Merge Target", padding=10)
+        target_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        tk.Label(target_frame, text="Select target speaker (will be kept):").pack(anchor=tk.W, pady=(0, 5))
+        
+        target_var = tk.StringVar()
+        target_dropdown = ttk.Combobox(target_frame, textvariable=target_var, width=50)
+        target_values = [f"{data['name']} ({speaker_id[:12]}...)" for speaker_id, data in speaker_list]
+        target_dropdown['values'] = target_values
+        target_dropdown.pack(fill=tk.X, pady=5)
+        
+        tk.Label(target_frame, text="Final speaker name:").pack(anchor=tk.W, pady=(10, 5))
+        final_name_var = tk.StringVar()
+        final_name_entry = tk.Entry(target_frame, textvariable=final_name_var, font=("Arial", 11))
+        final_name_entry.pack(fill=tk.X, pady=5)
+        
+        # Update final name when target changes
+        def on_target_change(event):
+            selection = target_dropdown.current()
+            if selection >= 0:
+                _, data = speaker_list[selection]
+                final_name_var.set(data['name'])
+        
+        target_dropdown.bind('<<ComboboxSelected>>', on_target_change)
+        
+        # Info
+        tk.Label(dialog, text=f"Total samples to merge: {total_samples}", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0').pack(pady=10)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=15)
+        
+        def perform_merge():
+            if not target_var.get():
+                messagebox.showerror("Error", "Please select a target speaker.")
+                return
+            
+            target_index = target_dropdown.current()
+            if target_index < 0:
+                messagebox.showerror("Error", "Invalid target selection.")
+                return
+            
+            target_id, _ = speaker_list[target_index]
+            final_name = final_name_var.get().strip()
+            
+            if not final_name:
+                messagebox.showerror("Error", "Please enter a final speaker name.")
+                return
+            
+            # Confirm merge
+            source_speakers = [sid for sid, _ in speaker_list if sid != target_id]
+            confirm_msg = (
+                f"Merge {len(source_speakers)} speakers into '{final_name}'?\n\n"
+                f"Target: {target_id[:12]}...\n"
+                f"Sources to be deleted: {len(source_speakers)}\n"
+                f"Total samples: {total_samples}\n\n"
+                f"This action cannot be undone!"
+            )
+            
+            if messagebox.askyesno("Confirm Merge", confirm_msg):
+                self.perform_speaker_merge(source_speakers, target_id, final_name, dialog)
+        
+        ttk.Button(button_frame, text="🔗 Merge Speakers", command=perform_merge).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="❌ Cancel", command=dialog.destroy).pack(side=tk.LEFT)
+    
+    def perform_speaker_merge(self, source_speakers, target_id, final_name, dialog):
+        """Perform the actual speaker merge"""
+        try:
+            success_count = 0
+            
+            for source_id in source_speakers:
+                response = requests.post(
+                    f"{self.backend_url}/speakers/merge",
+                    params={
+                        "source_speaker_id": source_id,
+                        "target_speaker_id": target_id,
+                        "target_name": final_name
+                    },
+                    timeout=15
+                )
+                
+                if response.status_code == 200:
+                    success_count += 1
+                    self.log_management(f"✅ Merged {source_id[:12]}... into {target_id[:12]}...")
+                else:
+                    self.log_management(f"❌ Failed to merge {source_id[:12]}...")
+            
+            if success_count > 0:
+                messagebox.showinfo("Merge Complete", 
+                    f"✅ Successfully merged {success_count} speaker profiles!\n\n"
+                    f"Final speaker: {final_name}\n"
+                    f"Merged profiles have been combined.")
+                dialog.destroy()
+                self.selected_speakers.clear()
+                self.refresh_data()
+            else:
+                messagebox.showerror("Merge Failed", "No speakers were successfully merged.")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge speakers:\n{str(e)}")
+    
+    def delete_selected_speakers(self):
+        """Delete selected speakers"""
+        if not self.selected_speakers:
+            messagebox.showerror("Error", "Please select speakers to delete.")
+            return
+        
+        # Confirm deletion
+        speaker_names = [self.speaker_data[sid]['name'] for sid in self.selected_speakers if sid in self.speaker_data]
+        total_samples = sum(self.speaker_data[sid]['embedding_count'] for sid in self.selected_speakers if sid in self.speaker_data)
+        
+        confirm_msg = (
+            f"Delete {len(self.selected_speakers)} speakers?\n\n"
+            f"Speakers: {', '.join(speaker_names[:5])}"
+            f"{'...' if len(speaker_names) > 5 else ''}\n\n"
+            f"Total samples to be deleted: {total_samples}\n\n"
+            f"This action cannot be undone!"
+        )
+        
+        if messagebox.askyesno("Confirm Delete", confirm_msg):
+            self.perform_bulk_delete()
+    
+    def perform_bulk_delete(self):
+        """Perform bulk deletion of selected speakers"""
+        try:
+            success_count = 0
+            
+            for speaker_id in list(self.selected_speakers):
+                response = requests.delete(f"{self.backend_url}/speakers/{speaker_id}", timeout=10)
+                
+                if response.status_code == 200:
+                    success_count += 1
+                    self.log_management(f"🗑️ Deleted speaker: {speaker_id[:12]}...")
+                    self.selected_speakers.discard(speaker_id)
+                else:
+                    self.log_management(f"❌ Failed to delete: {speaker_id[:12]}...")
+            
+            if success_count > 0:
+                messagebox.showinfo("Delete Complete", 
+                    f"✅ Successfully deleted {success_count} speaker profiles.")
+                self.refresh_data()
+            else:
+                messagebox.showerror("Delete Failed", "No speakers were successfully deleted.")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete speakers:\n{str(e)}")
+    
+    def find_similar_speakers(self):
+        """Find speakers with similar names"""
+        similar_groups = {}
+        
+        # Group speakers by similarity
+        for speaker_id, data in self.speaker_data.items():
+            name = data['name'].lower().strip()
+            
+            # Simple similarity - same first 3 characters or contains same words
+            found_group = False
+            for group_key in similar_groups:
+                if (name[:3] == group_key[:3] and len(name) > 3) or \
+                   any(word in name.split() for word in group_key.split() if len(word) > 2):
+                    similar_groups[group_key].append((speaker_id, data))
+                    found_group = True
+                    break
+            
+            if not found_group:
+                similar_groups[name] = [(speaker_id, data)]
+        
+        # Filter groups with multiple speakers
+        similar_groups = {k: v for k, v in similar_groups.items() if len(v) > 1}
+        
+        if not similar_groups:
+            messagebox.showinfo("No Similar Names", "No speakers with similar names found.")
+            return
+        
+        self.show_similar_speakers_dialog(similar_groups)
+    
+    def show_similar_speakers_dialog(self, similar_groups):
+        """Show dialog with similar speaker groups"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Similar Speaker Names")
+        dialog.geometry("800x600")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Header
+        tk.Label(dialog, text="🔍 Similar Speaker Names Found", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+        
+        tk.Label(dialog, text=f"Found {len(similar_groups)} groups of similar speakers:", 
+                font=("Arial", 11), bg='#f0f0f0').pack(pady=(0, 15))
+        
+        # Similar groups list
+        groups_frame = ttk.LabelFrame(dialog, text="Similar Groups", padding=10)
+        groups_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Create treeview for groups
+        groups_tree = ttk.Treeview(groups_frame, columns=('count', 'samples'), show='tree headings', height=15)
+        groups_tree.heading('#0', text='Group / Speaker Names')
+        groups_tree.heading('count', text='Count')
+        groups_tree.heading('samples', text='Total Samples')
+        
+        groups_tree.column('#0', width=400)
+        groups_tree.column('count', width=100)
+        groups_tree.column('samples', width=100)
+        
+        groups_scroll = ttk.Scrollbar(groups_frame, orient="vertical", command=groups_tree.yview)
+        groups_tree.configure(yscrollcommand=groups_scroll.set)
+        
+        groups_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        groups_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populate groups
+        for group_name, speakers in similar_groups.items():
+            total_samples = sum(data['embedding_count'] for _, data in speakers)
+            
+            # Add group header
+            group_item = groups_tree.insert('', tk.END, 
+                                          text=f"📁 {group_name.title()}",
+                                          values=(len(speakers), total_samples),
+                                          tags=('group',))
+            
+            # Add speakers in group
+            for speaker_id, data in speakers:
+                groups_tree.insert(group_item, tk.END,
+                                 text=f"  • {data['name']} ({speaker_id[:12]}...)",
+                                 values=('', data['embedding_count']),
+                                 tags=('speaker', speaker_id))
+        
+        groups_tree.tag_configure('group', background='#e6f3ff')
+        
+        # Expand all groups
+        for item in groups_tree.get_children():
+            groups_tree.item(item, open=True)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=15)
+        
+        def select_group_for_merge():
+            selection = groups_tree.selection()
+            if not selection:
+                messagebox.showerror("Error", "Please select speakers to merge.")
+                return
+            
+            # Get all speaker IDs from selection
+            speaker_ids = set()
+            for item in selection:
+                tags = groups_tree.item(item, 'tags')
+                if 'speaker' in tags:
+                    speaker_id = tags[1] if len(tags) > 1 else None
+                    if speaker_id:
+                        speaker_ids.add(speaker_id)
+            
+            if len(speaker_ids) < 2:
+                messagebox.showerror("Error", "Please select at least 2 speakers to merge.")
+                return
+            
+            # Set selection and show merge dialog
+            self.selected_speakers = speaker_ids
+            dialog.destroy()
+            self.show_merge_speakers_dialog()
+        
+        ttk.Button(button_frame, text="🔗 Merge Selected", command=select_group_for_merge).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="❌ Close", command=dialog.destroy).pack(side=tk.LEFT)
+    
+    def show_bulk_cleanup_dialog(self):
+        """Show dialog for bulk cleanup operations"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Bulk Cleanup")
+        dialog.geometry("600x500")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Header
+        tk.Label(dialog, text="🧹 Bulk Cleanup Operations", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0').pack(pady=20)
+        
+        # Cleanup options frame
+        options_frame = ttk.LabelFrame(dialog, text="Cleanup Options", padding=15)
+        options_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Remove empty speakers
+        ttk.Button(options_frame, text="🗑️ Remove Empty Speakers", 
+                  command=lambda: (self.cleanup_speakers(), dialog.destroy())).pack(fill=tk.X, pady=5)
+        
+        # Find and merge duplicates
+        ttk.Button(options_frame, text="🔍 Find Similar Names", 
+                  command=lambda: (dialog.destroy(), self.find_similar_speakers())).pack(fill=tk.X, pady=5)
+        
+        ttk.Button(options_frame, text="❌ Close", command=dialog.destroy).pack(pady=20)
+    
+    def show_bulk_rename_dialog(self):
+        """Show dialog for bulk rename operations"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Bulk Rename")
+        dialog.geometry("600x400")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Header
+        tk.Label(dialog, text="📋 Bulk Rename Operations", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0').pack(pady=20)
+        
+        # Info text
+        info_text = """Select speakers from the main list, then use the
+'Edit Selected' or 'Merge Selected' buttons
+for individual or bulk operations."""
+        
+        tk.Label(dialog, text=info_text, bg='#f0f0f0', justify=tk.CENTER).pack(pady=20)
+        
+        ttk.Button(dialog, text="❌ Close", command=dialog.destroy).pack(pady=20)
 
 def main():
     """Main entry point"""

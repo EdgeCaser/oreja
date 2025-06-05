@@ -1,0 +1,255 @@
+Transcription for: 250521_0901_damon1.mp3
+Processed: 2025-06-04 11:46:49
+============================================================
+
+[0.0s - 125.3s] Speaker SPEAKER_02: all right hey how are you feeling pretty good ready for the big one oh yeah I've had months of anticipation like at first it's like this whole rush of like i don't know shit i'm just reading kind of every book on multiple parenting type of topics and trying to focus on infant has I have zero experience. I had younger brothers, but I guess I just didn't have to deal with that stuff. I was like five and six years old. Young enough to not old enough to hey, you watch them and take care of them. But young enough, I barely remember in a way. So, yeah. And then, obviously, the whole pregnancy has been its own journey. Everything's been healthy, which is great. But just feeling this baby in there, and this is getting bigger and bigger so it's like in a way but right at this moment i don't have like extra anticipation it's like it's just been built up and i've just been in peak anticipation for like several weeks yeah at this point it's just like come on i'd be like come on just just get it over with come on get here already pretty much yeah i like house in order got it had to install the car seat because you need that to bring the baby home so that like that was just two days ago that made it like ultra real
+[125.3s - 132.3s] Speaker SPEAKER_04: it's like i'm installing a car of babysitting oh yeah oh that does feel like okay it's official
+[140.5s - 167.0s] Speaker SPEAKER_02: um so yeah let's parse some stuff here. Um, I was just looking at the, where'd that button go? I was looking at the task.
+[167.2s - 172.1s] Speaker SPEAKER_02: I feel like we kind of go in these phases of
+[172.1s - 176.0s] Speaker SPEAKER_02: very task-centric versus not.
+[183.0s - 202.6s] Speaker SPEAKER_02: Although this is pretty accurate.
+[203.4s - 212.4s] Speaker SPEAKER_02: Now. Or. Hi. Um, now, or, hi, I'm just, like, thinking aloud, so bear with me.
+[215.2s - 221.2s] Speaker SPEAKER_02: We have, like, this wallet stuff and the carousel things.
+[221.8s - 307.1s] Speaker SPEAKER_02: I feel this needs to all be visited like anything that's external wallets yeah why are we worrying about that right now let's just get our product out right yeah i'm just even putting like these tasks um thank you like these aren't the active task at the moment because obviously like the there's been a struggle for a long time of like just like complete the user facing experience and i actually feel this past couple days where i'm like okay here's like i don't know i've been really honed in i'm like okay let's see it then like oh it's tested let's see it working um i mean it's obvious in some ways but it's like i guess enough pieces have come together where where you keep being i feel like on this precipice of like okay it's done like i literally thought last monday like we would have this vertical slice kind of like okay you tested this this and this? Okay, great. Let's finish this out and start testing last week.
+[308.1s - 314.4s] Speaker SPEAKER_02: But then it was like, oh, it's always in this, like, hovering to close but not quite ready to test thing.
+[314.4s - 325.3s] Speaker SPEAKER_02: So it's like whether – so I've been having, I guess, more I and even Santosh both.
+[325.5s - 327.4s] Speaker SPEAKER_02: Like, okay, the front end's not connected.
+[327.6s - 328.5s] Speaker SPEAKER_02: Let's just do it now.
+[330.9s - 332.8s] Speaker SPEAKER_02: So, I know.
+[332.8s - 445.8s] Speaker SPEAKER_02: That's been the mode is, like, is, you've been in the, these, these syncs with us. So it's these pinned ones. Start using those. So initially, last week, I had put together that whole list, which we're still not even to and then so on monday or sorry but yeah so yesterday you know i was like okay um how the hell can we break this down right what is today's wednesday so on monday i was like a little shocked that it I was like, okay, well, where are we out on like this vertical slice? And Santosh and Kai both are like, well, I don't know. I'm like, okay, let's, that's why yesterday I was like one by one. Do we have this? Yes, that's not correct. I expect that that's the way I'm going to run the meetings every day it's like hey look at the list you'll have to because it's you know I think you have to have that product user facing perspective and so that's what it'll go. I think you'll have to have this product perspective of these things like, you know, we want to test and, uh, and maybe they want to document tasks around it, but it should all be, I guess I'm like trying to think a lot, like, I'm like, man, we need to avoid that rabbit hole of like, oh, I'm just doing these tasks, but it's not kind of coming back to this bigger goal thing, you know. That seems to always be an issue where it like runs away from this user facing thing. And then I don't know I'm pretty sure
+[445.8s - 505.2s] Speaker SPEAKER_02: Kai actually has seen the thing that before i don't know what the deal is where he recently asked for it but worst case scenario somehow he avoided seeing figma for six months i don't know just in case i've been i've been uh, like, making sure Kai and Santosh or everybody really can see that thing, like, share the screen. Here's what it should look like. Because for you and I, like, you know, we look at that stuff way more and so like i guess i often assume that other people are looking at the stuff or but maybe that proactiveness isn't there No, no, it's not there.
+[505.7s - 507.1s] Speaker SPEAKER_02: So?
+[545.0s - 565.6s] Speaker SPEAKER_02: It's clear these are not self-motivated engineers right now so yeah it seems like the only the way things are getting done which they actually seem productive the last couple of days is like okay let's just sit here and okay this isn't done If there's it if there's some detail though that's rabbit holing okay let's make a note of that um and and come back to that so anyway so that was my original list was like i still i'm trying to get this which is not even the smoke test level.
+[569.3s - 578.1s] Speaker SPEAKER_02: So I broke it down yesterday to that new list. I was honestly
+[578.1s - 580.1s] Unknown Speaker: afraid that Kai wasn't going to be
+[580.1s - 606.7s] Speaker SPEAKER_02: around today because usually he's around way earlier and i figured he'd be even earlier being in london i guess i don't know actually what place in europe he flew to but yeah but at least he's here so that's semi-relief but i had made this thinking he was
+[606.7s - 606.1s] Speaker SPEAKER_02: gonna be doing things earlier that's why i was like by our sink i was hoping he would resolve anything but we're doing that now at least um when we
+[606.1s - 608.1s] Speaker SPEAKER_02: want to find a time
+[608.1s - 610.0s] Speaker SPEAKER_02: to sync with Carl is
+[610.0s - 650.9s] Speaker SPEAKER_02: because when we want to find a time to sync with carl is because he mentions basically he's trying to be a morning person now yeah i saw the i saw the update um the problem well the good thing is that means we can sync with them and not have the 8 a.m. meetings.
+[651.2s - 652.7s] Speaker SPEAKER_02: Honestly, I don't think anybody likes them.
+[652.9s - 654.9s] Speaker SPEAKER_02: I just kind of got used to it.
+[654.9s - 658.6s] Speaker SPEAKER_02: But it was like the only way I could sync with Carla's and I want to catch Kai earlier.
+[662.9s - 640.3s] Speaker SPEAKER_02: So we need to find a time to sync with Carla's. I asked him, but he didn't reply because I was trying to see what his schedule was. She's like,
+[640.3s - 640.3s] Unknown Speaker: she's like,
+[640.3s - 640.4s] Unknown Speaker: she's like,
+[640.4s - 640.4s] Unknown Speaker: she's like,
+[640.4s - 640.4s] Unknown Speaker: she's like,
+[640.4s - 640.5s] Unknown Speaker: she's like,
+[640.5s - 640.5s] Unknown Speaker: she's like,
+[640.5s - 640.5s] Unknown Speaker: she's like,
+[640.5s - 640.6s] Unknown Speaker: she's like,
+[640.6s - 641.0s] Unknown Speaker: she's like,
+[641.0s - 641.3s] Unknown Speaker: she's like,
+[641.3s - 641.6s] Speaker SPEAKER_02: she's like,
+[641.6s - 642.0s] Speaker SPEAKER_02: she's like,
+[642.0s - 642.3s] Speaker SPEAKER_02: she's like,
+[642.3s - 642.5s] Unknown Speaker: she's like,
+[642.5s - 642.6s] Unknown Speaker: she's like,
+[642.6s - 643.1s] Unknown Speaker: she's like,
+[643.1s - 643.4s] Unknown Speaker: she's like,
+[643.4s - 644.0s] Unknown Speaker: she's like,
+[644.0s - 644.4s] Speaker SPEAKER_02: she's like,
+[644.4s - 644.5s] Speaker SPEAKER_02: she's like,
+[644.5s - 645.4s] Speaker SPEAKER_02: she's like,
+[645.4s - 645.4s] Unknown Speaker: she's like,
+[645.4s - 645.9s] Speaker SPEAKER_02: she's like,
+[645.9s - 646.0s] Unknown Speaker: she's like,
+[646.0s - 646.3s] Speaker SPEAKER_02: she's like,
+[646.3s - 646.7s] Speaker SPEAKER_02: she's like,
+[646.7s - 647.4s] Speaker SPEAKER_02: she's like,
+[647.4s - 647.5s] Speaker SPEAKER_02: she's like,
+[647.5s - 647.8s] Speaker SPEAKER_02: she's like,
+[647.8s - 648.3s] Speaker SPEAKER_02: she's like,
+[648.3s - 649.2s] Speaker SPEAKER_02: she's like,
+[649.2s - 649.8s] Speaker SPEAKER_02: she's like,
+[649.8s - 650.2s] Speaker SPEAKER_02: she's like,
+[650.2s - 651.3s] Speaker SPEAKER_02: she's like,
+[651.3s - 651.8s] Speaker SPEAKER_02: she's like,
+[651.8s - 652.2s] Speaker SPEAKER_02: she's like,
+[652.2s - 653.4s] Speaker SPEAKER_02: she's like,
+[653.4s - 653.8s] Unknown Speaker: she's like,
+[653.8s - 654.2s] Speaker SPEAKER_02: she's like,
+[654.2s - 655.4s] Speaker SPEAKER_02: she's like,
+[655.4s - 655.8s] Speaker SPEAKER_02: she's like,
+[655.8s - 656.1s] Speaker SPEAKER_02: she's like,
+[656.1s - 657.3s] Speaker SPEAKER_02: she's like,
+[657.3s - 657.9s] Speaker SPEAKER_02: she's like,
+[657.9s - 658.2s] Speaker SPEAKER_02: she's like,
+[658.2s - 658.5s] Speaker SPEAKER_02: she's like,
+[658.5s - 659.4s] Speaker SPEAKER_02: she's like,
+[659.4s - 659.5s] Unknown Speaker: she's like,
+[659.5s - 660.1s] Unknown Speaker: she's like,
+[660.1s - 660.3s] Speaker SPEAKER_02: she's like,
+[660.3s - 661.4s] Speaker SPEAKER_02: she's like,
+[661.4s - 662.2s] Unknown Speaker: she's like,
+[662.2s - 663.4s] Speaker SPEAKER_02: she's like,
+[663.4s - 663.9s] Speaker SPEAKER_02: she's like,
+[663.9s - 710.4s] Speaker SPEAKER_02: she's like, she's like, she's like, she's like, she's like, she's like, she he didn't reply because I was trying to see what his schedule was. He's like, I wake up at 5 a.m. I'm like, okay, that's what, like 3 p.m. here? That's even earlier, I think. Wow. But that doesn't mean, but I was like, okay, great. When you're, what are your working hours? That doesn't mean you're starting. Yeah, exactly. So he, and then he's like trying to go to sleep by. 10 p.m. When, right? So, but he didn't start his day yesterday working wise. He didn't appear till 8 p.m our time so i don't know if
+[710.4s - 718.7s] Speaker SPEAKER_03: that is in japan but it's let me look at the camera 8 p.m our time is 12 p.m japan time
+[721.0s - 765.7s] Speaker SPEAKER_02: okay because he he honestly didn't get much done yesterday, which worried me. Yeah. Because that stuff, the screenshots of it in our onboarding, we had that going at 9 p.m. Yeah, for sure. So we had it there, and it's like, well, and then it was like, like okay there was some issues santosh will try to resolve it if not kai so um i don't know what he did after that 9pm uh because i was he was supposed to hook up the the website list. Anyway, Kai's addressing that.
+[766.6s - 768.2s] Speaker SPEAKER_02: I'm trying not to make this...
+[768.2s - 770.7s] Speaker SPEAKER_02: I'm just complaining about things.
+[771.8s - 775.3s] Speaker SPEAKER_02: But point being, I thought we very realistically
+[775.3s - 777.6s] Speaker SPEAKER_02: were going to have this done by 8 a.m.,
+[777.6s - 780.4s] Speaker SPEAKER_02: but it's not too far off track.
+[784.2s - 786.6s] Speaker SPEAKER_04: So when do you think it'll be done
+[786.6s - 800.8s] Speaker SPEAKER_02: um i actually think we'll have decent confidence we'll be on track with
+[800.8s - 806.1s] Speaker SPEAKER_02: kind of the inverted list of like, I think everything
+[806.1s - 808.2s] Speaker SPEAKER_02: above 2 p.m. here, I bet
+[808.2s - 808.7s] Speaker SPEAKER_02: will be
+[808.7s - 810.5s] Speaker SPEAKER_02: will be
+[810.5s - 812.9s] Speaker SPEAKER_02: will be done.
+[814.1s - 816.2s] Speaker SPEAKER_02: So maybe some parts of this, I don't think
+[816.2s - 818.2s] Speaker SPEAKER_02: I even mentioned last
+[818.2s - 819.2s] Speaker SPEAKER_02: night, I was skeptical
+[819.2s - 821.6s] Speaker SPEAKER_02: staking and voting being done by that.
+[824.3s - 827.8s] Speaker SPEAKER_02: I don't know this proper how far along because
+[827.8s - 1025.8s] Speaker SPEAKER_02: kai has worked on that um and i was even realistically as i got tore later in the day you know i was making it less and less tasks like these bottom ones are always like make sure everything else is working um so um i'll see where we're at with staking and voting but i think everything else is a damn good chance actually really good chance i guess we'll check in uh 2 p.m. and see where we are right yeah because the the we have like the these detail pages working and i was reminded that we purposely at one point i was like carlos don't use mock data if anything mock data from the back end and so that's what dev is doing but then in staging i was still seeing that mock data but it was from the back end pointing at dev so in a way that's really good so like okay if we're properly launching tokens and doing all that then they should be showing in staging once it's pointing in the right spot or yeah so it shouldn't be that far off and then so you so so what do we feel confident really justin will be able to show like everything in that thing because done may not mean I'm confident of everything maybe not voting definitely not claiming and I didn't even list it like zero chance of that can't beat the loss of physics. So, yeah. For today, I think everything isn't that far off. Maybe staking and voting. But we'll see. Like, that's why I also kind of put the cutoff or the last thing at two and i specifically didn't want eod because it's like maybe state gang and ux goes on for a little while longer that today i don't know so are you gonna be well i should be where you are for this sir are you gonna be able to make the daily leads meeting at 1 30. should you don't think you're gonna be racing oh uh yeah i plan on being there okay just figured how you would be madly typing oh my god it's gonna be 2 p.m i gotta finish typing all the code but no i guess i'm just being dramatic yeah um so once we can get past this list then we get into smoke test material which
+[1025.8s - 1029.4s] Speaker SPEAKER_01: I need to revisit here.
+[1033.3s - 1034.9s] Speaker SPEAKER_04: Yeah, we should ask Mark to
+[1034.9s - 1037.7s] Speaker SPEAKER_04: take a look at the test too because he spends a lot of time
+[1037.7s - 1038.2s] Speaker SPEAKER_04: on the
+[1038.2s - 1041.1s] Speaker SPEAKER_04: on the dev pages.
+[1041.3s - 1041.8s] Speaker SPEAKER_04: He probably
+[1041.8s - 1045.8s] Speaker SPEAKER_04: will notice something that, hey, we're not testing this
+[1045.8s - 1046.1s] Speaker SPEAKER_04: or that.
+[1047.0s - 1047.4s] Speaker SPEAKER_04: Mm-hmm.
+[1048.5s - 1049.8s] Speaker SPEAKER_04: I'll share it with you.
+[1052.0s - 1066.2s] Speaker SPEAKER_02: Now, at the bottom of all this, the real bottom
+[1066.2s - 1072.5s] Speaker SPEAKER_02: I've been listing tasks
+[1072.5s - 1073.9s] Speaker SPEAKER_02: that I haven't assigned out yet
+[1073.9s - 1075.7s] Speaker SPEAKER_02: just because
+[1075.7s - 1078.6s] Speaker SPEAKER_02: they're
+[1078.6s - 1079.7s] Speaker SPEAKER_01: actually this one
+[1079.7s - 1085.4s] Speaker SPEAKER_01: actually
+[1085.4s - 1088.6s] Speaker SPEAKER_01: that one I ended up talking about
+[1085.6s - 1088.6s] Speaker SPEAKER_01: Thank you. Okay, actually That one I ended up talking about
+[1088.6s - 1091.9s] Speaker SPEAKER_01: Hmm
+[1091.9s - 1095.2s] Speaker SPEAKER_01: I can always switch
+[1095.2s - 1097.6s] Speaker SPEAKER_02: So
+[1097.6s - 1103.2s] Speaker SPEAKER_02: I need to revisit some of these myself
+[1103.2s - 1113.7s] Speaker SPEAKER_02: Working I need to revisit some of these myself.
+[1116.7s - 1119.7s] Speaker SPEAKER_01: We did do that. Nice.
+[1124.2s - 1126.8s] Speaker SPEAKER_02: Okay, that's actually done.
+[1129.0s - 1135.5s] Speaker SPEAKER_02: Launching is like the pre-trading ones.
+[1165.0s - 1169.0s] Unknown Speaker: Well, it's always good to see something get done particularly unexpectedly. I don't know.チョコレートを入れて混ぜてみます。チョコレートを入れて混ぜてみます。
+[1169.0s - 1173.0s] Unknown Speaker: チョコレートを入れて混ぜます。
+[1173.0s - 1177.0s] Unknown Speaker: チョコレートを入れて混ぜます。
+[1177.0s - 1181.0s] Unknown Speaker: チョコレートを入れて混ぜます。
+[1181.0s - 1185.0s] Unknown Speaker: チョコレートを入れて混ぜます。
+[1185.0s - 1189.0s] Unknown Speaker: チョコレートを入れて混ぜます。
+[1206.4s - 1207.4s] Speaker SPEAKER_01: ご視聴ありがとうございました All right, list token endpoints need to return a value for number of games.
+[1208.0s - 1221.0s] Speaker SPEAKER_05: Oh.
+[1222.9s - 1224.6s] Speaker SPEAKER_02: I'm supposed to actually be starting that.
+[1226.8s - 1227.5s] Speaker SPEAKER_02: It's not already in progress.
+[1285.7s - 1287.1s] Speaker SPEAKER_02: We talked about it earlier in sync.チョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレートチョコレ I think some of these got moved along
+[1287.1s - 1288.3s] Speaker SPEAKER_02: because
+[1293.6s - 1350.4s] Speaker SPEAKER_01: I'll see you next time. I think some of these got moved along because Carlos was asking for help on stuff related because he was already doing the front end. Oh, whatever. I hate that when it tries to continue That You link This is a big category Not done Oh wow yeah Oh yeah 5% of developer rewards
+[1350.4s - 1374.6s] Speaker SPEAKER_01: This might be done now And who was working on that one?
+[1383.8s - 1384.4s] Unknown Speaker: Um...
+[1384.4s - 1386.5s] Speaker SPEAKER_02: I forget, Kaya Santosh, though.
+[1386.8s - 1387.1s] Speaker SPEAKER_03: Okay.
+[1401.1s - 1402.0s] Speaker SPEAKER_04: Oh, man.
+[1402.8s - 1447.1s] Speaker SPEAKER_02: What a day. some of these tests it's like oh i thought this was something kai's works on and then it's like oh santosh does but then you know santos like oh kai worked on it uh so some things i are a little
+[1447.1s - 1454.3s] Speaker SPEAKER_02: gray area it's like they're kind of working together on it but you need to spot the owner
+[1454.3s - 1486.9s] Speaker SPEAKER_02: you're gonna let them pick who's gonna be the owner no i think in this case it was like the task was there i was trying to get them to get this other stuff done and it's like what happened to the to this thing and then we end up talking about it and then got worked on,
+[1487.0s - 1491.3s] Speaker SPEAKER_02: but kind of outside of task land, unfortunately.
+[1492.5s - 1494.7s] Speaker SPEAKER_02: Not optimal workflow.
+[1500.7s - 1501.2s] Speaker SPEAKER_02: So.
+[1516.6s - 1517.9s] Speaker SPEAKER_04: Which is the whole whitelisting thing, hasn't been worked on at all. Of course not.
+[1528.3s - 1537.9s] Speaker SPEAKER_01: Actually, one second.
+[1568.8s - 1572.8s] Speaker SPEAKER_01: So from that, what we're going over in the spreadsheet, I actually mentioned some high-level things that, like the moderation and whitelisting. It was me kind of going through the bottom of this list real quick. Um Everything on the OG token Stubbed there
+[1572.8s - 1646.9s] Speaker SPEAKER_02: Oh man, who knows when we're going to get to that part. Thank you. Um, let me make that with that token selector available to third-party devs. I wouldn't think of anything else.
+[1652.3s - 1652.9s] Speaker SPEAKER_02: Figma.
+[1654.3s - 1657.4s] Speaker SPEAKER_02: And like I said, the widget stuff all needs to be
+[1657.4s - 1658.1s] Speaker SPEAKER_02: revisited.
+[1661.9s - 1662.8s] Speaker SPEAKER_02: Actually, sorry.
+[1663.8s - 1688.1s] Speaker SPEAKER_02: This is stuff that was up in Kai's land There's a bunch of feature stuff That I thought he was going to get to Before we added other stuff in front of it Shit Um, so... Oh, that's almost like 15 minutes work that's a lot of five-minute tasks I think these
+[1688.1s - 1690.0s] Speaker SPEAKER_01: features, I'm going to move to the
+[1690.0s - 1741.9s] Speaker SPEAKER_01: bottom there just to group them. Oh, shit.
+[1743.1s - 1744.7s] Speaker SPEAKER_04: Bringing it down to the pit.
+[1750.0s - 1780.2s] Speaker SPEAKER_02: Shit, yeah yeah daily chicken the daily chicken And I'm prioritizing them slightly down here.
+[1782.7s - 1796.0s] Speaker SPEAKER_04: Meeting. Meeting.
+[1798.0s - 1825.0s] Speaker SPEAKER_00: Do you mind if I step away for a minute? I'll be right back. We're going to set up a separate meeting. Alright, I have returned. bearing gifts of protein bars
+[1825.0s - 1852.0s] Speaker SPEAKER_04: for myself.
+[1852.0s - 1885.2s] Speaker SPEAKER_02: Let it see. So, yeah, a lot of the list are, like, feature stuff outside of, like, current widget design that
+[1885.2s - 1887.1s] Speaker SPEAKER_02: we've done. Then we have
+[1887.1s - 1889.1s] Speaker SPEAKER_02: we'll need to revisit the whole
+[1889.1s - 1891.8s] Speaker SPEAKER_02: widget flow
+[1891.8s - 1892.3s] Speaker SPEAKER_02: in general.
+[1901.1s - 1902.6s] Speaker SPEAKER_01: That keeps moving, zombie.
+[1905.6s - 1907.2s] Speaker SPEAKER_02: What needs to be revisited?
+[1909.3s - 1909.7s] Speaker SPEAKER_02: I mean
+[1907.2s - 1910.6s] Speaker SPEAKER_02: I'll see you next time. what needs to be revisited I mean these are
+[1910.6s - 1911.7s] Speaker SPEAKER_02: kinda
+[1911.7s - 1916.3s] Speaker SPEAKER_02: basically we need to
+[1916.3s - 1917.6s] Speaker SPEAKER_02: make sure
+[1917.6s - 1920.4s] Speaker SPEAKER_02: we have to make sure
+[1920.4s - 1922.1s] Speaker SPEAKER_02: the claiming is working on website
+[1922.1s - 1923.0s] Speaker SPEAKER_02: and widget
+[1923.0s - 1925.8s] Speaker SPEAKER_02: I think those are
+[1925.8s - 1927.4s] Speaker SPEAKER_02: mega tasks
+[1927.4s - 1929.4s] Speaker SPEAKER_02: I'm just thinking like past
+[1945.9s - 1946.8s] Speaker SPEAKER_02: Thank you. make sure the claiming is working on website and widget i think those are mega tasks i'm just thinking like past today and tomorrow we have to get the claiming working uh for all types of claims uh i would need to review the ui on all that because i don't even off the top of my head know what all of them look like.
+[1948.0s - 1949.0s] Speaker SPEAKER_02: I think we have them all accounted for.
+[1954.8s - 1955.9s] Speaker SPEAKER_02: I think the tricky
+[1955.9s - 1957.8s] Speaker SPEAKER_02: one is the token holders. You have
+[1957.8s - 1958.8s] Speaker SPEAKER_02: some UI for that.
+[1958.8s - 2047.6s] Speaker SPEAKER_04: Mm-hmm. Wait UI for token hold, like the message that explains what it does? How to actually collect it as well. The spec just says that it gets deposited with next day's rewards like why make a whole new you know a new whole new way to get money when we already have a perfectly working system and it also gives some pressure to hey no really you to engage with the platform. Go claim your rewards. But how do they do it? In the sense that they don't work like any of the other ones. Like, they would have to know to go to the token page, I think, on your design. Yeah. or they come here and they find it ready for them right but where because player rewards is very player centric here's how many points you scored and all that so I had this was my suggestion there's just a in the work files because we already have this
+[2047.6s - 2048.8s] Speaker SPEAKER_02: kind of idea
+[2048.8s - 2050.7s] Speaker SPEAKER_02: so I thought of that
+[2050.7s - 2053.3s] Speaker SPEAKER_02: hey if you have
+[2053.3s - 2056.9s] Speaker SPEAKER_04: yeah it's a good idea
+[2056.9s - 2058.6s] Speaker SPEAKER_04: that was my
+[2058.6s - 2065.4s] Speaker SPEAKER_04: so then we do need to give them
+[2065.4s - 2067.5s] Speaker SPEAKER_04: a claim
+[2067.5s - 2069.6s] Speaker SPEAKER_04: page that's separate from this
+[2088.4s - 2094.9s] Speaker SPEAKER_04: Thank you. so then we do need to give them a claim page that's separate from this yeah well basically they would claim now and then well i guess we can just make another tab next to creator games or somewhere in there that says hold the rewards and it's what if you've never had them then it just says this you know hold hold base tokens and earn more game coins when they come out and if you've ever had any rewards to
+[2094.9s - 2103.6s] Speaker SPEAKER_04: claim or that have already been claimed then they'll be listed there yeah i mean i it could
+[2103.6s - 2081.0s] Speaker SPEAKER_04: be that like that or it could just go in the token section and have a claim button sure All right.
+[2081.0s - 2082.0s] Unknown Speaker: All right.
+[2082.0s - 2083.0s] Speaker SPEAKER_04: All right.
+[2083.0s - 2084.0s] Speaker SPEAKER_04: All right.
+[2084.0s - 2085.0s] Speaker SPEAKER_04: All right.
+[2085.0s - 2086.0s] Speaker SPEAKER_04: All right.
+[2086.0s - 2087.0s] Speaker SPEAKER_04: Bye-bye.
+[2087.0s - 2088.0s] Speaker SPEAKER_04: Bye-bye.
+[2088.0s - 2089.0s] Speaker SPEAKER_04: Bye-bye.
+[2089.0s - 2090.0s] Speaker SPEAKER_04: Bye-bye.
+[2090.0s - 2091.0s] Speaker SPEAKER_04: Bye-bye.
+[2091.0s - 2092.0s] Speaker SPEAKER_04: Bye-bye.
+[2092.0s - 2093.0s] Speaker SPEAKER_04: Bye-bye.
+[2093.0s - 2094.0s] Speaker SPEAKER_04: Bye-bye.
+[2094.0s - 2095.0s] Speaker SPEAKER_04: Bye-bye.
+[2095.0s - 2096.0s] Speaker SPEAKER_04: Bye-bye.
+[2096.0s - 2097.0s] Speaker SPEAKER_04: Bye-bye.
+[2097.0s - 2098.0s] Speaker SPEAKER_04: Bye-bye.
+[2098.0s - 2099.0s] Speaker SPEAKER_04: Bye-bye.
+[2099.0s - 2100.0s] Unknown Speaker: Bye-bye.
+[2100.0s - 2101.0s] Unknown Speaker: Bye-bye.
+[2101.0s - 2102.0s] Speaker SPEAKER_02: Bye-bye.
+[2102.0s - 2103.0s] Speaker SPEAKER_02: Bye-bye.
+[2103.0s - 2104.0s] Speaker SPEAKER_02: Bye-bye.
+[2104.0s - 2108.4s] Speaker SPEAKER_02: Bye-bye. Bye-bye. Bye-bye. Bye-bye. Bye-bye. Bye-bye. Yeah. I mean, it could be like that, or it could just go in the token section and have a claim button.
+[2108.7s - 2108.9s] Speaker SPEAKER_02: Sure.
+[2110.0s - 2112.4s] Speaker SPEAKER_02: Either way, it doesn't matter. It needs to be somewhere.
+[2115.5s - 2140.6s] Speaker SPEAKER_04: Okay, I'll let Vino. So this was all this design.
+[2140.6s - 2189.6s] Speaker SPEAKER_02: I don't know if it made it over or not to the official. I think it did. Ah, good. Yeah, this whole claim dialogue, none of this. I think there might be some part I was working, I think I got I had to pull him to get this vertical slice going. So I don't know how far he got on this. Definitely not working since we don't have claims working. I think he probably has parts of it.
+[2189.6s - 2195.3s] Speaker SPEAKER_02: Anyway, I think of everything of what's on the website and what's on the widget.
+[2195.8s - 2198.1s] Speaker SPEAKER_02: They all kind of often have parallels.
+[2203.5s - 2294.3s] Speaker SPEAKER_04: To me, after this whole list that we had, um, that I had laid out for, hey, you know, for this, for today, um, after today, to me, it's like any further cleanup on that list, then making sure staking and voting is there, but then anything around claiming. And once we have that, then we have like our full kind of vertical slice. Okay. I guess let's, I guess towards the end of the day we'll come back and look and see exactly what what what needs to be prioritized with whatever bandwidth we have left i guess you're here until friday right i should be okay should be yeah I guess that's true should be like we're we're doing an induction basically it starts it starts Saturday and then the baby should be born Sunday and and so there aren't any signs currently that things will naturally start happening earlier than that, but you never know.
+[2414.0s - 2414.6s] Speaker SPEAKER_02: I was two weeks late and I don't know why my parents didn't induce maybe at that well maybe because we were in south america and you don't want to mess with that um but yeah i i they i made them wait for two weeks yeah i'm in the same boat i was two weeks as late as well i was two weeks late i i have two uh you know half but there's like i mentioned that they are like mega preemies like one was like two months early and the other like two and a half months early like my youngest brother was like in the hospital i think for like almost a year before i ever saw him it turned out mostly okay like any yeah he's like total like religious zealots like my mom like that's because something happened you know know, mega premium. Wow, there was something in the water. So, that's also why he has 10 kids. It's like a religious thing, you know. Yeah, I can see that. kind of strange because it's like a religious thing you know um yeah i can see that kind of strange because his like his his kids are getting older now like his oldest his youngest is like i think six months old born around christmas and then uh and then but his oldest is about to be 18. But, so he has, like, these, basically, his oldest kids are all rebelling against the religious stuff.
+[2419.2s - 2420.1s] Speaker SPEAKER_02: So that's why my oldest nephew, he lived with me for almost a year.
+[2486.6s - 2487.7s] Speaker SPEAKER_02: Just because he's, like, basically wanted to run away from home. I was like, all right, you might as well stay over here then. And then, yeah, his next oldest kid is like, they had to send us some private school in Florida or something. Because he was like, anyway, it's interesting, the whole dynamic so I think planning wise it's to me a little hard to be very like specific I think we have and then it's like we gotta to get to claiming and it's got to be like claiming centric yeah at the same time we got our live users the ones that are our game devs so that's why i've been trying to reinforce that hey we do have these live users and we have to take care of onboarding.
+[2496.3s - 2504.2s] Speaker SPEAKER_02: But I think onboarding, all that stuff kind of tied into the website as well, as far as listing the games and stuff. So I was like, okay, it's not like, to me, it was like, okay, to prioritize both of those at the same time here.
+[2504.5s - 2589.3s] Speaker SPEAKER_02: They kind of overlapped. But who knows what else will come up on that side of things. We don't even know right now. In theory, they should have everything they need once I fixes that stuff we were talking about in sync yeah and then so after claiming then we have our smoke testing vertical slice stuff I think that's the most important I've been saying that for a while is is that we have that war flow. Then once we have that, sure. WebRing, all this daily checking stuff. And then the whole OG token side of things. I mean, there's that laundry list. i would assume that og token is gonna probably be higher priority than even than still the web ring and stuff um what else oh you want to know something else really fun
+[2589.3s - 2590.4s] Speaker SPEAKER_04: yeah tell me
+[2590.4s - 2594.9s] Speaker SPEAKER_02: I don't want to talk about it in leaves okay
+[2594.9s - 2595.8s] Speaker SPEAKER_04: okay
+
+============================================================
+Processing Summary:
+Total segments: 245
+Enhanced segments: 0
+Confidence threshold: 0.7
