@@ -43,6 +43,96 @@ class BatchTranscriptionProcessor:
         self.CONFIDENCE_THRESHOLD = 0.7
         self.SIMILARITY_THRESHOLD = 0.75
         
+    def process_recording_with_progress(self, 
+                                      audio_path: Path,
+                                      output_dir: Optional[Path] = None,
+                                      improve_speakers: bool = True,
+                                      speaker_name_mapping: Optional[Dict[str, str]] = None,
+                                      privacy_mode: bool = False,
+                                      progress_callback: Optional[callable] = None) -> Dict[str, Any]:
+        """
+        Process a single recorded call with progress tracking
+        
+        Args:
+            audio_path: Path to the audio file
+            output_dir: Directory to save results (optional)
+            improve_speakers: Whether to use this recording to improve speaker models
+            speaker_name_mapping: Manual mapping of auto-detected speakers to known names
+            privacy_mode: Whether to anonymize speaker IDs for privacy protection
+            progress_callback: Function to call with progress updates (stage: str, progress: float)
+            
+        Returns:
+            Transcription result with speaker identification
+        """
+        logger.info(f"Processing recording: {audio_path}")
+        if privacy_mode:
+            logger.info("Legal-Safe Mode ENABLED: Verbatim transcription will be discarded, only analysis retained")
+        else:
+            logger.info("Legal-Safe Mode disabled: Full transcription will be processed and saved")
+        
+        try:
+            # Load and preprocess audio
+            if progress_callback:
+                progress_callback('loading', 10.0)
+            waveform, sample_rate = self._load_audio(audio_path)
+            
+            # Get transcription from backend with simulated progress
+            if progress_callback:
+                progress_callback('transcribing', 20.0)
+            
+            # Start transcription with progress simulation
+            transcription_result = self._transcribe_audio_with_progress(waveform, sample_rate, progress_callback)
+            
+            if progress_callback:
+                progress_callback('diarizing', 60.0)
+            
+            # Enhance speaker identification using existing embeddings
+            if progress_callback:
+                progress_callback('enhancing', 70.0)
+            enhanced_result = self._enhance_speaker_identification(
+                transcription_result, waveform, sample_rate, speaker_name_mapping, privacy_mode
+            )
+            
+            # Skip speaker model improvement in privacy mode to protect user data
+            if improve_speakers and not privacy_mode:
+                if progress_callback:
+                    progress_callback('improving', 85.0)
+                self._improve_speaker_models(enhanced_result, waveform, sample_rate)
+            elif privacy_mode:
+                logger.info("Skipping speaker model improvement due to privacy mode")
+            
+            # Save results
+            if output_dir:
+                if progress_callback:
+                    progress_callback('saving', 95.0)
+                self._save_results(enhanced_result, audio_path, output_dir, privacy_mode)
+            
+            if progress_callback:
+                progress_callback('complete', 100.0)
+            
+            # Add to batch results
+            self.results.append({
+                'file': str(audio_path),
+                'result': enhanced_result,
+                'processed_at': datetime.now().isoformat(),
+                'speakers_improved': improve_speakers and not privacy_mode,
+                'privacy_mode': privacy_mode
+            })
+            
+            logger.info(f"Successfully processed {audio_path}")
+            return enhanced_result
+            
+        except Exception as e:
+            logger.error(f"Error processing {audio_path}: {e}")
+            error_result = {
+                'error': str(e),
+                'file': str(audio_path),
+                'processed_at': datetime.now().isoformat(),
+                'privacy_mode': privacy_mode
+            }
+            self.results.append(error_result)
+            return error_result
+
     def process_recording(self, 
                          audio_path: Path,
                          output_dir: Optional[Path] = None,
@@ -178,6 +268,65 @@ class BatchTranscriptionProcessor:
             logger.error(f"Error loading audio {audio_path}: {e}")
             raise
     
+    def _transcribe_audio_with_progress(self, waveform: torch.Tensor, sample_rate: int, progress_callback: callable = None) -> Dict[str, Any]:
+        """Get transcription from the backend with simulated progress"""
+        import threading
+        import time
+        
+        try:
+            # Start transcription in a separate thread
+            transcription_result = [None]
+            transcription_error = [None]
+            
+            def transcribe_worker():
+                try:
+                    result = asyncio.run(run_transcription(waveform, sample_rate))
+                    transcription_result[0] = result
+                except Exception as e:
+                    transcription_error[0] = e
+            
+            # Start transcription thread
+            transcription_thread = threading.Thread(target=transcribe_worker)
+            transcription_thread.start()
+            
+            # Simulate progress while transcription runs
+            if progress_callback:
+                # Estimate duration based on audio length (rough heuristic)
+                audio_duration = len(waveform[0]) / sample_rate
+                # Transcription typically takes 0.1x to 0.5x real-time depending on hardware
+                estimated_transcription_time = max(2.0, audio_duration * 0.2)  # At least 2 seconds
+                
+                start_time = time.time()
+                progress_start = 20.0
+                progress_end = 60.0
+                
+                while transcription_thread.is_alive():
+                    elapsed = time.time() - start_time
+                    # Smooth progress curve (faster at start, slower at end)
+                    progress_ratio = min(1.0, elapsed / estimated_transcription_time)
+                    # Use easing function for smoother progress
+                    eased_progress = 1 - (1 - progress_ratio) ** 2
+                    current_progress = progress_start + (progress_end - progress_start) * eased_progress
+                    
+                    progress_callback('transcribing', current_progress)
+                    time.sleep(0.5)  # Update every 500ms
+                
+                # Ensure we hit the final progress
+                progress_callback('transcribing', progress_end)
+            
+            # Wait for transcription to complete
+            transcription_thread.join()
+            
+            if transcription_error[0]:
+                raise transcription_error[0]
+            
+            return transcription_result[0]
+            
+        except Exception as e:
+            logger.error(f"Error in transcription: {e}")
+            # Fallback: try backend API
+            return self._transcribe_via_api(waveform, sample_rate)
+
     def _transcribe_audio(self, waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
         """Get transcription from the backend"""
         try:

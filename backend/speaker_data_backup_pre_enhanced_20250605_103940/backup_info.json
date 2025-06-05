@@ -1,0 +1,7 @@
+{
+  "backup_date": "2025-06-05T10:39:41.135758",
+  "reason": "Pre-enhanced architecture fresh start",
+  "original_location": "speaker_data/",
+  "backup_location": "speaker_data_backup_pre_enhanced_20250605_103940",
+  "notes": "Database contained ~461 auto-generated speakers with minimal training data"
+}
