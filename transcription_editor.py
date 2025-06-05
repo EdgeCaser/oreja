@@ -17,16 +17,29 @@ import colorsys
 
 class TranscriptionEditor:
     def __init__(self, transcription_file=None):
+        """Initialize the transcription editor"""
         self.root = tk.Tk()
-        self.root.title("🎙️ Oreja - Enhanced Transcription Editor")
-        self.root.geometry("1400x900")
+        self.root.title("🎨 Enhanced Transcription Editor")
+        self.root.geometry("1200x800")
         self.root.configure(bg='#f0f0f0')
         
+        # Data storage
+        self.transcription_data = None
         self.transcription_file = transcription_file
-        self.transcription_data = {}
         self.segments = []
         self.speaker_names = set()
-        self.selected_segments = set()  # For multi-select
+        self.speaker_entries = {}
+        self.segment_checkboxes = {}
+        self.selected_segments = set()
+        
+        # Track changes for better save detection
+        self.original_segments = []  # Store original state
+        self.has_unsaved_changes = False
+        
+        # Split mode state
+        self.split_mode_active = False
+        
+        # Speaker colors and emotional analysis
         self.speaker_colors = {}  # Color mapping for speakers
         self.color_palette = [
             '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', 
@@ -41,6 +54,15 @@ class TranscriptionEditor:
             'happy': '😄', 'sad': '😢', 'angry': '😠', 'excited': '🤩',
             'confused': '😕', 'surprised': '😲', 'question': '❓'
         }
+        
+        # UI components
+        self.file_label = None
+        self.speaker_canvas = None
+        self.speaker_scrollbar = None
+        self.speaker_frame_inner = None
+        self.text_area = None
+        self.bulk_rename_btn = None
+        self.split_text_btn = None
         
         self.setup_ui()
         
@@ -72,39 +94,38 @@ class TranscriptionEditor:
             return 'neutral'
     
     def setup_ui(self):
-        """Setup the enhanced GUI interface"""
-        # Configure styles
-        style = ttk.Style()
-        style.theme_use('clam')
+        """Setup the enhanced user interface"""
+        # Title and file info
+        title_frame = tk.Frame(self.root, bg='#2c3e50', height=60)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
         
-        # Main container with padding
-        main_container = tk.Frame(self.root, bg='#f0f0f0', padx=15, pady=15)
-        main_container.pack(fill=tk.BOTH, expand=True)
+        title_label = tk.Label(title_frame, text="🎨 Enhanced Transcription Editor", 
+                             font=("Arial", 18, "bold"), fg='white', bg='#2c3e50')
+        title_label.pack(pady=15)
         
-        # Title with enhanced styling
-        title_frame = tk.Frame(main_container, bg='#f0f0f0')
-        title_frame.pack(fill=tk.X, pady=(0, 15))
+        # File info frame
+        info_frame = tk.Frame(self.root, bg='#ecf0f1', height=40)
+        info_frame.pack(fill=tk.X)
+        info_frame.pack_propagate(False)
         
-        title_font = font.Font(family="Arial", size=18, weight="bold")
-        title_label = tk.Label(title_frame, text="🎙️ Enhanced Transcription Editor", 
-                              font=title_font, bg='#f0f0f0', fg='#2c3e50')
-        title_label.pack()
+        self.file_label = tk.Label(info_frame, text="No file loaded", font=("Arial", 11), 
+                                  bg='#ecf0f1', fg='#2c3e50')
+        self.file_label.pack(pady=10)
         
-        # File info with better styling
-        self.file_label = tk.Label(title_frame, text="No file loaded", 
-                                  font=("Arial", 11), bg='#f0f0f0', fg='#7f8c8d')
-        self.file_label.pack(pady=(5, 0))
+        # Main container
+        main_container = tk.Frame(self.root, bg='#f0f0f0')
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Enhanced multi-select toolbar
-        toolbar_frame = tk.Frame(main_container, bg='#3498db', relief=tk.RAISED, bd=1)
+        toolbar_frame = tk.Frame(main_container, bg='#34495e', relief=tk.RAISED, bd=2)
         toolbar_frame.pack(fill=tk.X, pady=(0, 10))
         
-        toolbar_inner = tk.Frame(toolbar_frame, bg='#3498db', padx=10, pady=8)
-        toolbar_inner.pack(fill=tk.X)
+        toolbar_inner = tk.Frame(toolbar_frame, bg='#34495e')
+        toolbar_inner.pack(pady=8, padx=15)
         
-        # Multi-select controls
-        tk.Label(toolbar_inner, text="🔧 Multi-Select Tools:", font=("Arial", 10, "bold"), 
-                bg='#3498db', fg='white').pack(side=tk.LEFT)
+        tk.Label(toolbar_inner, text="📋 Multi-Select Operations:", font=("Arial", 10, "bold"), 
+                fg='white', bg='#34495e').pack(side=tk.LEFT, padx=(0, 15))
         
         self.select_all_btn = tk.Button(toolbar_inner, text="☑ Select All", command=self.select_all_segments,
                                        bg='#2ecc71', fg='white', font=("Arial", 9, "bold"), 
@@ -121,74 +142,90 @@ class TranscriptionEditor:
                                         relief=tk.FLAT, padx=15, pady=5, state=tk.DISABLED)
         self.bulk_rename_btn.pack(side=tk.LEFT, padx=5)
         
-        # Split text button
-        self.split_text_btn = tk.Button(toolbar_inner, text="✂️ Split Selected", command=self.split_selected_text,
+        # Split mode toggle button
+        self.split_text_btn = tk.Button(toolbar_inner, text="✂️ Split Mode: OFF", command=self.toggle_split_mode,
                                        bg='#9b59b6', fg='white', font=("Arial", 9, "bold"),
-                                       relief=tk.FLAT, padx=15, pady=5, state=tk.DISABLED)
+                                       relief=tk.FLAT, padx=15, pady=5)
         self.split_text_btn.pack(side=tk.LEFT, padx=5)
         
-        # Main content area with enhanced layout
-        content_frame = tk.Frame(main_container, bg='#f0f0f0')
-        content_frame.pack(fill=tk.BOTH, expand=True)
-        content_frame.columnconfigure(1, weight=1)
-        content_frame.rowconfigure(0, weight=1)
+        # MAIN LAYOUT: Use PanedWindow for resizable panels
+        main_paned = tk.PanedWindow(main_container, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, 
+                                   sashwidth=6, bg='#bdc3c7')
+        main_paned.pack(fill=tk.BOTH, expand=True)
         
-        # Enhanced speaker mapping panel
-        speaker_panel = tk.LabelFrame(content_frame, text="🎨 Color-Coded Speaker Mapping", 
-                                    font=("Arial", 12, "bold"), bg='#ecf0f1', fg='#2c3e50',
-                                    relief=tk.GROOVE, bd=2, padx=10, pady=10)
-        speaker_panel.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
-        speaker_panel.columnconfigure(1, weight=1)
+        # LEFT PANEL CONTAINER (will contain stats and speaker mapping)
+        left_container = tk.Frame(main_paned, bg='#f0f0f0')
+        main_paned.add(left_container, minsize=350, width=400)  # Resizable with minimum width
+        
+        # STATS PANEL (separate from speaker mapping)
+        stats_panel = tk.LabelFrame(left_container, text="📊 Transcription Statistics", 
+                                   font=("Arial", 11, "bold"), bg='#ecf0f1', fg='#2c3e50',
+                                   relief=tk.GROOVE, bd=2, padx=8, pady=8)
+        stats_panel.pack(fill=tk.X, pady=(0, 10))
+        
+        # Stats content frame
+        stats_content = tk.Frame(stats_panel, bg='#ecf0f1')
+        stats_content.pack(fill=tk.X)
+        
+        self.stats_label = tk.Label(stats_content, text="No transcription loaded", 
+                                   font=("Arial", 10), bg='#ecf0f1', fg='#34495e',
+                                   justify=tk.LEFT, anchor=tk.W)
+        self.stats_label.pack(fill=tk.X, pady=5)
+        
+        # SPEAKER MAPPING PANEL (separate and expandable)
+        speaker_panel = tk.LabelFrame(left_container, text="🎨 Speaker Name Mapping", 
+                                    font=("Arial", 11, "bold"), bg='#ecf0f1', fg='#2c3e50',
+                                    relief=tk.GROOVE, bd=2, padx=8, pady=8)
+        speaker_panel.pack(fill=tk.BOTH, expand=True)
         
         # Speaker mapping headers
         header_frame = tk.Frame(speaker_panel, bg='#ecf0f1')
-        header_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        header_frame.pack(fill=tk.X, pady=(0, 8))
         
         tk.Label(header_frame, text="Original Speaker", font=("Arial", 10, "bold"), 
-                bg='#ecf0f1', fg='#34495e').grid(row=0, column=0, sticky=tk.W)
-        tk.Label(header_frame, text="Corrected Name", font=("Arial", 10, "bold"), 
-                bg='#ecf0f1', fg='#34495e').grid(row=0, column=1, sticky=tk.W, padx=(120, 0))
+                bg='#ecf0f1', fg='#34495e').pack(side=tk.LEFT)
+        tk.Label(header_frame, text="→ Corrected Name", font=("Arial", 10, "bold"), 
+                bg='#ecf0f1', fg='#34495e').pack(side=tk.RIGHT)
         
         # Scrollable speaker mapping area
-        self.speaker_canvas = tk.Canvas(speaker_panel, height=300, bg='white', highlightthickness=0)
-        self.speaker_scrollbar = ttk.Scrollbar(speaker_panel, orient="vertical", command=self.speaker_canvas.yview)
+        mapping_frame = tk.Frame(speaker_panel, bg='#ecf0f1')
+        mapping_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.speaker_canvas = tk.Canvas(mapping_frame, bg='white', highlightthickness=0)
+        self.speaker_scrollbar = ttk.Scrollbar(mapping_frame, orient="vertical", command=self.speaker_canvas.yview)
         self.speaker_frame_inner = tk.Frame(self.speaker_canvas, bg='white')
         
         self.speaker_canvas.configure(yscrollcommand=self.speaker_scrollbar.set)
-        self.speaker_canvas.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(5, 0))
-        self.speaker_scrollbar.grid(row=1, column=2, sticky=(tk.N, tk.S), pady=(5, 0))
+        self.speaker_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.speaker_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.speaker_canvas.create_window((0, 0), window=self.speaker_frame_inner, anchor="nw")
         
-        # Enhanced transcription preview with emotional indicators
-        preview_panel = tk.LabelFrame(content_frame, text="📝 Enhanced Transcription Preview", 
-                                    font=("Arial", 12, "bold"), bg='#ecf0f1', fg='#2c3e50',
-                                    relief=tk.GROOVE, bd=2, padx=10, pady=10)
-        preview_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-        preview_panel.columnconfigure(0, weight=1)
-        preview_panel.rowconfigure(1, weight=1)
+        # RIGHT PANEL: Enhanced transcription preview
+        preview_panel = tk.LabelFrame(main_paned, text="📝 Enhanced Transcription Preview", 
+                                    font=("Arial", 11, "bold"), bg='#ecf0f1', fg='#2c3e50',
+                                    relief=tk.GROOVE, bd=2, padx=8, pady=8)
+        main_paned.add(preview_panel, minsize=500)  # Resizable with minimum width
         
         # Preview controls
         preview_controls = tk.Frame(preview_panel, bg='#ecf0f1')
-        preview_controls.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        preview_controls.pack(fill=tk.X, pady=(0, 8))
         
         tk.Label(preview_controls, text="💡 Features: ✓ Color-coded speakers ✓ Emotional indicators ✓ Multi-select ✓ Text splitting", 
-                font=("Arial", 9), bg='#ecf0f1', fg='#7f8c8d', wraplength=400).pack(anchor=tk.W)
+                font=("Arial", 9), bg='#ecf0f1', fg='#7f8c8d', wraplength=500).pack(anchor=tk.W)
         
         # Scrollable transcription area
         text_frame = tk.Frame(preview_panel, bg='#ecf0f1')
-        text_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        text_frame.columnconfigure(0, weight=1)
-        text_frame.rowconfigure(0, weight=1)
+        text_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.text_area = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 11), 
+        self.text_area = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 10), 
                                bg='white', fg='#2c3e50', selectbackground='#3498db',
                                relief=tk.SUNKEN, bd=1)
         text_scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=self.text_area.yview)
         self.text_area.configure(yscrollcommand=text_scrollbar.set)
         
-        self.text_area.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        text_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Enhanced buttons panel
         button_panel = tk.Frame(main_container, bg='#f0f0f0')
@@ -264,6 +301,12 @@ class TranscriptionEditor:
                     'full_text': content
                 }
             
+            # Store original state for change tracking
+            import copy
+            self.original_segments = copy.deepcopy(self.segments)
+            self.has_unsaved_changes = False
+            
+            self.update_stats()
             self.setup_speaker_mapping()
             self.update_preview()
             
@@ -399,7 +442,9 @@ class TranscriptionEditor:
             entry = tk.Entry(speaker_row, width=25, font=("Arial", 10), relief=tk.GROOVE, bd=2)
             entry.grid(row=0, column=2, sticky=(tk.W, tk.E), padx=(0, 10), pady=5)
             entry.insert(0, speaker_id)  # Default to original name
-            entry.bind('<KeyRelease>', self.on_name_change)
+            # Only update when done editing (not on every keystroke to avoid lag)
+            entry.bind('<FocusOut>', self.on_name_change)  # When user clicks away
+            entry.bind('<Return>', self.on_name_change)    # When user presses Enter
             
             # Segment count indicator
             segment_count = len([s for s in self.segments if s.get('speaker') == speaker_id])
@@ -419,13 +464,39 @@ class TranscriptionEditor:
         self.update_preview()
     
     def get_speaker_mapping(self):
-        """Get current speaker name mapping"""
+        """Get current speaker name mapping from UI entries"""
         mapping = {}
         for original_id, entry in self.speaker_entries.items():
             new_name = entry.get().strip()
             if new_name and new_name != original_id:
                 mapping[original_id] = new_name
         return mapping
+    
+    def get_all_changes(self):
+        """Get all changes including bulk renames by comparing current segments to original"""
+        if not self.original_segments:
+            return {}
+        
+        changes = {}
+        
+        # First, get UI mapping changes
+        ui_mapping = self.get_speaker_mapping()
+        changes.update(ui_mapping)
+        
+        # Then, detect direct segment changes (from bulk rename)
+        original_speaker_map = {}
+        current_speaker_map = {}
+        
+        for i, (orig_seg, curr_seg) in enumerate(zip(self.original_segments, self.segments)):
+            orig_speaker = orig_seg.get('speaker', 'Unknown')
+            curr_speaker = curr_seg.get('speaker', 'Unknown')
+            
+            if orig_speaker != curr_speaker:
+                # This segment was changed
+                if orig_speaker not in changes:  # Don't override UI mapping
+                    changes[orig_speaker] = curr_speaker
+        
+        return changes
     
     def update_preview(self):
         """Update the enhanced transcription preview with colors and emotions"""
@@ -456,15 +527,77 @@ class TranscriptionEditor:
             seconds = int(start_time % 60)
             timestamp = f"[{minutes:02d}:{seconds:02d}]"
             
-            # Create checkbox for multi-select
+            # Create checkbox for multi-select (disabled in split mode)
             checkbox_var = tk.BooleanVar()
             checkbox = tk.Checkbutton(self.text_area, variable=checkbox_var, 
                                     command=lambda sid=segment_id: self.toggle_segment_selection(sid),
                                     bg='white', activebackground='#3498db')
             
-            # Insert checkbox into text area
-            self.text_area.window_create(tk.END, window=checkbox)
+            # In split mode, hide checkboxes to prevent click conflicts
+            if self.split_mode_active:
+                checkbox.config(state=tk.DISABLED)
+                # Add a split icon instead
+                self.text_area.insert(tk.END, "✂️ ")
+            else:
+                # Insert checkbox into text area
+                self.text_area.window_create(tk.END, window=checkbox)
+            
             self.segment_checkboxes[segment_id] = (checkbox, checkbox_var)
+            
+            # Add speaker reassignment dropdown for each segment (not in split mode)
+            if not self.split_mode_active:
+                # Get current speaker mapping to show proper names
+                mapping = self.get_speaker_mapping()
+                
+                # Create list of available speakers (both mapped names and original IDs)
+                available_speakers = []
+                for orig_id in self.speaker_names:
+                    mapped_name = mapping.get(orig_id, orig_id)
+                    if mapped_name != orig_id:
+                        available_speakers.append(mapped_name)  # Show mapped name
+                    else:
+                        available_speakers.append(orig_id)  # Show original ID
+                
+                # Set current value to mapped name if available
+                current_display_name = mapping.get(speaker, speaker)
+                
+                # Create speaker dropdown for individual segment reassignment
+                speaker_var = tk.StringVar(value=current_display_name)
+                speaker_dropdown = ttk.Combobox(self.text_area, textvariable=speaker_var,
+                                              values=available_speakers, width=12, height=8)
+                
+                # Bind change event to update this specific segment
+                def make_speaker_change_handler(seg_id, var, current_mapping):
+                    def on_speaker_change(event=None):
+                        selected_name = var.get()
+                        
+                        # Convert from display name back to original speaker ID if needed
+                        target_speaker = selected_name
+                        
+                        # Check if this is a mapped name - if so, find the original ID
+                        reverse_mapping = {v: k for k, v in current_mapping.items()}
+                        if selected_name in reverse_mapping:
+                            target_speaker = reverse_mapping[selected_name]
+                        
+                        # Update the specific segment
+                        for seg in self.segments:
+                            if seg.get('id', 0) == seg_id:
+                                seg['speaker'] = target_speaker
+                                break
+                        
+                        # Add to speaker names if it's a new speaker
+                        self.speaker_names.add(target_speaker)
+                        
+                        # Mark as changed and refresh
+                        self.has_unsaved_changes = True
+                        self.update_stats()
+                        self.setup_speaker_mapping()
+                        self.update_preview()
+                    return on_speaker_change
+                
+                speaker_dropdown.bind('<<ComboboxSelected>>', make_speaker_change_handler(segment_id, speaker_var, mapping))
+                self.text_area.insert(tk.END, " → ")
+                self.text_area.window_create(tk.END, window=speaker_dropdown)
             
             # Add formatted text with colors
             self.text_area.insert(tk.END, f" {timestamp} ")
@@ -482,23 +615,38 @@ class TranscriptionEditor:
             # Add emotional indicator and text
             self.text_area.insert(tk.END, f" {emotion_icon}: {text}\n\n")
             
-            # Make the line selectable for text splitting
-            line_start = f"{self.text_area.index(tk.END).split('.')[0]}.0"
-            line_end = f"{int(self.text_area.index(tk.END).split('.')[0])-1}.end"
+            # Store segment boundaries for click detection in split mode
+            if self.split_mode_active:
+                # Find where this segment's text actually starts and ends
+                current_pos = self.text_area.index(tk.END)
+                # Go back to find the text part (after timestamp and speaker name)
+                segment_start_line = int(current_pos.split('.')[0]) - 2  # Account for \n\n
+                
+                # Create a mapping of text positions to segment info
+                if not hasattr(self, 'segment_positions'):
+                    self.segment_positions = {}
+                
+                self.segment_positions[segment_start_line] = {
+                    'id': segment_id,
+                    'text': text,
+                    'speaker': speaker
+                }
             
-            # Add click binding for text splitting
-            def make_split_handler(seg_id, line_text):
-                def split_handler(event):
-                    if event.state & 0x4:  # Ctrl+Click
-                        self.show_split_dialog(seg_id, line_text)
-                return split_handler
-            
-            self.text_area.tag_add(f"segment_{segment_id}", line_start, line_end)
-            self.text_area.tag_bind(f"segment_{segment_id}", "<Control-Button-1>", 
-                                  make_split_handler(segment_id, text))
-            self.text_area.tag_configure(f"segment_{segment_id}", background='#f8f9fa')
+
         
-        self.text_area.configure(state=tk.DISABLED)
+        # Configure split mode click behavior
+        if self.split_mode_active:
+            # In split mode: yellow background and crosshair cursor
+            self.text_area.configure(bg='#fffbf0', cursor='crosshair')
+            self.text_area.bind("<Button-1>", self.handle_split_click)
+        else:
+            # Normal mode: white background and normal cursor
+            self.text_area.configure(bg='white', cursor='')
+            self.text_area.unbind("<Button-1>")
+        
+        # Keep text area enabled for click events, but prevent typing
+        self.text_area.configure(state=tk.NORMAL)
+        self.text_area.bind("<Key>", lambda e: "break")  # Prevent typing but allow clicks
     
     def toggle_segment_selection(self, segment_id):
         """Toggle selection of a segment for multi-select operations"""
@@ -532,20 +680,20 @@ class TranscriptionEditor:
     def update_multi_select_ui(self):
         """Update the multi-select UI elements"""
         count = len(self.selected_segments)
-        self.bulk_rename_btn.config(text=f"🏷 Bulk Rename ({count})", 
+        self.bulk_rename_btn.config(text=f"👥 Reassign Speaker ({count})", 
                                    state=tk.NORMAL if count > 0 else tk.DISABLED)
-        self.split_text_btn.config(state=tk.NORMAL if count > 0 else tk.DISABLED)
+        # Split mode button is always available, no longer depends on selection
     
     def bulk_rename_speakers(self):
-        """Bulk rename selected speakers"""
+        """Bulk reassign selected segments to a different speaker"""
         if not self.selected_segments:
-            messagebox.showwarning("No Selection", "Please select segments to rename.")
+            messagebox.showwarning("No Selection", "Please select segments to reassign.")
             return
         
-        # Create dialog for bulk rename
+        # Create dialog for bulk reassignment
         dialog = tk.Toplevel(self.root)
-        dialog.title("Bulk Rename Speakers")
-        dialog.geometry("400x200")
+        dialog.title("Reassign Speaker")
+        dialog.geometry("450x250")
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.grab_set()
@@ -553,60 +701,527 @@ class TranscriptionEditor:
         # Center the dialog
         dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
         
-        tk.Label(dialog, text=f"Rename {len(self.selected_segments)} selected segments to:", 
-                font=("Arial", 12, "bold"), bg='#f0f0f0').pack(pady=(20, 10))
+        # Show what's currently selected
+        current_speakers = set()
+        for segment_id in self.selected_segments:
+            if segment_id < len(self.segments):
+                current_speakers.add(self.segments[segment_id].get('speaker', 'Unknown'))
+        
+        tk.Label(dialog, text=f"👥 Reassign {len(self.selected_segments)} segments", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(15, 5))
+        
+        tk.Label(dialog, text=f"Currently: {', '.join(current_speakers)}", 
+                font=("Arial", 10), bg='#f0f0f0', fg='#7f8c8d').pack(pady=(0, 15))
+        
+        tk.Label(dialog, text="Move to speaker:", 
+                font=("Arial", 11, "bold"), bg='#f0f0f0').pack(pady=(0, 5))
+        
+        # Get current mapping to show proper names in dropdown
+        mapping = self.get_speaker_mapping()
+        available_speakers = []
+        for orig_id in self.speaker_names:
+            mapped_name = mapping.get(orig_id, orig_id)
+            if mapped_name != orig_id:
+                available_speakers.append(mapped_name)
+            else:
+                available_speakers.append(orig_id)
         
         new_speaker_var = tk.StringVar()
         speaker_combo = ttk.Combobox(dialog, textvariable=new_speaker_var, 
-                                   values=list(self.speaker_names), width=30)
+                                   values=available_speakers, width=30)
         speaker_combo.pack(pady=10)
         speaker_combo.focus()
+        
+        tk.Label(dialog, text="(or type new speaker name)", 
+                font=("Arial", 9), bg='#f0f0f0', fg='#95a5a6').pack()
         
         button_frame = tk.Frame(dialog, bg='#f0f0f0')
         button_frame.pack(pady=20)
         
         def apply_rename():
-            new_speaker = new_speaker_var.get().strip()
-            if not new_speaker:
-                messagebox.showerror("Error", "Please enter a speaker name.")
+            selected_name = new_speaker_var.get().strip()
+            if not selected_name:
+                messagebox.showerror("Error", "Please select or enter a speaker name.")
                 return
             
-            # Apply rename to selected segments
+            # Convert from display name back to original speaker ID if needed
+            target_speaker = selected_name
+            reverse_mapping = {v: k for k, v in mapping.items()}
+            if selected_name in reverse_mapping:
+                target_speaker = reverse_mapping[selected_name]
+            
+            # Apply reassignment to selected segments
+            changed_count = 0
             for i, segment in enumerate(self.segments):
                 if i in self.selected_segments or segment.get('id', i) in self.selected_segments:
-                    segment['speaker'] = new_speaker
+                    segment['speaker'] = target_speaker
+                    changed_count += 1
             
             # Update speaker names set
-            self.speaker_names.add(new_speaker)
+            self.speaker_names.add(target_speaker)
+            
+            # Mark as having changes
+            self.has_unsaved_changes = True
             
             # Refresh UI
+            self.update_stats()
             self.setup_speaker_mapping()
             self.update_preview()
             self.clear_selection()
             
             dialog.destroy()
-            messagebox.showinfo("Success", f"Renamed {len(self.selected_segments)} segments to '{new_speaker}'!")
+            messagebox.showinfo("✅ Reassignment Complete", 
+                              f"Moved {changed_count} segments to '{selected_name}'!")
         
-        tk.Button(button_frame, text="Apply Rename", command=apply_rename,
-                 bg='#2ecc71', fg='white', font=("Arial", 10, "bold"), 
+        tk.Button(button_frame, text="👥 Reassign", command=apply_rename,
+                 bg='#3498db', fg='white', font=("Arial", 10, "bold"), 
                  relief=tk.FLAT, padx=20, pady=5).pack(side=tk.LEFT, padx=5)
         
         tk.Button(button_frame, text="Cancel", command=dialog.destroy,
-                 bg='#e74c3c', fg='white', font=("Arial", 10, "bold"), 
+                 bg='#95a5a6', fg='white', font=("Arial", 10, "bold"), 
                  relief=tk.FLAT, padx=20, pady=5).pack(side=tk.LEFT, padx=5)
     
-    def split_selected_text(self):
-        """Split selected text segments"""
-        if not self.selected_segments:
-            messagebox.showwarning("No Selection", "Please select segments to split.")
+    def toggle_split_mode(self):
+        """Toggle split mode on/off"""
+        self.split_mode_active = not self.split_mode_active
+        
+        if self.split_mode_active:
+            # Entering split mode
+            self.split_text_btn.config(text="✂️ Split Mode: ON", bg='#e74c3c')
+            messagebox.showinfo("Split Mode Activated", 
+                              "Split Mode is now ON!\n\n" +
+                              "📝 Instructions:\n" +
+                              "1. Click on any text segment to split it\n" +
+                              "2. Choose split point and assign speakers\n" +
+                              "3. Click 'Split Mode: ON' again to exit\n\n" +
+                              "💡 Tip: Text segments will highlight when you hover over them")
+        else:
+            # Exiting split mode
+            self.split_text_btn.config(text="✂️ Split Mode: OFF", bg='#9b59b6')
+        
+        # Update the preview to show/hide split mode indicators
+        self.update_preview()
+    
+    def handle_split_click(self, event):
+        """Handle clicks in split mode - find segment and split immediately"""
+        if not self.split_mode_active:
             return
         
-        messagebox.showinfo("Text Splitting", 
-                          "To split text:\n\n" +
-                          "1. Select the segment(s) you want to split\n" +
-                          "2. Hold Ctrl and click where you want to split the text\n" +
-                          "3. Choose new speakers for each part\n\n" +
-                          "Selected segments are ready for splitting!")
+        try:
+            # Get click position
+            click_index = self.text_area.index(f"@{event.x},{event.y}")
+            
+            # Get the clicked line content
+            line_num = int(click_index.split('.')[0])
+            click_char = int(click_index.split('.')[1])
+            
+            line_start = f"{line_num}.0"
+            line_end = f"{line_num}.end"
+            line_content = self.text_area.get(line_start, line_end)
+            
+            print(f"DEBUG: Clicked line {line_num}, char {click_char}")
+            print(f"DEBUG: Line content: '{line_content}'")
+            
+            # Find which segment this line belongs to by checking line content
+            target_segment = None
+            segment_index = None
+            
+            for i, segment in enumerate(self.segments):
+                segment_text = segment.get('text', '').strip()
+                if segment_text and segment_text in line_content:
+                    target_segment = segment
+                    segment_index = i
+                    print(f"DEBUG: Found segment {i}: '{segment_text[:50]}...'")
+                    break
+            
+            if not target_segment:
+                print("DEBUG: No segment found - line might be empty or timestamp only")
+                return
+            
+            # Find where the text starts in the line (after ": ")
+            text_start_marker = ": "
+            text_start_pos = line_content.find(text_start_marker)
+            if text_start_pos == -1:
+                print("DEBUG: Could not find text start marker")
+                return
+            
+            text_start_char = text_start_pos + len(text_start_marker)
+            
+            # Check if click was in the text portion
+            if click_char < text_start_char:
+                print("DEBUG: Click was before text content")
+                return
+            
+            # Calculate position within the actual text
+            char_pos_in_text = click_char - text_start_char
+            segment_text = target_segment['text']
+            char_pos_in_text = max(0, min(char_pos_in_text, len(segment_text)))
+            
+            print(f"DEBUG: Split position: {char_pos_in_text} in text '{segment_text}'")
+            
+            # Split the text immediately
+            first_part = segment_text[:char_pos_in_text].strip()
+            second_part = segment_text[char_pos_in_text:].strip()
+            
+            if not first_part or not second_part:
+                messagebox.showwarning("Invalid Split", "Cannot split here - need text on both sides.")
+                return
+            
+            # Perform the split immediately
+            original_speaker = target_segment.get('speaker', 'Unknown')
+            
+            # Update original segment with first part
+            target_segment['text'] = first_part
+            
+            # Create new segment for second part
+            new_segment = {
+                'id': len(self.segments),
+                'speaker': original_speaker,  # Same speaker initially
+                'text': second_part,
+                'start': target_segment.get('start', 0) + 1,
+                'end': target_segment.get('end', 5),
+                'source': target_segment.get('source', 'Unknown')
+            }
+            
+            # Insert new segment after original
+            self.segments.insert(segment_index + 1, new_segment)
+            
+            # Mark as having changes
+            self.has_unsaved_changes = True
+            
+            # Refresh UI
+            self.update_stats()
+            self.setup_speaker_mapping()
+            self.update_preview()
+            
+            # Show success message
+            messagebox.showinfo("✂️ Split Complete!", 
+                              f"Text split into 2 parts:\n\n" +
+                              f"Part 1: '{first_part[:50]}...'\n" +
+                              f"Part 2: '{second_part[:50]}...'\n\n" +
+                              f"Both assigned to: {original_speaker}")
+            
+        except Exception as e:
+            print(f"DEBUG: Error in handle_split_click: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def show_split_at_position_dialog(self, segment_id, text, split_position):
+        """Show split dialog with pre-determined split position"""
+        # Find the segment
+        segment = None
+        for s in self.segments:
+            if s.get('id', 0) == segment_id:
+                segment = s
+                break
+        
+        if not segment:
+            messagebox.showerror("Error", "Segment not found for splitting.")
+            return
+        
+        # Split the text at the specified position
+        first_part = text[:split_position].strip()
+        second_part = text[split_position:].strip()
+        
+        if not first_part or not second_part:
+            messagebox.showwarning("Invalid Split", 
+                                 "Cannot split here - both parts must contain text.")
+            return
+        
+        # Create split dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("✂️ Confirm Split")
+        dialog.geometry("600x400")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Title
+        tk.Label(dialog, text="✂️ Confirm Text Split", 
+                font=("Arial", 16, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=15)
+        
+        # Preview frame
+        preview_frame = tk.LabelFrame(dialog, text="📋 Split Preview", 
+                                    bg='#f0f0f0', font=("Arial", 11, "bold"))
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # First part
+        tk.Label(preview_frame, text="Part 1:", font=("Arial", 10, "bold"), 
+                bg='#f0f0f0', fg='#27ae60').pack(anchor=tk.W, padx=10, pady=(10, 0))
+        
+        first_text = tk.Text(preview_frame, height=3, wrap=tk.WORD, font=("Arial", 10),
+                           relief=tk.GROOVE, bd=1, bg='#e8f5e8')
+        first_text.pack(fill=tk.X, padx=10, pady=(5, 10))
+        first_text.insert('1.0', first_part)
+        first_text.config(state=tk.DISABLED)
+        
+        # Second part
+        tk.Label(preview_frame, text="Part 2:", font=("Arial", 10, "bold"), 
+                bg='#f0f0f0', fg='#3498db').pack(anchor=tk.W, padx=10)
+        
+        second_text = tk.Text(preview_frame, height=3, wrap=tk.WORD, font=("Arial", 10),
+                            relief=tk.GROOVE, bd=1, bg='#e8f4fd')
+        second_text.pack(fill=tk.X, padx=10, pady=(5, 10))
+        second_text.insert('1.0', second_part)
+        second_text.config(state=tk.DISABLED)
+        
+        # Speaker assignment
+        speaker_frame = tk.LabelFrame(dialog, text="👥 Assign Speakers", 
+                                    bg='#f0f0f0', font=("Arial", 11, "bold"))
+        speaker_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # First speaker
+        first_row = tk.Frame(speaker_frame, bg='#f0f0f0')
+        first_row.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(first_row, text="Part 1 Speaker:", font=("Arial", 10), 
+                bg='#f0f0f0', width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        first_speaker_var = tk.StringVar(value=segment.get('speaker', 'Unknown'))
+        first_combo = ttk.Combobox(first_row, textvariable=first_speaker_var, 
+                                 values=list(self.speaker_names), width=25)
+        first_combo.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Second speaker
+        second_row = tk.Frame(speaker_frame, bg='#f0f0f0')
+        second_row.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(second_row, text="Part 2 Speaker:", font=("Arial", 10), 
+                bg='#f0f0f0', width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        second_speaker_var = tk.StringVar(value=segment.get('speaker', 'Unknown'))
+        second_combo = ttk.Combobox(second_row, textvariable=second_speaker_var, 
+                                  values=list(self.speaker_names), width=25)
+        second_combo.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=20)
+        
+        def apply_split():
+            try:
+                # Get speakers
+                first_speaker = first_speaker_var.get().strip()
+                second_speaker = second_speaker_var.get().strip()
+                
+                if not first_speaker or not second_speaker:
+                    messagebox.showerror("Missing Speakers", 
+                                       "Please assign speakers to both parts.")
+                    return
+                
+                # Perform the split
+                original_index = self.segments.index(segment)
+                
+                # Update original segment with first part
+                segment['text'] = first_part
+                segment['speaker'] = first_speaker
+                
+                # Create new segment for second part
+                new_segment = {
+                    'id': len(self.segments),
+                    'speaker': second_speaker,
+                    'text': second_part,
+                    'start': segment.get('start', 0) + 2,  # Offset by 2 seconds
+                    'end': segment.get('end', 5),
+                    'source': segment.get('source', 'Unknown')
+                }
+                
+                # Insert new segment after original
+                self.segments.insert(original_index + 1, new_segment)
+                
+                # Update speaker names
+                self.speaker_names.add(first_speaker)
+                self.speaker_names.add(second_speaker)
+                
+                # Mark as having changes
+                self.has_unsaved_changes = True
+                
+                # Refresh UI
+                self.update_stats()
+                self.setup_speaker_mapping()
+                self.update_preview()
+                
+                dialog.destroy()
+                messagebox.showinfo("✅ Split Complete", 
+                                  f"Text segment successfully split!\n\n" +
+                                  f"Part 1: {first_speaker}\n" +
+                                  f"Part 2: {second_speaker}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Error splitting text: {e}")
+        
+        # Buttons
+        split_button = tk.Button(button_frame, text="✂️ SPLIT", command=apply_split,
+                               bg='#e74c3c', fg='white', font=("Arial", 12, "bold"), 
+                               relief=tk.RAISED, bd=3, padx=30, pady=8, cursor='hand2')
+        split_button.pack(side=tk.LEFT, padx=10)
+        
+        cancel_button = tk.Button(button_frame, text="Cancel", command=dialog.destroy,
+                                bg='#95a5a6', fg='white', font=("Arial", 11, "bold"), 
+                                relief=tk.FLAT, padx=20, pady=8)
+        cancel_button.pack(side=tk.LEFT, padx=10)
+    
+    def show_simple_split_dialog(self, segment_id, text):
+        """Show simplified split dialog - all in one step"""
+        # Find the segment
+        segment = None
+        for s in self.segments:
+            if s.get('id', 0) == segment_id:
+                segment = s
+                break
+        
+        if not segment:
+            messagebox.showerror("Error", "Segment not found for splitting.")
+            return
+        
+        # Create simple split dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Split Text Segment")
+        dialog.geometry("700x500")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Title
+        tk.Label(dialog, text="✂️ Split Text Segment", 
+                font=("Arial", 16, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=10)
+        
+        # Instructions
+        instruction_frame = tk.Frame(dialog, bg='#ecf0f1', relief=tk.GROOVE, bd=2)
+        instruction_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        
+        tk.Label(instruction_frame, text="📝 Instructions: Position cursor where you want to split, then click SPLIT", 
+                font=("Arial", 11, "bold"), bg='#ecf0f1', fg='#2c3e50').pack(pady=8)
+        
+        # Text editing area
+        text_frame = tk.Frame(dialog, bg='#f0f0f0')
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        tk.Label(text_frame, text="Edit text and position cursor where you want to split:", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0').pack(anchor=tk.W, pady=(0, 5))
+        
+        text_widget = tk.Text(text_frame, wrap=tk.WORD, height=6, font=("Arial", 11), 
+                             relief=tk.GROOVE, bd=2)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        text_widget.insert('1.0', text)
+        text_widget.focus()
+        
+        # Speaker assignment frame
+        speaker_frame = tk.LabelFrame(dialog, text="👥 Assign Speakers", 
+                                    bg='#f0f0f0', font=("Arial", 11, "bold"))
+        speaker_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # First speaker
+        first_row = tk.Frame(speaker_frame, bg='#f0f0f0')
+        first_row.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(first_row, text="First part speaker:", font=("Arial", 10), 
+                bg='#f0f0f0', width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        first_speaker_var = tk.StringVar(value=segment.get('speaker', 'Unknown'))
+        first_combo = ttk.Combobox(first_row, textvariable=first_speaker_var, 
+                                 values=list(self.speaker_names), width=25)
+        first_combo.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Second speaker
+        second_row = tk.Frame(speaker_frame, bg='#f0f0f0')
+        second_row.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(second_row, text="Second part speaker:", font=("Arial", 10), 
+                bg='#f0f0f0', width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        second_speaker_var = tk.StringVar(value=segment.get('speaker', 'Unknown'))
+        second_combo = ttk.Combobox(second_row, textvariable=second_speaker_var, 
+                                  values=list(self.speaker_names), width=25)
+        second_combo.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=20)
+        
+        def perform_split():
+            try:
+                # Get cursor position
+                cursor_pos = text_widget.index(tk.INSERT)
+                char_pos = int(cursor_pos.split('.')[1])
+                
+                # Get the current text (in case user edited it)
+                current_text = text_widget.get('1.0', tk.END).strip()
+                
+                if char_pos == 0 or char_pos >= len(current_text):
+                    messagebox.showwarning("Invalid Split Position", 
+                                         "Please position the cursor in the middle of the text.")
+                    return
+                
+                # Split the text
+                first_part = current_text[:char_pos].strip()
+                second_part = current_text[char_pos:].strip()
+                
+                if not first_part or not second_part:
+                    messagebox.showwarning("Invalid Split", 
+                                         "Both parts must contain text after splitting.")
+                    return
+                
+                # Get speakers
+                first_speaker = first_speaker_var.get().strip()
+                second_speaker = second_speaker_var.get().strip()
+                
+                if not first_speaker or not second_speaker:
+                    messagebox.showerror("Missing Speakers", 
+                                       "Please assign speakers to both parts.")
+                    return
+                
+                # Perform the split
+                original_index = self.segments.index(segment)
+                
+                # Update original segment with first part
+                segment['text'] = first_part
+                segment['speaker'] = first_speaker
+                
+                # Create new segment for second part
+                new_segment = {
+                    'id': len(self.segments),
+                    'speaker': second_speaker,
+                    'text': second_part,
+                    'start': segment.get('start', 0) + 2,  # Offset by 2 seconds
+                    'end': segment.get('end', 5),
+                    'source': segment.get('source', 'Unknown')
+                }
+                
+                # Insert new segment after original
+                self.segments.insert(original_index + 1, new_segment)
+                
+                # Update speaker names
+                self.speaker_names.add(first_speaker)
+                self.speaker_names.add(second_speaker)
+                
+                # Mark as having changes
+                self.has_unsaved_changes = True
+                
+                # Refresh UI
+                self.update_stats()
+                self.setup_speaker_mapping()
+                self.update_preview()
+                
+                dialog.destroy()
+                messagebox.showinfo("✅ Split Successful", 
+                                  f"Text segment split into 2 parts!\n\n" +
+                                  f"Part 1: {first_speaker}\n" +
+                                  f"Part 2: {second_speaker}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Error splitting text: {e}")
+        
+        # Big, obvious SPLIT button
+        split_button = tk.Button(button_frame, text="✂️ SPLIT", command=perform_split,
+                               bg='#e74c3c', fg='white', font=("Arial", 14, "bold"), 
+                               relief=tk.RAISED, bd=3, padx=30, pady=10, cursor='hand2')
+        split_button.pack(side=tk.LEFT, padx=10)
+        
+        cancel_button = tk.Button(button_frame, text="Cancel", command=dialog.destroy,
+                                bg='#95a5a6', fg='white', font=("Arial", 11, "bold"), 
+                                relief=tk.FLAT, padx=20, pady=8)
+        cancel_button.pack(side=tk.LEFT, padx=10)
     
     def show_split_dialog(self, segment_id, text):
         """Show dialog for splitting text"""
@@ -783,21 +1398,29 @@ class TranscriptionEditor:
             messagebox.showerror("Error", "No transcription data to save")
             return
         
-        mapping = self.get_speaker_mapping()
+        # Get ALL changes (UI mapping + bulk renames)
+        all_changes = self.get_all_changes()
         
-        if not mapping:
+        if not all_changes and not self.has_unsaved_changes:
             messagebox.showinfo("No Changes", "No speaker name changes detected.")
             return
         
-        # Apply corrections to transcription data
+        # Create corrected data using current segments (which include bulk changes)
         corrected_data = self.transcription_data.copy()
+        corrected_data['segments'] = self.segments.copy()  # Use current segments
+        
+        # Also apply any UI mapping changes
         corrected_count = 0
+        ui_mapping = self.get_speaker_mapping()
         
         for segment in corrected_data.get('segments', []):
             original_speaker = segment.get('speaker')
-            if original_speaker in mapping:
-                segment['speaker'] = mapping[original_speaker]
+            if original_speaker in ui_mapping:
+                segment['speaker'] = ui_mapping[original_speaker]
                 corrected_count += 1
+        
+        # Count total changes (bulk + UI)
+        total_changes = len(all_changes)
         
         # Save to new file
         if self.transcription_file:
@@ -815,9 +1438,15 @@ class TranscriptionEditor:
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(corrected_data, f, indent=2, ensure_ascii=False)
             
+            # Reset change tracking
+            import copy
+            self.original_segments = copy.deepcopy(self.segments)
+            self.has_unsaved_changes = False
+            self.update_stats()
+            
             messagebox.showinfo("Success", f"Corrected transcription saved!\n\n"
                                f"File: {output_path}\n"
-                               f"Corrections applied: {corrected_count}")
+                               f"Total corrections: {total_changes}")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save corrected transcription: {e}")
@@ -882,6 +1511,32 @@ class TranscriptionEditor:
         
         if file_path:
             self.load_transcription(file_path)
+    
+    def update_stats(self):
+        """Update the statistics panel"""
+        if not self.segments:
+            self.stats_label.config(text="No transcription loaded")
+            return
+        
+        total_segments = len(self.segments)
+        unique_speakers = len(self.speaker_names)
+        
+        # Calculate total duration if available
+        total_duration = 0
+        if self.segments:
+            for segment in self.segments:
+                start = segment.get('start', 0)
+                end = segment.get('end', 0)
+                total_duration += (end - start)
+        
+        duration_text = f"{int(total_duration // 60)}:{int(total_duration % 60):02d}" if total_duration > 0 else "Unknown"
+        
+        stats_text = f"""📊 Total segments: {total_segments}
+👥 Unique speakers: {unique_speakers}  
+⏱️ Duration: {duration_text}
+📝 Changes: {'Yes' if self.has_unsaved_changes else 'None'}"""
+        
+        self.stats_label.config(text=stats_text)
     
     def run(self):
         """Start the GUI"""
