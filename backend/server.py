@@ -9,6 +9,7 @@ import asyncio
 import io
 import logging
 import os
+import sys
 import time
 from typing import List, Dict, Any, Optional
 import warnings
@@ -67,8 +68,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 SAMPLE_RATE = 16000
-MAX_AUDIO_LENGTH = 30  # seconds
+MAX_AUDIO_LENGTH = 7200  # seconds (2 hours) - realistic maximum for chunked processing
 MIN_AUDIO_LENGTH = 0.1  # seconds
+CHUNK_THRESHOLD = 30  # seconds - audio longer than this will be chunked
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"  # Latest model from October 2024 - faster with same accuracy as large-v3
 DIARIZATION_MODEL = "pyannote/speaker-diarization-3.0"
 EMBEDDING_MODEL = "pyannote/embedding"
@@ -103,6 +105,12 @@ def initialize_models():
     """Initialize all models and set up the device."""
     global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager, enhanced_speaker_database, enhanced_service
     
+    logger.info("🚀 STARTING MODEL INITIALIZATION")
+    logger.info(f"🔧 Current working directory: {os.getcwd()}")
+    logger.info(f"🐍 Python executable: {sys.executable}")
+    logger.info(f"📦 Transformers version: {__import__('transformers').__version__}")
+    logger.info(f"🔥 PyTorch version: {torch.__version__}")
+    
     # Set up device (GPU if available, otherwise CPU)
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -112,17 +120,37 @@ def initialize_models():
         device = torch.device("cpu")
         logger.info("Using device: cpu")
     
-    logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
-    whisper_model = pipeline(
-        "automatic-speech-recognition",
-        model=WHISPER_MODEL,
-        device=device,
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-        return_timestamps=True,
-        chunk_length_s=30,  # Optimal chunk length for quality
-        stride_length_s=5,  # Overlap for better continuity
-    )
-    logger.info("✓ Whisper model loaded successfully")
+    # Load Whisper model with proper error handling
+    try:
+        logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
+        whisper_model = pipeline(
+            "automatic-speech-recognition",
+            model=WHISPER_MODEL,
+            device=device,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            return_timestamps=True,
+            chunk_length_s=30,  # Optimal chunk length for quality
+            stride_length_s=5,  # Overlap for better continuity
+        )
+        logger.info("✓ Whisper model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load Whisper model: {e}")
+        logger.info("Trying fallback to smaller Whisper model...")
+        try:
+            whisper_model = pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-base",
+                device=device,
+                torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+                return_timestamps=True,
+                chunk_length_s=30,
+                stride_length_s=5,
+            )
+            logger.info("✓ Whisper base model loaded successfully (fallback)")
+        except Exception as e2:
+            logger.error(f"Failed to load any Whisper model: {e2}")
+            logger.error("Transcription will not be available!")
+            whisper_model = None
     
     # Try to load pyannote.audio for speaker diarization
     try:
@@ -758,7 +786,9 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
         if duration < MIN_AUDIO_LENGTH:
             raise HTTPException(status_code=400, detail=f"Audio too short: {duration:.2f}s")
         if duration > MAX_AUDIO_LENGTH:
-            logger.warning(f"Audio length {duration:.2f}s exceeds recommended {MAX_AUDIO_LENGTH}s")
+            raise HTTPException(status_code=400, detail=f"Audio too long: {duration:.2f}s (max: {MAX_AUDIO_LENGTH/3600:.1f} hours)")
+        if duration > CHUNK_THRESHOLD:
+            logger.info(f"Audio length {duration:.2f}s will be processed in chunks for optimal performance")
         
         # Resample to 16kHz if needed
         if sample_rate != SAMPLE_RATE:
@@ -1312,10 +1342,18 @@ def load_audio_from_bytes(audio_data: bytes) -> tuple[torch.Tensor, int]:
 
 
 async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
-    """Run Whisper transcription on audio waveform with enhanced voice activity detection."""
+    """Run Whisper transcription on audio waveform with enhanced voice activity detection and automatic chunking."""
     try:
         if whisper_model is None:
             raise ValueError("Whisper model not loaded")
+        
+        # Calculate duration
+        duration = waveform.shape[1] / sample_rate
+        
+        # If audio is longer than 30 seconds, chunk it for processing
+        if duration > 30.0:
+            logger.info(f"Audio is {duration:.2f}s long, chunking for optimal processing...")
+            return await run_chunked_transcription(waveform, sample_rate)
         
         # Convert to numpy for analysis
         audio_array = waveform.numpy().flatten()
@@ -1488,6 +1526,289 @@ async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[st
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         raise
+
+
+def find_natural_pause_point(waveform: torch.Tensor, search_start: int, search_end: int, sample_rate: int) -> int:
+    """
+    Find the best natural pause point for splitting audio chunks.
+    Returns sample index of the best pause, or None if no good pause found.
+    """
+    try:
+        if search_start >= search_end or search_start >= waveform.shape[1]:
+            return None
+        
+        # Extract the search region
+        search_region = waveform[:, search_start:min(search_end, waveform.shape[1])].squeeze().numpy()
+        
+        # Calculate energy in sliding windows
+        window_size = int(0.1 * sample_rate)  # 100ms windows
+        step_size = int(0.05 * sample_rate)   # 50ms step
+        
+        energy_scores = []
+        window_positions = []
+        
+        for i in range(0, len(search_region) - window_size, step_size):
+            window = search_region[i:i + window_size]
+            
+            # Calculate RMS energy
+            rms_energy = np.sqrt(np.mean(window ** 2))
+            
+            # Calculate zero crossing rate (indicates speech activity)
+            zero_crossings = np.sum(np.diff(np.sign(window)) != 0) / len(window)
+            
+            # Combine metrics (lower is better for pause detection)
+            pause_score = rms_energy + zero_crossings * 0.1
+            
+            energy_scores.append(pause_score)
+            window_positions.append(search_start + i + window_size // 2)
+        
+        if not energy_scores:
+            return None
+        
+        # Find windows with lowest energy (best pause candidates)
+        min_energy_threshold = min(energy_scores) * 1.5  # Allow some tolerance
+        
+        # Find the best pause point closest to the middle of the search region
+        target_position = (search_start + search_end) / 2
+        best_pause = None
+        best_distance = float('inf')
+        
+        for i, (score, position) in enumerate(zip(energy_scores, window_positions)):
+            if score <= min_energy_threshold:
+                distance = abs(position - target_position)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_pause = position
+        
+        return best_pause
+        
+    except Exception as e:
+        logger.debug(f"Error finding natural pause point: {e}")
+        return None
+
+
+async def run_chunked_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
+    """
+    Run transcription on long audio files by splitting into chunks at natural speech pauses.
+    This prevents memory issues, attention mask warnings, and improves timestamp accuracy.
+    """
+    try:
+        # Configuration
+        target_chunk_duration = 25.0  # Target seconds per chunk (slightly less than 30s to be safe)
+        min_chunk_duration = 15.0     # Minimum chunk duration (don't split if chunk would be too small)
+        max_chunk_duration = 30.0     # Maximum chunk duration (hard limit)
+        overlap_duration = 3.0        # Increased overlap for better stitching
+        
+        total_samples = waveform.shape[1]
+        total_duration = total_samples / sample_rate
+        
+        logger.info(f"Processing {total_duration:.2f}s audio with intelligent chunking at natural speech pauses")
+        
+        # Find natural speech pause points for chunking
+        chunks = []
+        chunk_timestamps = []
+        
+        start_sample = 0
+        chunk_number = 0
+        
+        while start_sample < total_samples:
+            # Calculate target end sample
+            target_end_sample = min(start_sample + int(target_chunk_duration * sample_rate), total_samples)
+            
+            # Look for natural pause points within a reasonable range
+            search_start = max(target_end_sample - int(5.0 * sample_rate), start_sample + int(min_chunk_duration * sample_rate))
+            search_end = min(target_end_sample + int(5.0 * sample_rate), total_samples, start_sample + int(max_chunk_duration * sample_rate))
+            
+            # Find the best pause point in the search range
+            best_pause_sample = find_natural_pause_point(waveform, search_start, search_end, sample_rate)
+            
+            # If no good pause found, use target end
+            end_sample = best_pause_sample if best_pause_sample else target_end_sample
+            
+            # Extract chunk
+            chunk_waveform = waveform[:, start_sample:end_sample]
+            
+            # Calculate timestamps for this chunk
+            start_time = start_sample / sample_rate
+            end_time = end_sample / sample_rate
+            
+            chunks.append(chunk_waveform)
+            chunk_timestamps.append((start_time, end_time))
+            
+            chunk_number += 1
+            pause_indicator = "📍 (natural pause)" if best_pause_sample else "✂️ (forced split)"
+            logger.info(f"Chunk {chunk_number}: {start_time:.2f}s - {end_time:.2f}s ({chunk_waveform.shape[1]/sample_rate:.2f}s) {pause_indicator}")
+            
+            # Move to next chunk with overlap
+            if end_sample == total_samples:
+                break  # We've reached the end
+            start_sample = max(0, end_sample - int(overlap_duration * sample_rate))
+        
+        # Process each chunk
+        all_segments = []
+        
+        for i, (chunk_waveform, (start_time, end_time)) in enumerate(zip(chunks, chunk_timestamps)):
+            logger.info(f"Transcribing chunk {i+1}/{len(chunks)} ({start_time:.2f}s - {end_time:.2f}s)")
+            
+            try:
+                # Convert chunk to numpy
+                chunk_array = chunk_waveform.numpy().flatten()
+                
+                # Skip very quiet chunks
+                rms_energy = np.sqrt(np.mean(chunk_array ** 2))
+                if rms_energy < 0.01:
+                    logger.info(f"Chunk {i+1} is too quiet (RMS: {rms_energy:.4f}), skipping")
+                    continue
+                
+                # Transcribe chunk with enhanced settings for better timestamps
+                chunk_result = whisper_model(
+                    chunk_array, 
+                    return_timestamps=True,
+                    chunk_length_s=None,  # Let Whisper handle its own chunking for short segments
+                    stride_length_s=None, # Disable stride for individual chunks
+                    generate_kwargs={
+                        "language": "en",           # Set language to avoid language detection warnings
+                        "task": "transcribe",       # Explicit task to avoid translation warnings
+                        "return_timestamps": True,  # Ensure timestamps are generated
+                        "word_timestamps": True     # Enable word-level timestamps for better accuracy
+                    }
+                )
+                
+                # Process chunk results
+                if chunk_result and 'chunks' in chunk_result:
+                    for segment in chunk_result['chunks']:
+                        # Adjust timestamps to global time
+                        if 'timestamp' in segment and segment['timestamp']:
+                            segment_start = segment['timestamp'][0] + start_time if segment['timestamp'][0] else start_time
+                            segment_end = segment['timestamp'][1] + start_time if segment['timestamp'][1] else end_time
+                        else:
+                            segment_start = start_time
+                            segment_end = end_time
+                        
+                        # Add segment with adjusted timestamps
+                        all_segments.append({
+                            'timestamp': [segment_start, segment_end],
+                            'text': segment.get('text', '').strip()
+                        })
+                
+                elif chunk_result and 'text' in chunk_result and chunk_result['text'].strip():
+                    # Single text result
+                    all_segments.append({
+                        'timestamp': [start_time, end_time],
+                        'text': chunk_result['text'].strip()
+                    })
+                
+            except Exception as e:
+                logger.warning(f"Error processing chunk {i+1}: {e}")
+                continue
+        
+        # Merge overlapping segments and deduplicate
+        merged_segments = merge_overlapping_segments(all_segments)
+        
+        # Create final result
+        full_text = " ".join([seg.get('text', '') for seg in merged_segments if seg.get('text', '').strip()])
+        
+        logger.info(f"Chunked transcription complete: {len(merged_segments)} segments, {len(full_text)} characters")
+        
+        return {
+            'chunks': merged_segments,
+            'text': full_text
+        }
+        
+    except Exception as e:
+        logger.error(f"Chunked transcription error: {e}")
+        raise
+
+
+def merge_overlapping_segments(segments):
+    """
+    Enhanced merging of overlapping segments from chunked transcription with intelligent boundary detection.
+    """
+    if not segments:
+        return []
+    
+    # Sort segments by start time
+    sorted_segments = sorted(segments, key=lambda x: x['timestamp'][0])
+    
+    merged = []
+    
+    for segment in sorted_segments:
+        text = segment.get('text', '').strip()
+        if not text:
+            continue
+            
+        # Check if this segment overlaps with the last merged segment
+        if merged:
+            last_segment = merged[-1]
+            last_end = last_segment['timestamp'][1]
+            current_start = segment['timestamp'][0]
+            
+            # Calculate overlap
+            overlap_duration = max(0, last_end - current_start)
+            
+            if overlap_duration > 0:
+                # Analyze text overlap to determine best merge strategy
+                last_text = last_segment.get('text', '').strip()
+                current_text = text
+                
+                # Check for exact duplicates or near duplicates
+                if current_text == last_text:
+                    # Exact duplicate, skip
+                    continue
+                
+                # Check for partial overlaps
+                last_words = last_text.lower().split()
+                current_words = current_text.lower().split()
+                
+                # Find overlapping words at boundaries
+                overlap_words = find_word_overlap(last_words, current_words)
+                
+                if overlap_words > len(current_words) * 0.3:  # Significant word overlap
+                    # Try to merge intelligently
+                    merged_text = smart_text_merge(last_text, current_text, overlap_words)
+                    
+                    if merged_text:
+                        # Update the last segment with merged text and extended end time
+                        last_segment['text'] = merged_text
+                        last_segment['timestamp'][1] = segment['timestamp'][1]
+                        continue
+                
+                # If overlap is small, adjust boundary to minimize cutoff
+                if overlap_duration < 1.0:  # Less than 1 second overlap
+                    # Adjust the boundary to the midpoint
+                    midpoint = (last_end + current_start) / 2
+                    last_segment['timestamp'][1] = midpoint
+                    segment['timestamp'][0] = midpoint
+        
+        merged.append(segment)
+    
+    return merged
+
+
+def find_word_overlap(words1, words2):
+    """Find overlapping words between two word lists."""
+    # Check for overlap at the end of words1 and beginning of words2
+    max_overlap = min(len(words1), len(words2))
+    
+    for i in range(max_overlap, 0, -1):
+        if words1[-i:] == words2[:i]:
+            return i
+    
+    return 0
+
+
+def smart_text_merge(text1, text2, overlap_words):
+    """Intelligently merge two texts with overlapping words."""
+    words1 = text1.split()
+    words2 = text2.split()
+    
+    if overlap_words > 0 and overlap_words <= len(words1) and overlap_words <= len(words2):
+        # Remove overlapping words from the second text
+        merged_words = words1 + words2[overlap_words:]
+        return ' '.join(merged_words)
+    
+    # Fallback: simple concatenation
+    return f"{text1} {text2}"
 
 
 async def run_diarization(waveform: torch.Tensor, sample_rate: int) -> Any:

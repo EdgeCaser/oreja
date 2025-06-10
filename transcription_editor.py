@@ -197,11 +197,17 @@ class TranscriptionEditor:
                                    relief=tk.FLAT, padx=15, pady=5)
         add_speaker_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        merge_speaker_btn = tk.Button(add_speaker_frame, text="🔗 Merge Speakers", 
-                                     command=self.show_merge_speakers_dialog,
+        merge_speaker_btn = tk.Button(add_speaker_frame, text="🔗 Merge in Transcription", 
+                                     command=self.show_transcription_merge_dialog,
                                      bg='#9b59b6', fg='white', font=("Arial", 10, "bold"),
                                      relief=tk.FLAT, padx=15, pady=5)
         merge_speaker_btn.pack(side=tk.LEFT, padx=5)
+        
+        save_speakers_btn = tk.Button(add_speaker_frame, text="💾 Save to Database", 
+                                     command=self.save_speakers_to_database,
+                                     bg='#27ae60', fg='white', font=("Arial", 10, "bold"),
+                                     relief=tk.FLAT, padx=15, pady=5)
+        save_speakers_btn.pack(side=tk.LEFT, padx=5)
         
         # Scrollable speaker mapping area
         mapping_frame = tk.Frame(speaker_panel, bg='#ecf0f1')
@@ -968,6 +974,311 @@ class TranscriptionEditor:
         
         target_listbox.bind('<<ListboxSelect>>', on_target_select)
     
+    def show_transcription_merge_dialog(self):
+        """Show dialog to merge speakers within the current transcription"""
+        if len(self.speaker_names) < 2:
+            messagebox.showinfo("No Merge Needed", "Need at least 2 speakers to merge.")
+            return
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("🔗 Merge Speakers in Transcription")
+        dialog.geometry("500x400")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        # Header
+        tk.Label(dialog, text="🔗 Merge Speakers in This Transcription", 
+                font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+        
+        tk.Label(dialog, text="Merge duplicate speakers in this transcription only\n(does not affect the speaker database)", 
+                font=("Arial", 11), bg='#f0f0f0', fg='#7f8c8d').pack(pady=(0, 15))
+        
+        # Create speaker selection frame
+        selection_frame = tk.Frame(dialog, bg='#f0f0f0')
+        selection_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Source speaker (to be replaced)
+        source_frame = tk.Frame(selection_frame, bg='#f0f0f0')
+        source_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(source_frame, text="Speaker to replace:", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0', fg='#e74c3c').pack(anchor=tk.W)
+        
+        source_var = tk.StringVar()
+        source_combo = ttk.Combobox(source_frame, textvariable=source_var, 
+                                   values=list(self.speaker_names), width=40, state="readonly")
+        source_combo.pack(fill=tk.X, pady=5)
+        
+        # Show segment count for selected source
+        source_count_label = tk.Label(source_frame, text="", 
+                                     font=("Arial", 9), bg='#f0f0f0', fg='#7f8c8d')
+        source_count_label.pack(anchor=tk.W)
+        
+        # Target speaker (to keep)
+        target_frame = tk.Frame(selection_frame, bg='#f0f0f0')
+        target_frame.pack(fill=tk.X, pady=10)
+        
+        tk.Label(target_frame, text="Merge into speaker:", 
+                font=("Arial", 10, "bold"), bg='#f0f0f0', fg='#2ecc71').pack(anchor=tk.W)
+        
+        target_var = tk.StringVar()
+        target_combo = ttk.Combobox(target_frame, textvariable=target_var, 
+                                   values=list(self.speaker_names), width=40, state="readonly")
+        target_combo.pack(fill=tk.X, pady=5)
+        
+        # Show segment count for selected target
+        target_count_label = tk.Label(target_frame, text="", 
+                                     font=("Arial", 9), bg='#f0f0f0', fg='#7f8c8d')
+        target_count_label.pack(anchor=tk.W)
+        
+        # Update counts when selection changes
+        def update_counts(*args):
+            source_speaker = source_var.get()
+            target_speaker = target_var.get()
+            
+            if source_speaker:
+                source_count = len([s for s in self.segments if s.get('speaker') == source_speaker])
+                source_count_label.config(text=f"({source_count} segments will be moved)")
+            else:
+                source_count_label.config(text="")
+            
+            if target_speaker:
+                target_count = len([s for s in self.segments if s.get('speaker') == target_speaker])
+                target_count_label.config(text=f"({target_count} segments + moved segments)")
+            else:
+                target_count_label.config(text="")
+        
+        source_var.trace('w', update_counts)
+        target_var.trace('w', update_counts)
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='#f0f0f0')
+        button_frame.pack(pady=20)
+        
+        def perform_transcription_merge():
+            source_speaker = source_var.get()
+            target_speaker = target_var.get()
+            
+            if not source_speaker or not target_speaker:
+                messagebox.showerror("Error", "Please select both source and target speakers.")
+                return
+            
+            if source_speaker == target_speaker:
+                messagebox.showerror("Error", "Cannot merge a speaker with itself.")
+                return
+            
+            # Count segments to be merged
+            segments_to_merge = [s for s in self.segments if s.get('speaker') == source_speaker]
+            
+            if not segments_to_merge:
+                messagebox.showwarning("Nothing to Merge", f"No segments found for speaker '{source_speaker}'.")
+                return
+            
+            # Confirm the merge
+            confirm_msg = (
+                f"Merge '{source_speaker}' into '{target_speaker}'?\n\n"
+                f"• {len(segments_to_merge)} segments will be moved\n"
+                f"• Speaker '{source_speaker}' will be removed from transcription\n"
+                f"• This only affects the current transcription\n\n"
+                f"Continue?"
+            )
+            
+            if messagebox.askyesno("Confirm Merge", confirm_msg):
+                # Perform the merge
+                merged_count = 0
+                for segment in self.segments:
+                    if segment.get('speaker') == source_speaker:
+                        segment['speaker'] = target_speaker
+                        merged_count += 1
+                
+                # Remove source speaker from speaker names
+                self.speaker_names.discard(source_speaker)
+                
+                # Mark as having changes
+                self.has_unsaved_changes = True
+                
+                # Refresh UI
+                self.update_stats()
+                self.setup_speaker_mapping()
+                self.update_preview()
+                
+                dialog.destroy()
+                messagebox.showinfo("✅ Merge Complete", 
+                                  f"Successfully merged {merged_count} segments from '{source_speaker}' into '{target_speaker}'!")
+        
+        merge_btn = tk.Button(button_frame, text="🔗 Merge Speakers", command=perform_transcription_merge,
+                             bg='#e74c3c', fg='white', font=("Arial", 10, "bold"),
+                             padx=20, pady=5)
+        merge_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        cancel_btn = tk.Button(button_frame, text="❌ Cancel", command=dialog.destroy,
+                              bg='#95a5a6', fg='white', font=("Arial", 10, "bold"),
+                              padx=20, pady=5)
+        cancel_btn.pack(side=tk.LEFT)
+
+    def save_speakers_to_database(self):
+        """Save new speakers from transcription to the speaker database"""
+        try:
+            # Get all unique speakers from current transcription
+            current_speakers = list(self.speaker_names)
+            
+            if not current_speakers:
+                messagebox.showinfo("No Speakers", "No speakers found in the current transcription.")
+                return
+            
+            # Get existing speakers from database
+            existing_speakers = self.get_enrolled_speakers()
+            existing_names = [s.get('name', '') for s in existing_speakers] if existing_speakers else []
+            
+            # Find new speakers not in database
+            new_speakers = [s for s in current_speakers if s not in existing_names 
+                           and not s.startswith(('SPEAKER_', 'Unknown Speaker', 'AUTO_SPEAKER'))]
+            
+            if not new_speakers:
+                messagebox.showinfo("No New Speakers", 
+                                  "All speakers are already in the database or are auto-generated names.\n\n"
+                                  "Only manually named speakers can be saved to the database.")
+                return
+            
+            # Show confirmation dialog
+            dialog = tk.Toplevel(self.root)
+            dialog.title("💾 Save Speakers to Database")
+            dialog.geometry("500x400")
+            dialog.configure(bg='#f0f0f0')
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # Center the dialog
+            dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+            
+            # Header
+            tk.Label(dialog, text="💾 Save Speakers to Database", 
+                    font=("Arial", 14, "bold"), bg='#f0f0f0', fg='#2c3e50').pack(pady=(20, 10))
+            
+            tk.Label(dialog, text=f"Found {len(new_speakers)} new speakers to save:", 
+                    font=("Arial", 11), bg='#f0f0f0').pack(pady=(0, 10))
+            
+            # List of new speakers
+            listbox_frame = tk.Frame(dialog, bg='#f0f0f0')
+            listbox_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+            
+            speaker_listbox = tk.Listbox(listbox_frame, font=("Arial", 10), height=8, selectmode=tk.MULTIPLE)
+            scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical", command=speaker_listbox.yview)
+            speaker_listbox.configure(yscrollcommand=scrollbar.set)
+            
+            for speaker in new_speakers:
+                # Count segments for this speaker
+                segment_count = len([s for s in self.segments if s.get('speaker') == speaker])
+                speaker_listbox.insert(tk.END, f"{speaker} ({segment_count} segments)")
+                # Pre-select all speakers
+                speaker_listbox.selection_set(tk.END)
+            
+            speaker_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Instructions
+            tk.Label(dialog, text="Select speakers to save (pre-selected). Requires audio segments for voice training.", 
+                    font=("Arial", 9), bg='#f0f0f0', fg='#7f8c8d', wraplength=450).pack(pady=10)
+            
+            # Buttons
+            button_frame = tk.Frame(dialog, bg='#f0f0f0')
+            button_frame.pack(pady=15)
+            
+            def save_selected_speakers():
+                selected_indices = speaker_listbox.curselection()
+                if not selected_indices:
+                    messagebox.showwarning("No Selection", "Please select speakers to save.")
+                    return
+                
+                selected_speakers = [new_speakers[i] for i in selected_indices]
+                
+                # Save each selected speaker
+                saved_count = 0
+                failed_count = 0
+                
+                for speaker_name in selected_speakers:
+                    try:
+                        # Collect audio segments for this speaker
+                        speaker_segments = [s for s in self.segments if s.get('speaker') == speaker_name]
+                        
+                        if not speaker_segments:
+                            continue
+                        
+                        # Send speaker to backend for enrollment
+                        # Note: This requires audio file and segments for voice training
+                        if hasattr(self, 'current_audio_file') and self.current_audio_file:
+                            response = requests.post(
+                                "http://127.0.0.1:8000/speakers/enroll_from_segments",
+                                json={
+                                    "speaker_name": speaker_name,
+                                    "audio_file": self.current_audio_file,
+                                    "segments": [{
+                                        "start": seg.get('start', 0),
+                                        "end": seg.get('end', 0),
+                                        "text": seg.get('text', '')
+                                    } for seg in speaker_segments[:10]]  # Use up to 10 segments for training
+                                },
+                                timeout=30
+                            )
+                            
+                            if response.status_code == 200:
+                                saved_count += 1
+                                print(f"✅ Saved speaker: {speaker_name}")
+                            else:
+                                failed_count += 1
+                                print(f"❌ Failed to save speaker: {speaker_name} - {response.text}")
+                        else:
+                            # Save without voice training (name only)
+                            response = requests.post(
+                                "http://127.0.0.1:8000/speakers/create_profile",
+                                json={"speaker_name": speaker_name},
+                                timeout=10
+                            )
+                            
+                            if response.status_code == 200:
+                                saved_count += 1
+                                print(f"✅ Created speaker profile: {speaker_name}")
+                            else:
+                                failed_count += 1
+                                print(f"❌ Failed to create speaker profile: {speaker_name}")
+                                
+                    except Exception as e:
+                        failed_count += 1
+                        print(f"❌ Error saving speaker {speaker_name}: {e}")
+                
+                # Show results
+                dialog.destroy()
+                
+                if saved_count > 0 and failed_count == 0:
+                    messagebox.showinfo("✅ Success", 
+                                      f"Successfully saved {saved_count} speakers to the database!")
+                elif saved_count > 0:
+                    messagebox.showwarning("⚠️ Partial Success", 
+                                         f"Saved {saved_count} speakers successfully.\n"
+                                         f"{failed_count} speakers failed to save.\n\n"
+                                         f"Check console for details.")
+                else:
+                    messagebox.showerror("❌ Failed", 
+                                       f"Failed to save any speakers.\n"
+                                       f"Make sure the Oreja backend is running on port 8000.")
+            
+            save_btn = tk.Button(button_frame, text="💾 Save to Database", command=save_selected_speakers,
+                               bg='#27ae60', fg='white', font=("Arial", 10, "bold"),
+                               padx=20, pady=5)
+            save_btn.pack(side=tk.LEFT, padx=(0, 10))
+            
+            cancel_btn = tk.Button(button_frame, text="❌ Cancel", command=dialog.destroy,
+                                  bg='#95a5a6', fg='white', font=("Arial", 10, "bold"),
+                                  padx=20, pady=5)
+            cancel_btn.pack(side=tk.LEFT)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save speakers: {e}")
+
     def merge_speakers_in_backend(self, source_id, target_id, final_name, dialog):
         """Perform the actual speaker merge via backend API"""
         try:
@@ -1986,16 +2297,47 @@ class TranscriptionEditor:
             messagebox.showerror("Error", f"Failed to save corrected transcription: {e}")
     
     def send_feedback(self):
-        """Send speaker corrections back to Oreja for learning"""
+        """Send speaker corrections back to Oreja for learning with enhanced error handling"""
         mapping = self.get_speaker_mapping()
         
         if not mapping:
             messagebox.showinfo("No Changes", "No speaker corrections to send.")
             return
         
+        # First, test backend connectivity
+        try:
+            test_response = requests.get("http://127.0.0.1:8000/health", timeout=5)
+            if test_response.status_code != 200:
+                messagebox.showerror("Backend Error", 
+                                   f"Backend server is not responding properly.\n"
+                                   f"Status: {test_response.status_code}\n\n"
+                                   f"Please ensure the Oreja backend is running on port 8000.")
+                return
+        except requests.exceptions.ConnectionError:
+            messagebox.showerror("Connection Error", 
+                               "Cannot connect to Oreja backend server.\n\n"
+                               "Please ensure:\n"
+                               "• Backend server is running on port 8000\n"
+                               "• No firewall is blocking the connection\n"
+                               "• The server started without errors")
+            return
+        except requests.exceptions.Timeout:
+            messagebox.showerror("Timeout Error", 
+                               "Backend server is not responding (timeout).\n\n"
+                               "The server may be overloaded or stuck.\n"
+                               "Try restarting the backend server.")
+            return
+        except Exception as e:
+            messagebox.showerror("Network Error", 
+                               f"Network error while testing backend connection:\n{e}\n\n"
+                               "Please check your network connection and try again.")
+            return
+        
+        # Backend is accessible, proceed with sending feedback
         try:
             success_count = 0
             error_count = 0
+            detailed_errors = []
             
             # Send each mapping individually using the name_mapping endpoint
             for old_speaker_id, new_speaker_name in mapping.items():
@@ -2006,35 +2348,68 @@ class TranscriptionEditor:
                             "old_speaker_id": old_speaker_id,
                             "new_speaker_name": new_speaker_name
                         },
-                        timeout=10
+                        timeout=15  # Increased timeout for individual requests
                     )
                     
                     if response.status_code == 200:
                         success_count += 1
+                        print(f"✅ Successfully mapped: {old_speaker_id} → {new_speaker_name}")
                     else:
                         error_count += 1
-                        print(f"Failed to map {old_speaker_id} -> {new_speaker_name}: {response.text}")
+                        error_detail = f"{old_speaker_id} → {new_speaker_name}: HTTP {response.status_code}"
+                        try:
+                            error_detail += f" - {response.json().get('detail', response.text)}"
+                        except:
+                            error_detail += f" - {response.text}"
+                        detailed_errors.append(error_detail)
+                        print(f"❌ Failed to map {old_speaker_id} → {new_speaker_name}: {error_detail}")
                         
+                except requests.exceptions.Timeout:
+                    error_count += 1
+                    error_detail = f"{old_speaker_id} → {new_speaker_name}: Request timeout"
+                    detailed_errors.append(error_detail)
+                    print(f"⏰ Timeout mapping {old_speaker_id} → {new_speaker_name}")
+                    
                 except Exception as e:
                     error_count += 1
-                    print(f"Error mapping {old_speaker_id} -> {new_speaker_name}: {e}")
+                    error_detail = f"{old_speaker_id} → {new_speaker_name}: {str(e)}"
+                    detailed_errors.append(error_detail)
+                    print(f"❌ Error mapping {old_speaker_id} → {new_speaker_name}: {e}")
             
-            # Show results
+            # Show detailed results
             if success_count > 0 and error_count == 0:
-                messagebox.showinfo("Success", f"Successfully sent {success_count} speaker corrections to Oreja!\n\n"
-                                   "The system will learn from your corrections to improve "
-                                   "future speaker recognition.")
+                messagebox.showinfo("✅ Feedback Sent Successfully", 
+                                   f"Successfully sent {success_count} speaker corrections to Oreja!\n\n"
+                                   "🧠 The system will learn from your corrections to improve "
+                                   "future speaker recognition accuracy.")
             elif success_count > 0:
-                messagebox.showwarning("Partial Success", f"Sent {success_count} corrections successfully.\n"
-                                      f"{error_count} corrections failed.\n\n"
-                                      "Check console for details.")
+                error_summary = "\n".join(detailed_errors[:3])  # Show first 3 errors
+                if len(detailed_errors) > 3:
+                    error_summary += f"\n... and {len(detailed_errors) - 3} more errors"
+                
+                messagebox.showwarning("⚠️ Partial Success", 
+                                     f"✅ Sent {success_count} corrections successfully\n"
+                                     f"❌ {error_count} corrections failed\n\n"
+                                     f"Errors:\n{error_summary}\n\n"
+                                     f"Check console for full details.")
             else:
-                messagebox.showerror("Error", f"Failed to send speaker corrections.\n"
-                                    f"All {error_count} corrections failed.\n\n"
-                                    "Make sure the Oreja backend is running.")
+                error_summary = "\n".join(detailed_errors[:5])  # Show first 5 errors
+                messagebox.showerror("❌ Feedback Failed", 
+                                   f"Failed to send any speaker corrections.\n"
+                                   f"All {error_count} corrections failed.\n\n"
+                                   f"Errors:\n{error_summary}\n\n"
+                                   f"This usually indicates:\n"
+                                   f"• Backend API changes\n"
+                                   f"• Database connection issues\n"
+                                   f"• Server overload\n\n"
+                                   f"Try restarting the backend server.")
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to send feedback to Oreja: {e}")
+            messagebox.showerror("Unexpected Error", 
+                               f"An unexpected error occurred while sending feedback:\n\n"
+                               f"{str(e)}\n\n"
+                               f"Please check the console for more details and\n"
+                               f"consider restarting the application.")
     
     def open_file(self):
         """Open a transcription file"""
