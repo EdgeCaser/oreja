@@ -17,15 +17,47 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Input;
+using System.Diagnostics;
 
 namespace Oreja;
 
-// Settings class for speaker persistence
-public class SpeakerSettings
+// Persisted application settings. Originally only speaker data was saved here (and only on
+// clean shutdown); this now covers everything the app should remember between launches. The
+// file name and the original three properties are kept as-is so an existing settings file on
+// disk keeps loading (missing new properties just take their default below - no migration step
+// needed).
+public class AppSettings
 {
+    // --- Speaker data (existing) ---
     public List<string> AvailableSpeakers { get; set; } = new List<string>();
     public Dictionary<string, string> SpeakerNameMappings { get; set; } = new Dictionary<string, string>();
     public int NextSpeakerNumber { get; set; } = 5;
+
+    // --- Device selection (NAudio MMDevice.ID strings; null/absent = "use the first device") ---
+    public string? MicDeviceId { get; set; }
+    public string? SystemDeviceId { get; set; }
+
+    // --- Privacy ---
+    public bool PrivacyMode { get; set; } = false;
+
+    // --- Window geometry. Left/Top are NaN until the user has moved the window at least once,
+    // which we treat as "let WPF center the window" instead of a saved position. ---
+    public double WindowWidth { get; set; } = 800;
+    public double WindowHeight { get; set; } = 800;
+    public double WindowLeft { get; set; } = double.NaN;
+    public double WindowTop { get; set; } = double.NaN;
+
+    // --- Backend connection ---
+    public string BackendUrl { get; set; } = "http://127.0.0.1:8000";
+    public bool AutoStartBackend { get; set; } = true;
+
+    // --- Audio ---
+    public float MicGain { get; set; } = 1.0f;
+
+    // --- Keyword alerts: any transcript segment whose speaker or text contains one of these
+    // (case-insensitive) is highlighted and flashes the status text. Edited via the inline
+    // "🔔 Keyword Alerts" expander above the transcript. ---
+    public List<string> KeywordAlerts { get; set; } = new List<string>();
 }
 
 /// <summary>
@@ -64,16 +96,63 @@ public partial class App : Application
     
     // Volume level tracking
     private float _microphoneLevel = 0f;
-    
+
+    // Microphone input gain.
+    // 1.0 = pass captured samples straight through (no destructive amplification).
+    // Values > 1.0 amplify quiet microphones; the result is clamped to the Int16 range.
+    // Persisted as AppSettings.MicGain (loaded/saved by LoadAppSettings/SaveAppSettings).
+    // TODO: no slider/control adjusts this yet - a later change can wire one up to the setting.
+    private float _microphoneGain = 1.0f;
+
     // Transcription components
     private HttpClient? _httpClient;
-    private List<byte> _audioBuffer = new List<byte>();
-    private List<byte> _systemAudioBuffer = new List<byte>(); // New: System audio buffer
     private DispatcherTimer? _transcriptionTimer;
-    private const string BACKEND_URL = "http://127.0.0.1:8000";
+    private const string DEFAULT_BACKEND_URL = "http://127.0.0.1:8000";
+    // Backing field for the configurable backend base URL (settings.BackendUrl). Kept mutable -
+    // unlike the old const - so a saved setting actually takes effect.
+    private string _backendUrl = DEFAULT_BACKEND_URL;
     private const int AUDIO_CHUNK_DURATION_MS = 5000; // Send audio every 5 seconds (increased from 3)
-    private bool _isProcessingTranscription = false; // Prevent overlapping requests
-    
+
+    // --- Backend status indicator -------------------------------------------------------
+    private enum BackendStatus { Connecting, Connected, Offline }
+    private Ellipse? _backendStatusDot;
+    private TextBlock? _backendStatusText;
+    private DispatcherTimer? _backendHealthTimer;
+    private bool _backendHealthCheckInFlight = false;
+    private string? _lastBackendError;
+
+    // Best-effort auto-started backend process. Only killed on exit if we are the ones who
+    // started it - an already-running backend the user launched themselves is left alone.
+    private Process? _autoStartedBackendProcess;
+    private bool _weStartedBackend = false;
+
+    // Debounces settings writes so dragging/resizing the window doesn't hammer the disk.
+    private DispatcherTimer? _settingsSaveTimer;
+    private bool _settingsLoaded = false; // Guard against saving while still applying loaded settings.
+
+    // Canonical wire format for everything we send to the backend: 16 kHz mono 16-bit LE PCM.
+    private const int TRANSCRIPTION_SAMPLE_RATE = 16000;
+    private const int TRANSCRIPTION_CHANNELS = 1;
+    private const int TRANSCRIPTION_BYTES_PER_SAMPLE = 2;
+
+    // Never keep more than this much un-sent audio per source. If the backend is down or
+    // slow the oldest audio is dropped instead of growing the buffer without bound.
+    private const int MAX_BUFFERED_AUDIO_SECONDS = 30;
+    private const int MAX_BUFFERED_AUDIO_BYTES =
+        TRANSCRIPTION_SAMPLE_RATE * TRANSCRIPTION_CHANNELS * TRANSCRIPTION_BYTES_PER_SAMPLE * MAX_BUFFERED_AUDIO_SECONDS;
+
+    // Independent per-source capture/dispatch state. Previously a single shared
+    // "_isProcessingTranscription" flag was used, which meant the microphone always won the
+    // race and the system-audio chunk was cleared and then dropped at the guard - the far end
+    // of the call was never transcribed. Each source now has its own buffer, lock and in-flight
+    // flag so the two never interfere.
+    private readonly AudioSourceState _micSource = new AudioSourceState("Microphone", "mic");
+    private readonly AudioSourceState _systemSource = new AudioSourceState("System Audio", "system");
+
+    // Converts WASAPI loopback audio (whatever format the endpoint reports) to the wire format.
+    private readonly SystemAudioFormatConverter _systemAudioConverter = new SystemAudioFormatConverter();
+    private bool _systemAudioFormatUnsupported = false; // Set once if the format cannot be converted
+
     // Speaker renaming and save functionality
     private Dictionary<string, string> _speakerNames = new Dictionary<string, string>();
     private Button? _saveTranscriptionButton;
@@ -86,7 +165,7 @@ public partial class App : Application
     // Speaker persistence settings
     private const string SETTINGS_FILE = "oreja_speaker_settings.json";
     private string? _settingsFilePath;
-    private SpeakerSettings _speakerSettings = new SpeakerSettings();
+    private AppSettings _appSettings = new AppSettings();
 
     // Keep track of all speaker ComboBoxes for refreshing
     private List<ComboBox> _speakerComboBoxes = new List<ComboBox>();
@@ -107,7 +186,22 @@ public partial class App : Application
     private Button? _selectAllButton;
     private Button? _clearSelectionButton;
     private List<CheckBox> _segmentCheckBoxes = new List<CheckBox>();
-    
+
+    // Transcript search: a TextBox above the transcript filters segment cards by text/speaker.
+    // Filtering itself is applied via ApplySearchFilter(), debounced ~300ms from keystrokes by
+    // _searchDebounceTimer so a fast typist doesn't trigger a filter pass on every character.
+    private TextBox? _searchTextBox;
+    private TextBlock? _searchMatchCountText;
+    private DispatcherTimer? _searchDebounceTimer;
+    private string _currentSearchQuery = "";
+
+    // Keyword alerts: comma-separated list edited via _keywordAlertsTextBox (inline expander),
+    // persisted as AppSettings.KeywordAlerts. Matching segments get a highlighted card
+    // (ApplyKeywordAlertHighlight) and a brief status-text flash when they arrive live.
+    private TextBox? _keywordAlertsTextBox;
+    private static readonly Brush _keywordAlertCardBackground = new SolidColorBrush(Color.FromRgb(0xFF, 0xF3, 0xCD));
+    private static readonly Brush _keywordAlertCardBorder = Brushes.Goldenrod;
+
     // Speaker color coding
     private Dictionary<string, Brush> _speakerColors = new Dictionary<string, Brush>();
     private readonly Brush[] _availableColors = {
@@ -157,6 +251,16 @@ public partial class App : Application
         public double SentimentConfidence { get; set; }
         public bool IsSelected { get; set; } = false;
         public List<TranscriptionSegment>? SplitSegments { get; set; } // For split functionality
+
+        // --- Live UI element cache (not persisted - these are WPF elements, not settings data)---
+        // Populated when this segment's card is built (AddTranscriptionSegment for a newly
+        // arrived segment, RefreshTranscriptionDisplay for a full rebuild) so a speaker rename,
+        // privacy-mode toggle, or keyword-alert re-scan can patch the existing card in place
+        // instead of tearing down and rebuilding every segment card in the transcript.
+        public Border? CardElement { get; set; }
+        public ComboBox? SpeakerComboBoxElement { get; set; }
+        public TextBox? TextDisplayElement { get; set; }
+        public TextBlock? AlertBellElement { get; set; }
     }
 
     // Smart speaker filtering for dropdown
@@ -302,7 +406,7 @@ public partial class App : Application
                 {
                     _availableSpeakers.Add(selectedSpeaker);
                     RefreshAllSpeakerDropdowns();
-                    SaveSpeakerSettings();
+                    SaveAppSettings();
                 }
                 
                 comboBox.SelectedItem = selectedSpeaker;
@@ -327,8 +431,11 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        // Allocate console for debugging
+#if DEBUG
+        // Allocate a console window for debug output only - Release builds run silently
+        // with no visible console, which is what an installed app should do.
         AllocConsole();
+#endif
         Console.WriteLine("=== Oreja Application Starting ===");
         
         base.OnStartup(e);
@@ -350,11 +457,17 @@ public partial class App : Application
             var orejaFolderPath = System.IO.Path.Combine(appDataPath, "Oreja");
             Directory.CreateDirectory(orejaFolderPath); // Ensure directory exists
             _settingsFilePath = System.IO.Path.Combine(orejaFolderPath, SETTINGS_FILE);
-            
-            // Load speakers from enhanced backend (with fallback to local settings)
+
+            // Load persisted settings synchronously (speaker data, backend URL, privacy mode,
+            // mic gain, window geometry, device IDs) before the window is built so geometry and
+            // the backend URL are available immediately. Device selection is restored later,
+            // once LoadAudioDevices() has actually enumerated the devices to match against.
+            LoadAppSettings();
+
+            // Load speakers from enhanced backend (with fallback to local settings loaded above)
             Console.WriteLine("🔄 Initializing enhanced speaker system...");
             _ = LoadSpeakersFromBackend();
-            
+
             Console.WriteLine("Creating window...");
             // Create window entirely in code to bypass XAML issues
             var window = new Window
@@ -366,21 +479,31 @@ public partial class App : Application
                 WindowState = WindowState.Normal,
                 Topmost = false
             };
+            ApplyWindowGeometry(window, _appSettings);
             
             // Use Grid instead of StackPanel for better layout control
             var mainGrid = new Grid { Margin = new Thickness(20) };
             
             // Define rows for the grid
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Title
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Microphone section
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // System audio section
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Volume meters
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Control buttons
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Status text
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Transcription label
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Instructions
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Multi-select toolbar
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Transcription area (takes remaining space)
+            // NOTE: this list must have exactly one entry per Grid.SetRow(..., currentRow++) call
+            // below, in the same order - a previous mismatch here (the "Privacy row" had no
+            // dedicated entry, so every row from Privacy onward silently used the next row's
+            // definition) left the transcription area's Star sizing attached to the multi-select
+            // toolbar instead of the scroll viewer, so the transcript no longer filled the window.
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 0: Title
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 1: Microphone section
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 2: System audio section
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 3: Volume meters
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 4: Control buttons
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 5: Backend status indicator
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 6: Privacy mode row
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 7: Status text
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 8: Transcription label
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 9: Instructions
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 10: Keyword alerts expander
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 11: Transcript search row
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 12: Multi-select toolbar
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 13: Transcription area (takes remaining space)
             
             int currentRow = 0;
             
@@ -548,7 +671,37 @@ public partial class App : Application
             buttonPanel.Children.Add(_monitoringToggleButton);
             buttonPanel.Children.Add(_saveTranscriptionButton);
             Grid.SetRow(buttonPanel, currentRow++);
-            
+
+            // Backend status indicator: a small colored dot + short text, updated by the
+            // periodic health poll (see PollBackendHealthAsync / UpdateBackendStatusUI).
+            var backendStatusPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            _backendStatusDot = new Ellipse
+            {
+                Width = 10,
+                Height = 10,
+                Fill = Brushes.Gray,
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _backendStatusText = new TextBlock
+            {
+                Text = "Backend: checking...",
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = Brushes.Gray
+            };
+
+            backendStatusPanel.Children.Add(_backendStatusDot);
+            backendStatusPanel.Children.Add(_backendStatusText);
+            Grid.SetRow(backendStatusPanel, currentRow++);
+
             // Privacy Mode section
             var privacyPanel = new StackPanel 
             { 
@@ -567,7 +720,11 @@ public partial class App : Application
             };
             _privacyModeCheckBox.Checked += PrivacyModeCheckBox_Changed;
             _privacyModeCheckBox.Unchecked += PrivacyModeCheckBox_Changed;
-            
+            // Restore the saved privacy mode. Both _statusText and _transcriptionPanel are still
+            // null at this point in window construction; the handler null-checks both, so this
+            // is safe and simply primes _privacyModeEnabled before anything is shown.
+            _privacyModeCheckBox.IsChecked = _appSettings.PrivacyMode;
+
             var privacyHelp = new TextBlock
             {
                 Text = "Analysis only - no verbatim transcription stored (legal-safe)",
@@ -617,29 +774,113 @@ public partial class App : Application
             
             var instructionsTitle = new TextBlock
             {
-                Text = "💡 Speaker Assignment Help:",
+                Text = "💡 Transcript Help:",
                 FontWeight = FontWeights.Bold,
                 FontSize = 12,
                 Margin = new Thickness(0, 0, 0, 5)
             };
-            
+
             var instructionsText = new TextBlock
             {
-                Text = "• Use dropdowns to change speaker assignments\n• Click number buttons (1-4) for quick assignment\n• Click '+' to create new speakers\n• Click '×' to delete speakers from the list\n• Type in dropdown to create custom speaker names",
+                Text = "• Use the speaker dropdown on a segment to rename or reassign it (type a new name to create one)\n• Click '+' to create a new speaker, '🔍' to browse auto-detected speakers, '×' to delete one\n• Use Search above the transcript to filter segments by text or speaker (Esc clears)\n• Expand 🔔 Keyword Alerts to highlight segments containing chosen words as they arrive\n• Right-click a segment's text to split it, or double-click to edit it directly\n• Save Transcription exports to JSON, TXT, SRT, WebVTT, or Markdown",
                 FontSize = 11,
                 Foreground = Brushes.DarkBlue,
                 TextWrapping = TextWrapping.Wrap
             };
-            
+
             instructionsPanel.Children.Add(instructionsTitle);
             instructionsPanel.Children.Add(instructionsText);
             instructionsBorder.Child = instructionsPanel;
             Grid.SetRow(instructionsBorder, currentRow++);
-            
+
+            // Keyword alerts: collapsed-by-default expander holding a comma-separated keyword
+            // list (persisted as AppSettings.KeywordAlerts). Any segment whose speaker or text
+            // contains one of these (case-insensitive, whole-word-ish) gets a highlighted card
+            // and a 🔔 prefix; a live match also flashes the status text briefly.
+            var keywordAlertsExpander = new Expander
+            {
+                Header = "🔔 Keyword Alerts",
+                FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 8),
+                IsExpanded = false
+            };
+
+            var keywordAlertsPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(4, 6, 4, 4)
+            };
+
+            _keywordAlertsTextBox = new TextBox
+            {
+                Width = 320,
+                Padding = new Thickness(4, 2, 4, 2),
+                FontSize = 12,
+                Text = string.Join(", ", _appSettings.KeywordAlerts),
+                ToolTip = "Comma-separated keywords. Matching segments are highlighted."
+            };
+
+            var applyKeywordAlertsButton = new Button
+            {
+                Content = "Apply",
+                Width = 70,
+                Height = 24,
+                Margin = new Thickness(6, 0, 0, 0),
+                FontSize = 11
+            };
+            applyKeywordAlertsButton.Click += ApplyKeywordAlertsButton_Click;
+
+            keywordAlertsPanel.Children.Add(_keywordAlertsTextBox);
+            keywordAlertsPanel.Children.Add(applyKeywordAlertsButton);
+            keywordAlertsExpander.Content = keywordAlertsPanel;
+            Grid.SetRow(keywordAlertsExpander, currentRow++);
+
+            // Transcript search: filters segment cards by text or speaker name as the user types.
+            // Filtering is debounced ~300ms (SearchTextBox_TextChanged / _searchDebounceTimer) so
+            // fast typing doesn't re-scan the transcript on every keystroke; Esc clears it.
+            var searchPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+
+            var searchLabel = new TextBlock
+            {
+                Text = "🔎 Search:",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 6, 0),
+                FontSize = 12
+            };
+
+            _searchTextBox = new TextBox
+            {
+                Width = 220,
+                Padding = new Thickness(4, 2, 4, 2),
+                FontSize = 12,
+                ToolTip = "Filter the transcript by text or speaker name (Esc to clear)"
+            };
+            _searchTextBox.TextChanged += SearchTextBox_TextChanged;
+            _searchTextBox.KeyDown += SearchTextBox_KeyDown;
+
+            _searchMatchCountText = new TextBlock
+            {
+                Text = "",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0),
+                FontSize = 11,
+                FontStyle = FontStyles.Italic,
+                Foreground = Brushes.Gray
+            };
+
+            searchPanel.Children.Add(searchLabel);
+            searchPanel.Children.Add(_searchTextBox);
+            searchPanel.Children.Add(_searchMatchCountText);
+            Grid.SetRow(searchPanel, currentRow++);
+
             // Multi-select toolbar
             var multiSelectToolbar = CreateMultiSelectToolbar();
             Grid.SetRow(multiSelectToolbar, currentRow++);
-            
+
             // Transcription area - this will now take up all remaining space
             _transcriptionPanel = new StackPanel 
             { 
@@ -666,15 +907,22 @@ public partial class App : Application
             mainGrid.Children.Add(systemAudioSection);
             mainGrid.Children.Add(volumeSection);
             mainGrid.Children.Add(buttonPanel);
+            mainGrid.Children.Add(backendStatusPanel);
             mainGrid.Children.Add(privacyPanel);
             mainGrid.Children.Add(_statusText);
             mainGrid.Children.Add(transcriptionLabel);
             mainGrid.Children.Add(instructionsBorder);
+            mainGrid.Children.Add(keywordAlertsExpander);
+            mainGrid.Children.Add(searchPanel);
             mainGrid.Children.Add(multiSelectToolbar);
             mainGrid.Children.Add(_transcriptionScrollViewer);
             
             window.Content = mainGrid;
             window.Closing += Window_Closing;
+            // Debounced (~1s) geometry save - dragging/resizing fires these continuously, and
+            // RequestSettingsSave collapses a burst of them into a single write.
+            window.SizeChanged += (s, args) => RequestSettingsSave();
+            window.LocationChanged += (s, args) => RequestSettingsSave();
             
             Console.WriteLine("Setting as main window...");
             // Set as main window and show
@@ -695,11 +943,15 @@ public partial class App : Application
                     Console.WriteLine("Loading audio devices...");
                     // Initialize audio devices
                     LoadAudioDevices();
-                    
+                    // Re-select whatever devices were saved from a previous run, if still present.
+                    RestoreDeviceSelection();
+
                     Console.WriteLine("Checking backend connection...");
-                    // Check backend connectivity
-                    CheckBackendConnection();
-                    
+                    // Check backend connectivity - and, on the very first check, best-effort
+                    // auto-start the backend if it isn't reachable yet (InitializeBackendConnectivityAsync
+                    // also starts the recurring 10s health poll used for the rest of the session).
+                    _ = InitializeBackendConnectivityAsync();
+
                     Console.WriteLine("Setting up timers...");
                     // Setup volume monitoring timer - less frequent to improve UI responsiveness
                     _volumeTimer = new DispatcherTimer();
@@ -737,31 +989,249 @@ public partial class App : Application
         }
     }
     
-    private async void CheckBackendConnection()
+    // ---------------------------------------------------------------------------------
+    // Backend connectivity: status indicator, periodic health poll, and best-effort auto-start.
+    // ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Runs the first health check, best-effort auto-starts the backend if that check fails,
+    /// then starts the recurring 10s poll that keeps the status indicator (and _lastBackendError)
+    /// current for the rest of the session.
+    /// </summary>
+    private async Task InitializeBackendConnectivityAsync()
+    {
+        UpdateBackendStatusUI(BackendStatus.Connecting);
+
+        bool healthy = await CheckBackendHealthAsync().ConfigureAwait(true);
+        if (!healthy)
+        {
+            TryAutoStartBackend();
+
+            if (_appSettings.AutoStartBackend && _weStartedBackend)
+            {
+                // Give a freshly-spawned uvicorn a little time to bind the port before the next
+                // check, so the indicator doesn't flash "offline" for a process we just started.
+                await Task.Delay(3000).ConfigureAwait(true);
+                healthy = await CheckBackendHealthAsync().ConfigureAwait(true);
+            }
+        }
+
+        UpdateBackendStatusUI(healthy ? BackendStatus.Connected : BackendStatus.Offline, healthy ? null : _lastBackendError);
+
+        _backendHealthTimer = new DispatcherTimer();
+        _backendHealthTimer.Interval = TimeSpan.FromSeconds(10);
+        _backendHealthTimer.Tick += async (s, e) => await PollBackendHealthAsync().ConfigureAwait(true);
+        _backendHealthTimer.Start();
+    }
+
+    /// <summary>
+    /// One health-check tick. Re-entrancy-guarded so an overlapping call (from the timer firing
+    /// again, or from ReportBackendFailure below) is a no-op instead of stacking requests.
+    /// </summary>
+    private async Task PollBackendHealthAsync()
+    {
+        if (_backendHealthCheckInFlight)
+        {
+            return;
+        }
+        _backendHealthCheckInFlight = true;
+        try
+        {
+            bool healthy = await CheckBackendHealthAsync().ConfigureAwait(true);
+            UpdateBackendStatusUI(healthy ? BackendStatus.Connected : BackendStatus.Offline, healthy ? null : _lastBackendError);
+        }
+        finally
+        {
+            _backendHealthCheckInFlight = false;
+        }
+    }
+
+    private async Task<bool> CheckBackendHealthAsync()
     {
         try
         {
-            var response = await _httpClient!.GetAsync($"{BACKEND_URL}/health");
+            var response = await _httpClient!.GetAsync($"{_backendUrl}/health").ConfigureAwait(true);
             if (response.IsSuccessStatusCode)
             {
-                var content = await response.Content.ReadAsStringAsync();
-                var healthData = JsonSerializer.Deserialize<JsonElement>(content);
-                
-                if (_statusText != null)
-                {
-                    _statusText.Text += " Backend connected ✓";
-                }
+                _lastBackendError = null;
+                return true;
+            }
+
+            _lastBackendError = $"HTTP {(int)response.StatusCode}";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _lastBackendError = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Called from the transcription/feedback request paths right after a failure. Sets the
+    /// indicator to Offline immediately (instead of only console logging) and kicks off an
+    /// out-of-band health check so the indicator clears itself automatically the moment the
+    /// backend is reachable again, without waiting for the next 10s tick. Safe to call from any
+    /// thread; UI updates are marshalled to the dispatcher.
+    /// </summary>
+    private void ReportBackendFailure(string errorMessage)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _lastBackendError = errorMessage;
+            UpdateBackendStatusUI(BackendStatus.Offline, errorMessage);
+        }));
+        _ = PollBackendHealthAsync();
+    }
+
+    /// <summary>Called right after a transcription/feedback request succeeds, so the indicator
+    /// flips back to Connected immediately rather than waiting for the next poll.</summary>
+    private void ReportBackendSuccess()
+    {
+        Dispatcher.BeginInvoke(new Action(() => UpdateBackendStatusUI(BackendStatus.Connected)));
+    }
+
+    private void UpdateBackendStatusUI(BackendStatus status, string? detail = null)
+    {
+        if (_backendStatusDot == null || _backendStatusText == null)
+        {
+            return;
+        }
+
+        switch (status)
+        {
+            case BackendStatus.Connected:
+                _backendStatusDot.Fill = Brushes.LimeGreen;
+                _backendStatusText.Text = "Backend: Connected";
+                _backendStatusText.Foreground = Brushes.DarkGreen;
+                break;
+            case BackendStatus.Connecting:
+                _backendStatusDot.Fill = Brushes.Orange;
+                _backendStatusText.Text = "Backend: Connecting...";
+                _backendStatusText.Foreground = Brushes.DarkOrange;
+                break;
+            case BackendStatus.Offline:
+            default:
+                _backendStatusDot.Fill = Brushes.Red;
+                var shortDetail = string.IsNullOrWhiteSpace(detail) ? null : detail.Length > 80 ? detail.Substring(0, 80) + "..." : detail;
+                _backendStatusText.Text = shortDetail == null ? "Backend offline" : $"Backend offline: {shortDetail}";
+                _backendStatusText.Foreground = Brushes.DarkRed;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort: locate a python interpreter and the backend folder, then spawn
+    /// "python -m uvicorn server:app --host 127.0.0.1 --port 8000" hidden, with the backend
+    /// folder as its working directory. Any failure just leaves the offline indicator showing -
+    /// this is a convenience, not a requirement for the app to run against an already-running
+    /// backend.
+    /// </summary>
+    private void TryAutoStartBackend()
+    {
+        try
+        {
+            if (!_appSettings.AutoStartBackend)
+            {
+                Console.WriteLine("Auto-start backend disabled by settings.");
+                return;
+            }
+
+            string? backendDir = FindBackendDirectory();
+            if (backendDir == null)
+            {
+                Console.WriteLine("Auto-start backend: could not find a 'backend' folder containing server.py near the executable.");
+                return;
+            }
+
+            string pythonExe = FindPythonExecutable();
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = pythonExe,
+                Arguments = "-m uvicorn server:app --host 127.0.0.1 --port 8000",
+                WorkingDirectory = backendDir,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+
+            Console.WriteLine($"Auto-starting backend: \"{pythonExe}\" {startInfo.Arguments} (cwd: {backendDir})");
+            _autoStartedBackendProcess = Process.Start(startInfo);
+            _weStartedBackend = _autoStartedBackendProcess != null;
+
+            if (_weStartedBackend)
+            {
+                Console.WriteLine($"Auto-started backend process id {_autoStartedBackendProcess!.Id}.");
             }
         }
         catch (Exception ex)
         {
-            if (_statusText != null)
-            {
-                _statusText.Text += $" Backend connection failed: {ex.Message}";
-            }
+            // Best-effort only: no python/uvicorn available, permissions issue, etc. The offline
+            // indicator (already showing) communicates this to the user; nothing else to do.
+            Console.WriteLine($"Auto-start backend failed: {ex.Message}");
+            _weStartedBackend = false;
         }
     }
-    
+
+    /// <summary>
+    /// Searches "&lt;repo&gt;/venv/Scripts/python.exe" relative to the executable's directory and
+    /// each of its parents; falls back to "python" (resolved via PATH by Process.Start) if none
+    /// of them exist.
+    /// </summary>
+    private static string FindPythonExecutable()
+    {
+        try
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null)
+            {
+                // Fully qualified: System.Windows.Shapes.Path is also in scope (via
+                // "using System.Windows.Shapes;"), and a bare "Path" is ambiguous between the two.
+                var candidate = System.IO.Path.Combine(dir.FullName, "venv", "Scripts", "python.exe");
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+                dir = dir.Parent;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error searching for a venv python executable: {ex.Message}");
+        }
+
+        return "python";
+    }
+
+    /// <summary>
+    /// Searches the executable's directory and each of its parents for a folder named "backend"
+    /// that contains server.py.
+    /// </summary>
+    private static string? FindBackendDirectory()
+    {
+        try
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null)
+            {
+                var candidate = System.IO.Path.Combine(dir.FullName, "backend");
+                if (Directory.Exists(candidate) && File.Exists(System.IO.Path.Combine(candidate, "server.py")))
+                {
+                    return candidate;
+                }
+                dir = dir.Parent;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error searching for the backend folder: {ex.Message}");
+        }
+
+        return null;
+    }
+
+
     private void LoadAudioDevices()
     {
         try
@@ -827,6 +1297,46 @@ public partial class App : Application
             }
         }
     }
+
+    /// <summary>
+    /// Re-selects the microphone/system-audio devices saved from a previous run, matched by
+    /// NAudio's stable MMDevice.ID. Must run after LoadAudioDevices has populated the combo
+    /// boxes. A device that is no longer present (unplugged, renamed) is silently left at
+    /// LoadAudioDevices' default (index 0) instead of failing.
+    /// </summary>
+    private void RestoreDeviceSelection()
+    {
+        try
+        {
+            if (_microphoneComboBox != null && _availableMicrophones != null && !string.IsNullOrEmpty(_appSettings.MicDeviceId))
+            {
+                for (int i = 0; i < _availableMicrophones.Count; i++)
+                {
+                    if (_availableMicrophones[i].ID == _appSettings.MicDeviceId)
+                    {
+                        _microphoneComboBox.SelectedIndex = i; // Fires MicrophoneComboBox_SelectionChanged
+                        break;
+                    }
+                }
+            }
+
+            if (_systemAudioComboBox != null && _availableSystemAudioDevices != null && !string.IsNullOrEmpty(_appSettings.SystemDeviceId))
+            {
+                for (int i = 0; i < _availableSystemAudioDevices.Count; i++)
+                {
+                    if (_availableSystemAudioDevices[i].ID == _appSettings.SystemDeviceId)
+                    {
+                        _systemAudioComboBox.SelectedIndex = i; // Fires SystemAudioComboBox_SelectionChanged
+                        break;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error restoring saved device selection: {ex.Message}");
+        }
+    }
     
     private void MicrophoneComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -836,10 +1346,11 @@ public partial class App : Application
             if (_selectedMicrophoneIndex >= 0 && _selectedMicrophoneIndex < _availableMicrophones.Count)
             {
                 _selectedMicrophone = _availableMicrophones[_selectedMicrophoneIndex];
+                RequestSettingsSave();
             }
         }
     }
-    
+
     private void SystemAudioComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_systemAudioComboBox != null && _availableSystemAudioDevices != null)
@@ -848,21 +1359,51 @@ public partial class App : Application
             if (_selectedSystemAudioIndex >= 0 && _selectedSystemAudioIndex < _availableSystemAudioDevices.Count)
             {
                 _defaultSystemAudio = _availableSystemAudioDevices[_selectedSystemAudioIndex];
+                RequestSettingsSave();
             }
         }
     }
-    
+
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             if (_selectedMicrophone != null)
             {
+                // Starting a new recording used to silently wipe the existing transcript. Ask
+                // first if there is anything to lose.
+                if (_transcriptionHistory.Count > 0)
+                {
+                    var confirmClear = MessageBox.Show(
+                        "Clear current transcript and start new recording?",
+                        "Start New Recording",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (confirmClear != MessageBoxResult.Yes)
+                    {
+                        return;
+                    }
+                }
+
                 // Clear previous transcriptions
                 _transcriptionPanel?.Children.Clear();
-                _audioBuffer.Clear();
-                _systemAudioBuffer.Clear();
-                
+                _transcriptionHistory.Clear();
+                if (_saveTranscriptionButton != null)
+                {
+                    _saveTranscriptionButton.IsEnabled = false;
+                }
+                // A fresh recording has nothing to filter yet - clear any leftover search query
+                // so segments from the new recording don't start out hidden by an old filter.
+                _searchDebounceTimer?.Stop();
+                if (_searchTextBox != null) _searchTextBox.Text = "";
+                _currentSearchQuery = "";
+                if (_searchMatchCountText != null) _searchMatchCountText.Text = "";
+                ResetAudioSource(_micSource);
+                ResetAudioSource(_systemSource);
+                _systemAudioConverter.Reset();
+                _systemAudioFormatUnsupported = false;
+
                 // If monitoring is active, stop it first (we'll use recording mode instead)
                 if (_isMonitoring)
                 {
@@ -928,19 +1469,12 @@ public partial class App : Application
             _transcriptionTimer?.Stop();
             _isRecording = false;
             
-            // Process any remaining audio
-            if (_audioBuffer.Count > 0)
-            {
-                _ = ProcessAudioChunkAsync(_audioBuffer.ToArray(), "Microphone");
-                _audioBuffer.Clear();
-            }
-            
-            if (_systemAudioBuffer.Count > 0)
-            {
-                _ = ProcessAudioChunkAsync(_systemAudioBuffer.ToArray(), "System Audio");
-                _systemAudioBuffer.Clear();
-            }
-            
+            // Flush whatever is still buffered for each source. Each flush waits (off the UI
+            // thread) for that source's in-flight request to finish rather than dropping the
+            // tail of the recording, and the two sources are flushed independently.
+            FlushSourceOnStop(_micSource);
+            FlushSourceOnStop(_systemSource);
+
             if (_statusText != null) _statusText.Text = "Recording stopped. Transcription complete.";
             if (_stopRecordingButton != null) _stopRecordingButton.IsEnabled = false;
             if (_startRecordingButton != null) _startRecordingButton.IsEnabled = true;
@@ -1007,7 +1541,10 @@ public partial class App : Application
                             if (i + 1 < args.BytesRecorded)
                             {
                                 short sample = BitConverter.ToInt16(args.Buffer, i);
-                                level = Math.Max(level, Math.Abs(sample) / 32768f);
+                                // Note: negate in float space - Math.Abs(short.MinValue) throws.
+                                float magnitude = sample / 32768f;
+                                if (magnitude < 0f) magnitude = -magnitude;
+                                if (magnitude > level) level = magnitude;
                             }
                         }
                         _microphoneLevel = level;
@@ -1077,40 +1614,52 @@ public partial class App : Application
             }
         }
         
-        // Refresh the transcription display to apply/remove legal-safe mode
-        RefreshTranscriptionDisplay();
+        // Apply/remove legal-safe mode to every already-displayed card in place. Privacy mode
+        // changes what every segment SHOWS (speaker name + text) but doesn't add, remove, or
+        // reorder any segment, so patching each card is enough - no full rebuild needed.
+        foreach (var segment in _transcriptionHistory)
+        {
+            UpdateSegmentCardInPlace(segment);
+        }
+        RequestSettingsSave();
     }
-    
+
     private void WaveIn_DataAvailable(object? sender, WaveInEventArgs e)
     {
-        // Calculate audio level from the captured data
-        if (e.Buffer.Length > 0)
+        if (e.BytesRecorded <= 0)
         {
-            float max = 0;
-            
-            // Apply gain/amplification for better sensitivity (amplify by 2x)
-            for (int index = 0; index < e.BytesRecorded; index += 2)
-            {
-                short sample = (short)((e.Buffer[index + 1] << 8) | e.Buffer[index]);
-                
-                // Apply 2x gain for better microphone sensitivity
-                sample = (short)Math.Max(Math.Min(sample * 2, short.MaxValue), short.MinValue);
-                
-                // Update the buffer with amplified audio
-                e.Buffer[index] = (byte)(sample & 0xFF);
-                e.Buffer[index + 1] = (byte)(sample >> 8);
-                
-                var sample32 = sample / 32768f;
-                if (sample32 < 0) sample32 = -sample32;
-                if (sample32 > max) max = sample32;
-            }
-            _microphoneLevel = max;
-            
-            // Add audio data to buffer for transcription
-            _audioBuffer.AddRange(e.Buffer.Take(e.BytesRecorded));
+            return;
         }
+
+        // The microphone is opened as 16 kHz mono 16-bit PCM, so every two bytes is one sample
+        // and the buffer can go straight to the backend once the (optional) gain is applied.
+        float max = 0f;
+        bool applyGain = Math.Abs(_microphoneGain - 1.0f) > 0.0001f;
+
+        for (int index = 0; index + 1 < e.BytesRecorded; index += 2)
+        {
+            short sample = (short)((e.Buffer[index + 1] << 8) | e.Buffer[index]);
+
+            if (applyGain)
+            {
+                // Clamped so loud input saturates instead of wrapping around to the
+                // opposite sign (which is what an unchecked cast would do).
+                sample = ClampToInt16(sample * _microphoneGain);
+                e.Buffer[index] = (byte)(sample & 0xFF);
+                e.Buffer[index + 1] = (byte)((sample >> 8) & 0xFF);
+            }
+
+            var sample32 = sample / 32768f;
+            if (sample32 < 0) sample32 = -sample32;
+            if (sample32 > max) max = sample32;
+        }
+
+        _microphoneLevel = max;
+
+        // Add audio data to the microphone buffer for transcription
+        AppendAudioToSource(_micSource, e.Buffer, e.BytesRecorded);
     }
-    
+
     private void WaveIn_RecordingStopped(object? sender, StoppedEventArgs e)
     {
         _waveIn?.Dispose();
@@ -1120,15 +1669,53 @@ public partial class App : Application
     
     private void SystemAudio_DataAvailable(object? sender, WaveInEventArgs e)
     {
-        // Add system audio data to buffer for transcription
-        if (e.Buffer.Length > 0)
+        if (e.BytesRecorded <= 0 || _systemAudioFormatUnsupported)
         {
-            // Convert system audio to the same format as microphone (16kHz mono)
-            // Note: System audio is typically 44.1kHz stereo, so we need to resample
-            _systemAudioBuffer.AddRange(e.Buffer.Take(e.BytesRecorded));
+            return;
+        }
+
+        // WASAPI loopback hands us whatever the endpoint's mix format is - commonly 32-bit
+        // IEEE float, stereo, at 44.1 kHz or 48 kHz. Convert it to 16 kHz mono 16-bit PCM
+        // here, BEFORE buffering, so the WAV header written later actually describes the
+        // bytes it wraps. Nothing is hardcoded: the real format is read from the capture.
+        WaveFormat? sourceFormat = (sender as IWaveIn)?.WaveFormat ?? _systemAudioCapture?.WaveFormat;
+        if (sourceFormat == null)
+        {
+            return;
+        }
+
+        byte[] converted;
+        try
+        {
+            converted = _systemAudioConverter.ConvertToPcm16Mono16k(sourceFormat, e.Buffer, e.BytesRecorded);
+        }
+        catch (NotSupportedException ex)
+        {
+            // Log once and stop capturing system audio rather than shipping garbage bytes
+            // to the backend and polluting the transcript with hallucinated text.
+            _systemAudioFormatUnsupported = true;
+            Console.WriteLine($"System audio format not supported ({ex.Message}); system audio will be skipped for this session.");
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_statusText != null)
+                {
+                    _statusText.Text = "System audio format unsupported - transcribing microphone only.";
+                }
+            }));
+            return;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"System audio conversion error: {ex.Message}");
+            return;
+        }
+
+        if (converted.Length > 0)
+        {
+            AppendAudioToSource(_systemSource, converted, converted.Length);
         }
     }
-    
+
     private void SystemAudio_RecordingStopped(object? sender, StoppedEventArgs e)
     {
         _systemAudioCapture?.Dispose();
@@ -1137,49 +1724,120 @@ public partial class App : Application
     
     private void TranscriptionTimer_Tick(object? sender, EventArgs e)
     {
-        if (_isRecording && !_isProcessingTranscription)
+        if (!_isRecording)
         {
-            // Process microphone audio if available
-            if (_audioBuffer.Count > 0)
+            return;
+        }
+
+        // Each source is dispatched independently. A source that is still waiting on the
+        // backend keeps its buffered audio (it is NOT cleared) and goes out on a later tick.
+        DispatchPendingAudio(_micSource);
+        DispatchPendingAudio(_systemSource);
+    }
+
+    /// <summary>
+    /// Sends the audio buffered for one source, if any, and if that source does not already
+    /// have a request in flight. The buffer is drained only at the moment we actually take
+    /// ownership of the bytes, so audio can never be discarded by a guard further downstream.
+    /// </summary>
+    private void DispatchPendingAudio(AudioSourceState state)
+    {
+        byte[] chunk;
+
+        lock (state.Sync)
+        {
+            if (state.IsProcessing || state.Buffer.Count == 0)
             {
-                var micAudioData = _audioBuffer.ToArray();
-                _audioBuffer.Clear();
-                _ = ProcessAudioChunkAsync(micAudioData, "Microphone");
+                // Still busy (or nothing to send): leave the buffer intact for the next tick.
+                return;
             }
-            
-            // Process system audio if available
-            if (_systemAudioBuffer.Count > 0)
+
+            chunk = state.Buffer.ToArray();
+            state.Buffer.Clear();
+            state.IsProcessing = true; // Released in ProcessAudioChunkAsync's finally block
+        }
+
+        // Fire and forget - the returned task clears state.IsProcessing when it completes.
+        _ = ProcessAudioChunkAsync(chunk, state);
+    }
+
+    /// <summary>
+    /// Final flush when recording stops: hand off to an async helper so the UI thread is never
+    /// blocked, and so a request already in flight for this source is awaited rather than
+    /// causing the tail of the recording to be thrown away.
+    /// </summary>
+    private void FlushSourceOnStop(AudioSourceState state)
+    {
+        _ = FlushSourceOnStopAsync(state);
+    }
+
+    private async Task FlushSourceOnStopAsync(AudioSourceState state)
+    {
+        // Bounded retry so a wedged backend cannot leave this task alive forever.
+        const int maxAttempts = 60;
+        const int retryDelayMs = 500;
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            byte[] chunk = Array.Empty<byte>();
+
+            lock (state.Sync)
             {
-                var sysAudioData = _systemAudioBuffer.ToArray();
-                _systemAudioBuffer.Clear();
-                _ = ProcessAudioChunkAsync(sysAudioData, "System Audio");
+                if (state.Buffer.Count == 0)
+                {
+                    return; // Nothing left to flush
+                }
+
+                if (!state.IsProcessing)
+                {
+                    chunk = state.Buffer.ToArray();
+                    state.Buffer.Clear();
+                    state.IsProcessing = true;
+                }
             }
+
+            if (chunk.Length > 0)
+            {
+                await ProcessAudioChunkAsync(chunk, state);
+                return;
+            }
+
+            // A request for this source is still in flight; wait for it and retry.
+            await Task.Delay(retryDelayMs).ConfigureAwait(false);
+        }
+
+        Console.WriteLine($"Final flush for {state.DisplayName} gave up waiting for the backend; buffered audio discarded.");
+        lock (state.Sync)
+        {
+            state.Buffer.Clear();
         }
     }
-    
-    private async Task ProcessAudioChunkAsync(byte[] audioData, string source)
+
+    private async Task ProcessAudioChunkAsync(byte[] audioData, AudioSourceState state)
     {
-        if (_isProcessingTranscription) return; // Skip if already processing
-        
-        _isProcessingTranscription = true;
-        
+        string source = state.DisplayName;
+
         try
         {
             Console.WriteLine($"Processing audio chunk of {audioData.Length} bytes from {source}...");
-            
+
             // Convert raw audio data to WAV format
-            var wavData = CreateWavFile(audioData, 16000, 1);
+            var wavData = CreateWavFile(audioData, TRANSCRIPTION_SAMPLE_RATE, TRANSCRIPTION_CHANNELS);
             Console.WriteLine($"Created WAV file of {wavData.Length} bytes");
-            
+
             // Send to backend for transcription
             using var content = new MultipartFormDataContent();
             using var audioContent = new ByteArrayContent(wavData);
             audioContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
             content.Add(audioContent, "audio", $"{source}.wav");
-            
+
+            // Tag the chunk's origin so the backend can tell the near end from the far end.
+            // Unknown query parameters are tolerated by the backend, so this stays compatible.
+            var requestUrl = $"{_backendUrl}/transcribe?source={Uri.EscapeDataString(state.SourceTag)}";
+
             Console.WriteLine("Sending request to backend...");
-            var response = await _httpClient!.PostAsync($"{BACKEND_URL}/transcribe", content);
-            
+            var response = await _httpClient!.PostAsync(requestUrl, content);
+
             Console.WriteLine($"Backend response status: {response.StatusCode}");
             
             if (response.IsSuccessStatusCode)
@@ -1199,13 +1857,17 @@ public partial class App : Application
                         var text = segment.GetProperty("text").GetString();
                         var speaker = segment.GetProperty("speaker").GetString();
                         var startTime = segment.GetProperty("start").GetDouble();
-                        
-                        Console.WriteLine($"Segment: Speaker='{speaker}', Text='{text}', StartTime={startTime}");
-                        
+                        // "end" is part of the documented /transcribe contract, but fall back to
+                        // startTime (zero-duration) rather than throwing if an older/odd backend
+                        // response ever omits it - export formats (SRT/VTT) need SOME end value.
+                        var endTime = segment.TryGetProperty("end", out var endProp) ? endProp.GetDouble() : startTime;
+
+                        Console.WriteLine($"Segment: Speaker='{speaker}', Text='{text}', StartTime={startTime}, EndTime={endTime}");
+
                         if (!string.IsNullOrWhiteSpace(text))
                         {
                             // Add transcription to UI (run on UI thread)
-                            Dispatcher.Invoke(() => AddTranscriptionSegment(speaker, text, startTime, source));
+                            Dispatcher.Invoke(() => AddTranscriptionSegment(speaker, text, startTime, endTime, source));
                         }
                     }
                 }
@@ -1213,19 +1875,26 @@ public partial class App : Application
                 {
                     Console.WriteLine("No 'segments' property found in response");
                 }
+
+                ReportBackendSuccess();
             }
             else
             {
                 Console.WriteLine($"Backend request failed with status: {response.StatusCode}");
                 var errorContent = await response.Content.ReadAsStringAsync();
                 Console.WriteLine($"Error content: {errorContent}");
+                ReportBackendFailure($"HTTP {(int)response.StatusCode}");
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"ProcessAudioChunkAsync error: {ex.Message}");
             Console.WriteLine($"Stack trace: {ex.StackTrace}");
-            
+
+            // Visible error state instead of console-only: flips the status indicator to
+            // Offline immediately and triggers an out-of-band health check.
+            ReportBackendFailure(ex.Message);
+
             Dispatcher.Invoke(() =>
             {
                 if (_statusText != null)
@@ -1236,29 +1905,34 @@ public partial class App : Application
         }
         finally
         {
-            _isProcessingTranscription = false;
+            // Release only THIS source. The other source's capture and dispatch are unaffected.
+            lock (state.Sync)
+            {
+                state.IsProcessing = false;
+            }
         }
     }
-    
-    private void AddTranscriptionSegment(string? speaker, string? text, double startTime, string source)
+
+    private void AddTranscriptionSegment(string? speaker, string? text, double startTime, double endTime, string source)
     {
-        Console.WriteLine($"AddTranscriptionSegment called: Speaker='{speaker}', Text='{text}', StartTime={startTime}, Source={source}");
-        
-        if (_transcriptionPanel == null || string.IsNullOrWhiteSpace(text)) 
+        Console.WriteLine($"AddTranscriptionSegment called: Speaker='{speaker}', Text='{text}', StartTime={startTime}, EndTime={endTime}, Source={source}");
+
+        if (_transcriptionPanel == null || string.IsNullOrWhiteSpace(text))
         {
             Console.WriteLine("Skipping - transcription panel is null or text is empty");
             return;
         }
-        
+
         // Generate unique segment ID
         var segmentId = _transcriptionHistory.Count;
-        
+
         // Store in transcription history
         var segment = new TranscriptionSegment
         {
             Speaker = speaker,
             Text = text,
             StartTime = startTime,
+            EndTime = endTime,
             Source = source,
             Timestamp = DateTime.Now,
             SegmentId = segmentId
@@ -1270,7 +1944,7 @@ public partial class App : Application
         {
             _availableSpeakers.Add(speaker);
             // Save settings when new speaker is auto-detected
-            SaveSpeakerSettings();
+            SaveAppSettings();
             Console.WriteLine($"Auto-detected and saved new speaker: {speaker}");
         }
         
@@ -1300,12 +1974,24 @@ public partial class App : Application
             Margin = new Thickness(0, 0, 0, 5) 
         };
         
+        // Keyword-alert bell: hidden unless this segment matches a configured alert keyword
+        // (ApplyKeywordAlertHighlight below sets its Visibility - see also UpdateSegmentCardInPlace).
+        var alertBellIcon = new TextBlock
+        {
+            Text = "🔔",
+            FontSize = 14,
+            Margin = new Thickness(0, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed,
+            ToolTip = "Matches a keyword alert"
+        };
+
         // Selection checkbox
         var selectionCheckBox = CreateSelectionCheckBox(segmentId);
-        
+
         // Timestamp
-        var timestampText = new TextBlock 
-        { 
+        var timestampText = new TextBlock
+        {
             Text = $"[{TimeSpan.FromSeconds(startTime):mm\\:ss}]",
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.Gray,
@@ -1313,7 +1999,7 @@ public partial class App : Application
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 10, 0)
         };
-        
+
         // Speaker assignment dropdown with color coding
         var speakerComboBox = new ComboBox
         {
@@ -1325,7 +2011,7 @@ public partial class App : Application
             IsEditable = true,
             Background = GetSpeakerColorEnhanced(GetDisplaySpeakerName(speaker))
         };
-        
+
         // Create emotional tone indicator
         var emotionIndicator = CreateEmotionalToneIndicator(text ?? "", speaker ?? "");
         
@@ -1373,7 +2059,7 @@ public partial class App : Application
                     RefreshAllSpeakerDropdowns();
                     
                     // Save settings when new speaker is created
-                    SaveSpeakerSettings();
+                    SaveAppSettings();
                     Console.WriteLine($"Created and saved new speaker via text entry in refresh: {newSpeaker}");
                 }
                 UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
@@ -1471,6 +2157,7 @@ public partial class App : Application
         deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
         
         // Add all top row elements
+        topPanel.Children.Add(alertBellIcon);
         topPanel.Children.Add(selectionCheckBox);
         topPanel.Children.Add(timestampText);
         topPanel.Children.Add(speakerComboBox);
@@ -1480,31 +2167,53 @@ public partial class App : Application
         topPanel.Children.Add(newSpeakerButton);
         topPanel.Children.Add(showAutoSpeakersButton);
         topPanel.Children.Add(deleteSpeakerButton);
-        
+
         // Editable text content (in its own row for better readability)
         var textDisplay = CreateEditableTextDisplay(segment);
         
         // Add both rows to the segment panel
         segmentPanel.Children.Add(topPanel);
         segmentPanel.Children.Add(textDisplay);
-        
+
         // Add segment panel to border and border to main panel
         segmentBorder.Child = segmentPanel;
         _transcriptionPanel.Children.Add(segmentBorder);
-        
+
+        // Cache the card elements on the segment itself so a later rename, privacy toggle, or
+        // keyword-alert change can patch this card in place (UpdateSegmentCardInPlace /
+        // ApplyKeywordAlertHighlight) instead of requiring a full display rebuild.
+        segment.CardElement = segmentBorder;
+        segment.SpeakerComboBoxElement = speakerComboBox;
+        segment.TextDisplayElement = textDisplay;
+        segment.AlertBellElement = alertBellIcon;
+
+        // Highlight + bell prefix if this segment matches a configured alert keyword, and flash
+        // the status text so a live match is noticeable even if the transcript isn't in view.
+        if (ApplyKeywordAlertHighlight(segment))
+        {
+            FlashStatusTextForKeywordAlert();
+        }
+
+        // If a search filter is active, a newly-arrived segment must be evaluated against it too
+        // (this only flips Visibility on existing elements - it doesn't rebuild any cards).
+        if (!string.IsNullOrEmpty(_currentSearchQuery))
+        {
+            ApplySearchFilter(_currentSearchQuery);
+        }
+
         // Smart auto-scroll: only scroll if user was already at bottom
         if (_transcriptionScrollViewer != null)
         {
             var maxScroll = _transcriptionScrollViewer.ScrollableHeight;
             var currentScroll = _transcriptionScrollViewer.VerticalOffset;
             var wasAtBottom = currentScroll >= maxScroll - 50; // 50px tolerance
-            
+
             if (wasAtBottom)
             {
                 _transcriptionScrollViewer.ScrollToEnd();
             }
         }
-        
+
         Console.WriteLine("Transcription segment added to UI successfully");
     }
     
@@ -1654,7 +2363,7 @@ public partial class App : Application
             if (!string.IsNullOrEmpty(oldSpeaker) && oldSpeaker != newSpeaker)
             {
                 _speakerNames[oldSpeaker] = newSpeaker;
-                SaveSpeakerSettings();
+                SaveAppSettings();
                 Console.WriteLine($"Saved speaker name mapping: {oldSpeaker} -> {newSpeaker}");
                 
                 // Send feedback to backend to improve speaker recognition
@@ -1685,7 +2394,7 @@ public partial class App : Application
             
             try
             {
-                var response = await _httpClient!.PostAsync($"{BACKEND_URL}/speakers/name_mapping?old_speaker_id={Uri.EscapeDataString(segment.Speaker ?? "")}&new_speaker_name={Uri.EscapeDataString(correctSpeakerName)}", null);
+                var response = await _httpClient!.PostAsync($"{_backendUrl}/speakers/name_mapping?old_speaker_id={Uri.EscapeDataString(segment.Speaker ?? "")}&new_speaker_name={Uri.EscapeDataString(correctSpeakerName)}", null);
                 
                 if (response.IsSuccessStatusCode)
                 {
@@ -1782,7 +2491,7 @@ public partial class App : Application
                     RefreshAllSpeakerDropdowns();
                     
                     // Save settings when new speaker is created
-                    SaveSpeakerSettings();
+                    SaveAppSettings();
                     Console.WriteLine($"Created and saved new speaker: {newSpeaker}");
                 }
                 
@@ -1911,12 +2620,18 @@ public partial class App : Application
             if (!string.IsNullOrEmpty(newName))
             {
                 _speakerNames[originalSpeaker] = newName;
-                RefreshTranscriptionDisplay();
-                
+
+                // Only the segments spoken by this raw speaker ID display differently now - patch
+                // just their cards in place rather than rebuilding the whole transcript.
+                foreach (var affectedSegment in _transcriptionHistory.Where(s => s.Speaker == originalSpeaker))
+                {
+                    UpdateSegmentCardInPlace(affectedSegment);
+                }
+
                 // Save settings when speaker is renamed
-                SaveSpeakerSettings();
+                SaveAppSettings();
                 Console.WriteLine($"Renamed and saved speaker: {originalSpeaker} -> {newName}");
-                
+
                 inputWindow.DialogResult = true;
             }
         };
@@ -2250,26 +2965,34 @@ public partial class App : Application
             var newSpeaker = speakerComboBox.Text.Trim();
             if (!string.IsNullOrEmpty(newSpeaker))
             {
-                // Add to available speakers if new
+                // Add to available speakers if new. RefreshAllSpeakerDropdowns() must run so the
+                // new name shows up in every OTHER segment's dropdown too, since (unlike a full
+                // RefreshTranscriptionDisplay()) the targeted update below only touches the
+                // dropdowns of the segments actually being renamed.
                 if (!_availableSpeakers.Contains(newSpeaker))
                 {
                     _availableSpeakers.Add(newSpeaker);
-                    SaveSpeakerSettings();
+                    RefreshAllSpeakerDropdowns();
+                    SaveAppSettings();
                 }
-                
-                // Update all selected segments
+
+                // Update all selected segments and patch just their cards in place - a bulk
+                // rename doesn't add/remove/reorder segments, so it doesn't need a full
+                // RefreshTranscriptionDisplay() rebuild.
                 foreach (var segmentId in _selectedSegments)
                 {
                     UpdateSegmentSpeaker(segmentId, newSpeaker);
+                    var renamedSegment = _transcriptionHistory.FirstOrDefault(seg => seg.SegmentId == segmentId);
+                    if (renamedSegment != null)
+                    {
+                        UpdateSegmentCardInPlace(renamedSegment);
+                    }
                 }
-                
-                // Refresh the display
-                RefreshTranscriptionDisplay();
-                
+
                 // Clear selections
                 _selectedSegments.Clear();
                 UpdateMultiSelectButtons();
-                
+
                 dialog.DialogResult = true;
             }
         };
@@ -2562,7 +3285,7 @@ public partial class App : Application
             _transcriptionHistory.Add(newSegment);
         }
         
-        SaveSpeakerSettings();
+        SaveAppSettings();
         RefreshTranscriptionDisplay();
         
         Console.WriteLine($"Split segment {originalSegment.SegmentId} into two segments");
@@ -2596,20 +3319,31 @@ public partial class App : Application
             };
             
             var segmentPanel = new StackPanel();
-            
+
             // Top row: Checkbox, Timestamp, Speaker Assignment, Emotion, Source, and Controls
-            var topPanel = new StackPanel 
-            { 
-                Orientation = Orientation.Horizontal, 
-                Margin = new Thickness(0, 0, 0, 5) 
+            var topPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 5)
             };
-            
+
+            // Keyword-alert bell: hidden unless this segment matches a configured alert keyword.
+            var alertBellIcon = new TextBlock
+            {
+                Text = "🔔",
+                FontSize = 14,
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed,
+                ToolTip = "Matches a keyword alert"
+            };
+
             // Selection checkbox
             var selectionCheckBox = CreateSelectionCheckBox(segment.SegmentId);
-            
+
             // Timestamp
-            var timestampText = new TextBlock 
-            { 
+            var timestampText = new TextBlock
+            {
                 Text = $"[{TimeSpan.FromSeconds(segment.StartTime):mm\\:ss}]",
                 FontWeight = FontWeights.Bold,
                 Foreground = Brushes.Gray,
@@ -2617,7 +3351,7 @@ public partial class App : Application
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 10, 0)
             };
-            
+
             // Speaker assignment dropdown with color coding
             var speakerComboBox = new ComboBox
             {
@@ -2677,7 +3411,7 @@ public partial class App : Application
                         RefreshAllSpeakerDropdowns();
                         
                         // Save settings when new speaker is created
-                        SaveSpeakerSettings();
+                        SaveAppSettings();
                         Console.WriteLine($"Created and saved new speaker via text entry in refresh: {newSpeaker}");
                     }
                     UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
@@ -2773,8 +3507,9 @@ public partial class App : Application
             };
             
             deleteSpeakerButton.Click += (s, e) => DeleteSpeaker(speakerComboBox, currentSegmentId);
-            
+
             // Add all top row elements
+            topPanel.Children.Add(alertBellIcon);
             topPanel.Children.Add(selectionCheckBox);
             topPanel.Children.Add(timestampText);
             topPanel.Children.Add(speakerComboBox);
@@ -2784,23 +3519,255 @@ public partial class App : Application
             topPanel.Children.Add(newSpeakerButton);
             topPanel.Children.Add(showAutoSpeakersButton);
             topPanel.Children.Add(deleteSpeakerButton);
-            
+
             // Editable text content (in its own row for better readability)
             var textDisplay = CreateEditableTextDisplay(segment);
-            
+
             // Add both rows to the segment panel
             segmentPanel.Children.Add(topPanel);
             segmentPanel.Children.Add(textDisplay);
-            
+
             // Add segment panel to border and border to main panel
             segmentBorder.Child = segmentPanel;
             _transcriptionPanel.Children.Add(segmentBorder);
+
+            // Cache the card elements and re-apply the keyword-alert highlight, mirroring what
+            // AddTranscriptionSegment does for a newly-arrived segment.
+            segment.CardElement = segmentBorder;
+            segment.SpeakerComboBoxElement = speakerComboBox;
+            segment.TextDisplayElement = textDisplay;
+            segment.AlertBellElement = alertBellIcon;
+            ApplyKeywordAlertHighlight(segment);
         }
-        
+
+        // Re-apply the active search filter (if any) to the freshly-built cards - a rebuild
+        // replaces every card's Border instance, so the previous filter pass no longer applies.
+        if (!string.IsNullOrEmpty(_currentSearchQuery))
+        {
+            ApplySearchFilter(_currentSearchQuery);
+        }
+
         // Restore scroll position instead of always auto-scrolling
         RestoreScrollPosition();
     }
-    
+
+    /// <summary>
+    /// Patches an already-built segment card to reflect the segment's current speaker/text/
+    /// privacy state, without tearing down and rebuilding the card. Used for speaker renames and
+    /// the privacy-mode toggle - changes that affect how a segment is *displayed* but don't add,
+    /// remove, or reorder any segments (those still go through RefreshTranscriptionDisplay).
+    /// </summary>
+    private void UpdateSegmentCardInPlace(TranscriptionSegment segment)
+    {
+        var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+
+        // Element references are copied to locals before use (rather than re-reading
+        // segment.XxxElement each time) so the null-check below stays valid across the
+        // subsequent GetFilteredSpeakersForDropdown()/GetSpeakerColorEnhanced() calls.
+        var speakerComboBox = segment.SpeakerComboBoxElement;
+        if (speakerComboBox != null)
+        {
+            speakerComboBox.ItemsSource = GetFilteredSpeakersForDropdown();
+            speakerComboBox.SelectedItem = displaySpeaker;
+            speakerComboBox.Background = GetSpeakerColorEnhanced(displaySpeaker);
+        }
+
+        // Don't clobber text the user is actively editing - EnableTextEditing sets IsReadOnly to
+        // false while an edit is in progress, so leave that card's text box alone until it finishes.
+        var textDisplay = segment.TextDisplayElement;
+        if (textDisplay != null && textDisplay.IsReadOnly)
+        {
+            textDisplay.Text = GetDisplayText(segment.Text);
+        }
+
+        ApplyKeywordAlertHighlight(segment);
+
+        var cardElement = segment.CardElement;
+        if (cardElement != null && !string.IsNullOrEmpty(_currentSearchQuery))
+        {
+            cardElement.Visibility = SegmentMatchesSearch(segment, _currentSearchQuery)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+    }
+
+    // --- Keyword alerts -------------------------------------------------------------------
+
+    /// <summary>
+    /// True if this segment's speaker or text contains one of AppSettings.KeywordAlerts.
+    /// Matching is case-insensitive and "whole-word-ish": a keyword must not be immediately
+    /// preceded/followed by another letter or digit, so "cat" doesn't fire on "category" while
+    /// still tolerating adjacent punctuation ("cat." or "(cat)" both match).
+    /// </summary>
+    private bool SegmentMatchesKeywordAlert(TranscriptionSegment segment)
+    {
+        var keywords = _appSettings.KeywordAlerts;
+        if (keywords == null || keywords.Count == 0)
+            return false;
+
+        var haystack = $"{segment.Speaker} {segment.Text}";
+        if (string.IsNullOrWhiteSpace(haystack))
+            return false;
+
+        foreach (var keyword in keywords)
+        {
+            var trimmedKeyword = keyword?.Trim();
+            if (string.IsNullOrEmpty(trimmedKeyword))
+                continue;
+
+            var pattern = @"(?<![A-Za-z0-9])" + System.Text.RegularExpressions.Regex.Escape(trimmedKeyword) + @"(?![A-Za-z0-9])";
+            if (System.Text.RegularExpressions.Regex.IsMatch(haystack, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Shows/hides a segment's bell prefix and card highlight based on SegmentMatchesKeywordAlert.
+    /// Returns whether it matched, so callers (e.g. AddTranscriptionSegment for a live arrival)
+    /// can decide whether to also flash the status text.
+    /// </summary>
+    private bool ApplyKeywordAlertHighlight(TranscriptionSegment segment)
+    {
+        bool isMatch = SegmentMatchesKeywordAlert(segment);
+
+        var bellIcon = segment.AlertBellElement;
+        if (bellIcon != null)
+        {
+            bellIcon.Visibility = isMatch ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        var cardElement = segment.CardElement;
+        if (cardElement != null)
+        {
+            cardElement.Background = isMatch ? _keywordAlertCardBackground : Brushes.White;
+            cardElement.BorderBrush = isMatch ? _keywordAlertCardBorder : Brushes.LightGray;
+            cardElement.BorderThickness = isMatch ? new Thickness(2) : new Thickness(1);
+        }
+
+        return isMatch;
+    }
+
+    /// <summary>
+    /// Briefly flashes the status text's background so a live keyword-alert match is noticeable
+    /// even when the transcript itself isn't in view. A fresh timer per call means overlapping
+    /// alerts each get their own full flash instead of one cutting another short.
+    /// </summary>
+    private void FlashStatusTextForKeywordAlert()
+    {
+        if (_statusText == null) return;
+
+        _statusText.Background = Brushes.Gold;
+        var flashTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+        flashTimer.Tick += (s, e) =>
+        {
+            flashTimer.Stop();
+            if (_statusText != null) _statusText.Background = Brushes.Transparent;
+        };
+        flashTimer.Start();
+    }
+
+    private void ApplyKeywordAlertsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_keywordAlertsTextBox == null) return;
+
+        var keywords = _keywordAlertsTextBox.Text
+            .Split(',')
+            .Select(k => k.Trim())
+            .Where(k => !string.IsNullOrEmpty(k))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _appSettings.KeywordAlerts = keywords;
+        SaveAppSettings();
+
+        // Re-scan every already-displayed segment so the new keyword list takes effect
+        // immediately instead of only affecting segments that arrive after this point.
+        foreach (var segment in _transcriptionHistory)
+        {
+            ApplyKeywordAlertHighlight(segment);
+        }
+
+        if (_statusText != null)
+        {
+            _statusText.Text = keywords.Count > 0
+                ? $"Keyword alerts updated ({keywords.Count} keyword{(keywords.Count == 1 ? "" : "s")})."
+                : "Keyword alerts cleared.";
+        }
+    }
+
+    // --- Transcript search -----------------------------------------------------------------
+
+    private bool SegmentMatchesSearch(TranscriptionSegment segment, string query)
+    {
+        var displayedText = GetDisplayText(segment.Text);
+        var displayedSpeaker = GetDisplaySpeakerName(segment.Speaker);
+
+        return displayedText.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+               displayedSpeaker.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /// <summary>
+    /// Shows/hides every already-built segment card based on whether it matches the query, and
+    /// updates the match-count label. Only sets Visibility on existing elements - it never
+    /// rebuilds a card - so it's cheap to call on every keystroke (post-debounce), on every new
+    /// live segment while a filter is active, and after a full RefreshTranscriptionDisplay().
+    /// </summary>
+    private void ApplySearchFilter(string query)
+    {
+        _currentSearchQuery = query?.Trim() ?? "";
+        bool hasQuery = !string.IsNullOrEmpty(_currentSearchQuery);
+        int matchCount = 0;
+
+        foreach (var segment in _transcriptionHistory)
+        {
+            bool isMatch = !hasQuery || SegmentMatchesSearch(segment, _currentSearchQuery);
+            var cardElement = segment.CardElement;
+            if (cardElement != null)
+            {
+                cardElement.Visibility = isMatch ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (isMatch) matchCount++;
+        }
+
+        if (_searchMatchCountText != null)
+        {
+            _searchMatchCountText.Text = hasQuery ? $"{matchCount} match{(matchCount == 1 ? "" : "es")}" : "";
+        }
+    }
+
+    private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        // Debounce: restart the timer on every keystroke so a fast typist only triggers one
+        // filter pass ~300ms after they stop, not once per character.
+        if (_searchDebounceTimer == null)
+        {
+            _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _searchDebounceTimer.Tick += (s, args) =>
+            {
+                _searchDebounceTimer!.Stop();
+                ApplySearchFilter(_searchTextBox?.Text ?? "");
+            };
+        }
+
+        _searchDebounceTimer.Stop();
+        _searchDebounceTimer.Start();
+    }
+
+    private void SearchTextBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Escape)
+        {
+            _searchDebounceTimer?.Stop();
+            if (_searchTextBox != null) _searchTextBox.Text = "";
+            ApplySearchFilter("");
+            e.Handled = true;
+        }
+    }
+
     private void SaveTranscriptionButton_Click(object sender, RoutedEventArgs e)
     {
         if (_transcriptionHistory.Count == 0)
@@ -2811,7 +3778,7 @@ public partial class App : Application
 
         var saveFileDialog = new Microsoft.Win32.SaveFileDialog
         {
-            Filter = "JSON Files (*.json)|*.json|Text Files (*.txt)|*.txt|All Files (*.*)|*.*",
+            Filter = "JSON Files (*.json)|*.json|Text Files (*.txt)|*.txt|SubRip Subtitles (*.srt)|*.srt|WebVTT (*.vtt)|*.vtt|Markdown (*.md)|*.md|All Files (*.*)|*.*",
             DefaultExt = "json",
             FileName = $"Oreja_Transcription_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.json"
         };
@@ -2820,23 +3787,36 @@ public partial class App : Application
         {
             try
             {
+                string content;
                 if (saveFileDialog.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 {
-                    var jsonContent = GenerateJsonTranscription();
-                    File.WriteAllText(saveFileDialog.FileName, jsonContent);
+                    content = GenerateJsonTranscription();
+                }
+                else if (saveFileDialog.FileName.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
+                {
+                    content = GenerateSrtTranscription();
+                }
+                else if (saveFileDialog.FileName.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase))
+                {
+                    content = GenerateVttTranscription();
+                }
+                else if (saveFileDialog.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+                {
+                    content = GenerateMarkdownTranscription();
                 }
                 else
                 {
-                    var content = GenerateTranscriptionReport();
-                    File.WriteAllText(saveFileDialog.FileName, content);
+                    content = GenerateTranscriptionReport();
                 }
 
-                MessageBox.Show($"Transcription saved successfully to:\n{saveFileDialog.FileName}", 
+                File.WriteAllText(saveFileDialog.FileName, content);
+
+                MessageBox.Show($"Transcription saved successfully to:\n{saveFileDialog.FileName}",
                     "Oreja", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error saving transcription:\n{ex.Message}", 
+                MessageBox.Show($"Error saving transcription:\n{ex.Message}",
                     "Oreja Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -3035,6 +4015,119 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// SRT (SubRip) export: sequential 1-based indices, HH:MM:SS,mmm --> HH:MM:SS,mmm ranges from
+    /// each segment's start/end, and a "SpeakerName: text" line - using the same mapped display
+    /// name and privacy-mode redaction as the other export formats.
+    /// </summary>
+    private string GenerateSrtTranscription()
+    {
+        var sb = new System.Text.StringBuilder();
+        var orderedSegments = _transcriptionHistory.OrderBy(s => s.StartTime).ToList();
+        int index = 1;
+
+        foreach (var segment in orderedSegments)
+        {
+            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+            var text = _privacyModeEnabled ? "[REDACTED]" : (segment.Text ?? "");
+
+            sb.AppendLine(index.ToString());
+            sb.AppendLine($"{FormatSrtTimestamp(segment.StartTime)} --> {FormatSrtTimestamp(segment.EndTime)}");
+            sb.AppendLine($"{displaySpeaker}: {text}");
+            sb.AppendLine();
+            index++;
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// WebVTT export: the required "WEBVTT" header followed by cues using dot-millisecond
+    /// timestamps (WebVTT's format, vs. SRT's comma-millisecond).
+    /// </summary>
+    private string GenerateVttTranscription()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("WEBVTT");
+        sb.AppendLine();
+
+        foreach (var segment in _transcriptionHistory.OrderBy(s => s.StartTime))
+        {
+            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+            var text = _privacyModeEnabled ? "[REDACTED]" : (segment.Text ?? "");
+
+            sb.AppendLine($"{FormatVttTimestamp(segment.StartTime)} --> {FormatVttTimestamp(segment.EndTime)}");
+            sb.AppendLine($"{displaySpeaker}: {text}");
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Markdown meeting-notes export: a title with today's date, then one bolded-speaker
+    /// paragraph per run of consecutive same-speaker segments (so several short segments from the
+    /// same person read as one paragraph instead of one bullet per 5-second chunk).
+    /// </summary>
+    private string GenerateMarkdownTranscription()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"# Oreja Meeting Notes — {DateTime.Now:yyyy-MM-dd HH:mm}");
+        sb.AppendLine();
+
+        if (_privacyModeEnabled)
+        {
+            sb.AppendLine("_Legal-Safe Mode: verbatim transcription redacted._");
+            sb.AppendLine();
+        }
+
+        var orderedSegments = _transcriptionHistory.OrderBy(s => s.StartTime).ToList();
+        string? currentParagraphSpeaker = null;
+        var paragraphText = new System.Text.StringBuilder();
+
+        void FlushParagraph()
+        {
+            if (currentParagraphSpeaker != null && paragraphText.Length > 0)
+            {
+                sb.AppendLine($"**{currentParagraphSpeaker}:** {paragraphText.ToString().Trim()}");
+                sb.AppendLine();
+            }
+            paragraphText.Clear();
+        }
+
+        foreach (var segment in orderedSegments)
+        {
+            var displaySpeaker = GetDisplaySpeakerName(segment.Speaker);
+            var text = _privacyModeEnabled ? "[REDACTED]" : (segment.Text ?? "");
+
+            if (displaySpeaker != currentParagraphSpeaker)
+            {
+                FlushParagraph();
+                currentParagraphSpeaker = displaySpeaker;
+            }
+
+            if (paragraphText.Length > 0) paragraphText.Append(' ');
+            paragraphText.Append(text);
+        }
+        FlushParagraph();
+
+        return sb.ToString();
+    }
+
+    /// <summary>SRT timestamp: HH:MM:SS,mmm (comma before milliseconds).</summary>
+    private static string FormatSrtTimestamp(double totalSeconds)
+    {
+        var clamped = TimeSpan.FromSeconds(Math.Max(0, totalSeconds));
+        return $"{(int)clamped.TotalHours:D2}:{clamped.Minutes:D2}:{clamped.Seconds:D2},{clamped.Milliseconds:D3}";
+    }
+
+    /// <summary>WebVTT timestamp: HH:MM:SS.mmm (dot before milliseconds).</summary>
+    private static string FormatVttTimestamp(double totalSeconds)
+    {
+        var clamped = TimeSpan.FromSeconds(Math.Max(0, totalSeconds));
+        return $"{(int)clamped.TotalHours:D2}:{clamped.Minutes:D2}:{clamped.Seconds:D2}.{clamped.Milliseconds:D3}";
+    }
+
     private Brush GetSpeakerColor(string? speaker)
     {
         // Assign colors to speakers for better visualization
@@ -3126,76 +4219,130 @@ public partial class App : Application
     
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        // Save speaker settings before closing
-        SaveSpeakerSettings();
-        Console.WriteLine("Saved speaker settings on application exit");
-        
+        // Cancel any pending debounced save and write the final state synchronously - a crash
+        // no longer loses settings, but a clean close shouldn't rely on the 1s debounce either.
+        _settingsSaveTimer?.Stop();
+        SaveAppSettings();
+        Console.WriteLine("Saved settings on application exit");
+
         // Clean up resources
         _volumeTimer?.Stop();
         _transcriptionTimer?.Stop();
+        _backendHealthTimer?.Stop();
         _waveIn?.StopRecording();
         _waveIn?.Dispose();
         _systemAudioCapture?.StopRecording();
         _systemAudioCapture?.Dispose();
         _httpClient?.Dispose();
         _deviceEnumerator?.Dispose();
+
+        // Only stop a backend process WE spawned; one the user already had running is left alone.
+        var backendProcess = _autoStartedBackendProcess;
+        if (_weStartedBackend && backendProcess != null)
+        {
+            try
+            {
+                if (!backendProcess.HasExited)
+                {
+                    backendProcess.Kill(entireProcessTree: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error stopping auto-started backend process: {ex.Message}");
+            }
+            finally
+            {
+                backendProcess.Dispose();
+            }
+        }
     }
 
     private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
     {
         MessageBox.Show($"An unhandled exception occurred: {e.Exception.Message}", "Oreja Error", MessageBoxButton.OK, MessageBoxImage.Error);
-        e.Handled = true;
+
+        // Only swallow non-fatal exceptions and keep the app running. OutOfMemoryException means
+        // the process is already in a bad spot - let it crash honestly instead of limping on.
+        // (StackOverflowException can't reach a handler like this one at all, per the CLR.)
+        e.Handled = e.Exception is not OutOfMemoryException;
     }
 
-    private void LoadSpeakerSettings()
+    private void LoadAppSettings()
     {
         try
         {
             if (!string.IsNullOrEmpty(_settingsFilePath) && File.Exists(_settingsFilePath))
             {
-                Console.WriteLine($"Loading speaker settings from: {_settingsFilePath}");
+                Console.WriteLine($"Loading settings from: {_settingsFilePath}");
                 var json = File.ReadAllText(_settingsFilePath);
-                _speakerSettings = JsonSerializer.Deserialize<SpeakerSettings>(json) ?? new SpeakerSettings();
-                
+                // Old settings files only ever contained AvailableSpeakers/SpeakerNameMappings/
+                // NextSpeakerNumber; System.Text.Json defaults every property this class has
+                // added since, so an old file loads cleanly with no migration step.
+                _appSettings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+
                 // Update current state from loaded settings
-                if (_speakerSettings.AvailableSpeakers.Count > 0)
+                if (_appSettings.AvailableSpeakers.Count > 0)
                 {
-                    _availableSpeakers = _speakerSettings.AvailableSpeakers.ToList();
+                    _availableSpeakers = _appSettings.AvailableSpeakers.ToList();
                 }
                 else
                 {
                     // If no speakers saved, use new defaults (no preset speakers)
                     _availableSpeakers = new List<string> { "Unknown" };
                 }
-                
-                _nextSpeakerNumber = _speakerSettings.NextSpeakerNumber;
-                _speakerNames = new Dictionary<string, string>(_speakerSettings.SpeakerNameMappings);
-                
+
+                _nextSpeakerNumber = _appSettings.NextSpeakerNumber;
+                _speakerNames = new Dictionary<string, string>(_appSettings.SpeakerNameMappings);
+
                 Console.WriteLine($"Loaded settings: {_availableSpeakers.Count} speakers, next number: {_nextSpeakerNumber}");
             }
             else
             {
-                Console.WriteLine("No existing speaker settings found, using defaults");
+                Console.WriteLine("No existing settings file found, using defaults");
                 // Initialize with new defaults (no preset speakers)
                 _availableSpeakers = new List<string> { "Unknown" };
                 _nextSpeakerNumber = 1;
                 _speakerNames = new Dictionary<string, string>();
-                
-                // Save initial settings
-                SaveSpeakerSettings();
+                _appSettings = new AppSettings();
+            }
+
+            // Apply the non-speaker settings that don't depend on UI elements existing yet.
+            // (Device IDs are applied later by RestoreDeviceSelection, once the device combo
+            // boxes have been populated; privacy mode and window geometry are applied while the
+            // window is being built, in OnStartup.)
+            _backendUrl = string.IsNullOrWhiteSpace(_appSettings.BackendUrl) ? DEFAULT_BACKEND_URL : _appSettings.BackendUrl;
+            _microphoneGain = _appSettings.MicGain > 0f ? _appSettings.MicGain : 1.0f;
+
+            if (string.IsNullOrEmpty(_settingsFilePath) == false && !File.Exists(_settingsFilePath))
+            {
+                SaveAppSettings(); // Persist the defaults for a brand-new install.
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading speaker settings: {ex.Message}");
+            Console.WriteLine($"Error loading settings: {ex.Message}");
             // Fallback to new defaults
             _availableSpeakers = new List<string> { "Unknown" };
             _nextSpeakerNumber = 1;
             _speakerNames = new Dictionary<string, string>();
+            _appSettings = new AppSettings();
+            _backendUrl = DEFAULT_BACKEND_URL;
+        }
+        finally
+        {
+            _settingsLoaded = true;
         }
     }
 
-    private void SaveSpeakerSettings()
+    /// <summary>
+    /// Persists the full settings object: speaker data plus device selection, privacy mode,
+    /// window geometry, backend URL/auto-start, and mic gain. Called immediately after
+    /// speaker-related changes (existing call sites) and via a ~1s debounce from
+    /// RequestSettingsSave for high-frequency changes (window drag/resize), plus once more on
+    /// close so nothing from the final second is lost.
+    /// </summary>
+    private void SaveAppSettings()
     {
         try
         {
@@ -3204,33 +4351,130 @@ public partial class App : Application
                 Console.WriteLine("Settings file path not initialized, skipping save");
                 return;
             }
-            
+
             // Update settings object with current state
-            _speakerSettings.AvailableSpeakers = _availableSpeakers.ToList();
-            _speakerSettings.NextSpeakerNumber = _nextSpeakerNumber;
-            _speakerSettings.SpeakerNameMappings = new Dictionary<string, string>(_speakerNames);
-            
-            var options = new JsonSerializerOptions 
-            { 
+            _appSettings.AvailableSpeakers = _availableSpeakers.ToList();
+            _appSettings.NextSpeakerNumber = _nextSpeakerNumber;
+            _appSettings.SpeakerNameMappings = new Dictionary<string, string>(_speakerNames);
+
+            _appSettings.MicDeviceId = _selectedMicrophone?.ID;
+            _appSettings.SystemDeviceId = _defaultSystemAudio?.ID;
+            _appSettings.PrivacyMode = _privacyModeEnabled;
+            _appSettings.BackendUrl = _backendUrl;
+            _appSettings.MicGain = _microphoneGain;
+            // AutoStartBackend is not mutated by any UI in this build, so whatever was loaded (or
+            // the type default) is simply written back unchanged. KeywordAlerts IS mutated by the
+            // 🔔 Keyword Alerts expander (ApplyKeywordAlertsButton_Click sets it directly on
+            // _appSettings), so there's nothing extra to sync here.
+
+            if (MainWindow != null)
+            {
+                // Only persist a real, on-screen size/position - a minimized window reports a
+                // near-zero restore rectangle that would be useless to restore next launch.
+                if (MainWindow.WindowState == WindowState.Normal)
+                {
+                    _appSettings.WindowWidth = MainWindow.Width;
+                    _appSettings.WindowHeight = MainWindow.Height;
+                    _appSettings.WindowLeft = MainWindow.Left;
+                    _appSettings.WindowTop = MainWindow.Top;
+                }
+            }
+
+            var options = new JsonSerializerOptions
+            {
                 WriteIndented = true // Make JSON readable
             };
-            var json = JsonSerializer.Serialize(_speakerSettings, options);
+            var json = JsonSerializer.Serialize(_appSettings, options);
             File.WriteAllText(_settingsFilePath, json);
-            
-            Console.WriteLine($"Saved speaker settings to: {_settingsFilePath}");
+
+            Console.WriteLine($"Saved settings to: {_settingsFilePath}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error saving speaker settings: {ex.Message}");
+            Console.WriteLine($"Error saving settings: {ex.Message}");
         }
     }
 
-    private void UpdateSpeakerSettings(string oldSpeaker, string newSpeaker)
+    /// <summary>
+    /// Schedules a settings save ~1s from now, restarting the delay on every call so a burst of
+    /// changes (dragging/resizing the window, toggling a checkbox) results in one write instead
+    /// of many. Must be called on the UI thread (DispatcherTimer).
+    /// </summary>
+    private void RequestSettingsSave()
+    {
+        if (!_settingsLoaded)
+        {
+            return; // Don't stomp on-disk settings while the initial load is still in progress.
+        }
+
+        if (_settingsSaveTimer == null)
+        {
+            _settingsSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _settingsSaveTimer.Tick += (s, e) =>
+            {
+                _settingsSaveTimer!.Stop();
+                SaveAppSettings();
+            };
+        }
+
+        _settingsSaveTimer.Stop();
+        _settingsSaveTimer.Start();
+    }
+
+    /// <summary>
+    /// Applies saved width/height/left/top to a not-yet-shown window, clamping the position so a
+    /// geometry saved while a second monitor was connected can't leave the window unreachable.
+    /// Left/Top are left as NaN (and WindowStartupLocation.CenterScreen, already set by the
+    /// caller) when no position has ever been saved.
+    /// </summary>
+    private static void ApplyWindowGeometry(Window window, AppSettings settings)
+    {
+        try
+        {
+            double screenWidth = SystemParameters.VirtualScreenWidth;
+            double screenHeight = SystemParameters.VirtualScreenHeight;
+            double screenLeft = SystemParameters.VirtualScreenLeft;
+            double screenTop = SystemParameters.VirtualScreenTop;
+
+            double width = settings.WindowWidth;
+            double height = settings.WindowHeight;
+            if (double.IsNaN(width) || width < 300) width = 800;
+            if (double.IsNaN(height) || height < 200) height = 800;
+            if (screenWidth > 0 && width > screenWidth) width = screenWidth;
+            if (screenHeight > 0 && height > screenHeight) height = screenHeight;
+
+            window.Width = width;
+            window.Height = height;
+
+            if (!double.IsNaN(settings.WindowLeft) && !double.IsNaN(settings.WindowTop) && screenWidth > 0 && screenHeight > 0)
+            {
+                double left = settings.WindowLeft;
+                double top = settings.WindowTop;
+                const double minVisible = 80; // Keep at least this many px reachable on-screen.
+
+                if (left + width < screenLeft + minVisible) left = screenLeft;
+                if (left > screenLeft + screenWidth - minVisible) left = screenLeft + screenWidth - minVisible;
+                if (top < screenTop) top = screenTop;
+                if (top > screenTop + screenHeight - minVisible) top = screenTop + screenHeight - minVisible;
+
+                window.WindowStartupLocation = WindowStartupLocation.Manual;
+                window.Left = left;
+                window.Top = top;
+            }
+            // else: leave WindowStartupLocation as CenterScreen (set by the caller) - first run.
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error applying window geometry: {ex.Message}");
+        }
+    }
+
+    private void UpdateAppSettings(string oldSpeaker, string newSpeaker)
     {
         if (_speakerNames.ContainsKey(oldSpeaker))
         {
             _speakerNames[oldSpeaker] = newSpeaker;
-            SaveSpeakerSettings();
+            SaveAppSettings();
         }
     }
 
@@ -3261,25 +4505,29 @@ public partial class App : Application
         if (result == MessageBoxResult.Yes)
         {
             _availableSpeakers.Remove(selectedSpeaker);
-            
-            // Update all segments that used this speaker to "Unknown"
+
+            // Update all segments that used this speaker to "Unknown" and patch their cards in
+            // place (previously these cards kept showing the deleted speaker until some other
+            // full-rebuild event happened, since this method never triggered one itself).
             foreach (var segment in _transcriptionHistory.Where(s => s.Speaker == selectedSpeaker))
             {
                 segment.Speaker = "Unknown";
+                UpdateSegmentCardInPlace(segment);
             }
-            
+
             // Update current ComboBox to "Unknown"
             UpdateSegmentSpeaker(segmentId, "Unknown");
-            
-            // Refresh all dropdowns and save settings
+
+            // Refresh all dropdowns (the deleted speaker must disappear from every ItemsSource)
+            // and save settings.
             RefreshAllSpeakerDropdowns();
-            SaveSpeakerSettings();
-            
+            SaveAppSettings();
+
             Console.WriteLine($"Deleted speaker: {selectedSpeaker}");
         }
     }
 
-    // Add after the existing LoadSpeakerSettings method
+    // Add after the existing LoadAppSettings method
     private async Task LoadSpeakersFromBackend()
     {
         try
@@ -3289,11 +4537,11 @@ public partial class App : Application
             if (_httpClient == null)
             {
                 Console.WriteLine("❌ HTTP client not initialized, falling back to local settings");
-                LoadSpeakerSettings();
+                LoadAppSettings();
                 return;
             }
             
-            var response = await _httpClient.GetAsync($"{BACKEND_URL}/speakers");
+            var response = await _httpClient.GetAsync($"{_backendUrl}/speakers");
             if (response.IsSuccessStatusCode)
             {
                 var content = await response.Content.ReadAsStringAsync();
@@ -3321,19 +4569,309 @@ public partial class App : Application
                 RefreshAllSpeakerDropdowns();
                 
                 // Save the loaded speakers to local settings as backup
-                SaveSpeakerSettings();
+                SaveAppSettings();
             }
             else
             {
                 Console.WriteLine($"❌ Backend responded with {response.StatusCode}, falling back to local settings");
-                LoadSpeakerSettings();
+                LoadAppSettings();
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Error loading speakers from backend: {ex.Message}");
             Console.WriteLine("📁 Falling back to local speaker settings");
-            LoadSpeakerSettings();
+            LoadAppSettings();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Audio capture plumbing
+    //
+    // Concurrency model: every capture source owns an AudioSourceState. The NAudio capture
+    // callback thread appends already-normalised bytes under state.Sync; the UI timer thread
+    // drains the buffer and claims the source under the same lock. A source that is mid-flight
+    // keeps its audio buffered instead of having it cleared and then dropped, and one slow
+    // source can no longer starve the other. No await ever happens while a lock is held.
+    // ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Capture/dispatch state for a single audio source (microphone or system loopback).
+    /// </summary>
+    private sealed class AudioSourceState
+    {
+        public AudioSourceState(string displayName, string sourceTag)
+        {
+            DisplayName = displayName;
+            SourceTag = sourceTag;
+        }
+
+        /// <summary>Human readable name used in the UI and in log lines.</summary>
+        public string DisplayName { get; }
+
+        /// <summary>Short machine tag sent to the backend as ?source=... ("mic" / "system").</summary>
+        public string SourceTag { get; }
+
+        /// <summary>Guards the Buffer and IsProcessing members below, together.</summary>
+        public object Sync { get; } = new object();
+
+        /// <summary>Pending 16 kHz mono 16-bit little-endian PCM bytes awaiting transcription.</summary>
+        public List<byte> Buffer { get; } = new List<byte>();
+
+        /// <summary>True while a /transcribe request for THIS source is outstanding.</summary>
+        public bool IsProcessing { get; set; }
+    }
+
+    /// <summary>
+    /// Appends already-converted 16 kHz mono 16-bit PCM to a source's buffer, dropping the
+    /// oldest audio once the buffer exceeds MAX_BUFFERED_AUDIO_SECONDS seconds of audio.
+    /// </summary>
+    private static void AppendAudioToSource(AudioSourceState state, byte[] pcmBytes, int count)
+    {
+        if (count <= 0 || pcmBytes.Length == 0)
+        {
+            return;
+        }
+
+        if (count > pcmBytes.Length)
+        {
+            count = pcmBytes.Length;
+        }
+
+        lock (state.Sync)
+        {
+            if (count == pcmBytes.Length)
+            {
+                state.Buffer.AddRange(pcmBytes);
+            }
+            else
+            {
+                state.Buffer.AddRange(pcmBytes.Take(count));
+            }
+
+            int overflow = state.Buffer.Count - MAX_BUFFERED_AUDIO_BYTES;
+            if (overflow > 0)
+            {
+                // Keep the trim on a 16-bit sample boundary so we never split a sample.
+                if ((overflow & 1) != 0)
+                {
+                    overflow++;
+                }
+
+                if (overflow > state.Buffer.Count)
+                {
+                    overflow = state.Buffer.Count;
+                }
+
+                state.Buffer.RemoveRange(0, overflow);
+            }
+        }
+    }
+
+    /// <summary>Drops any audio buffered for a source (used when a new recording starts).</summary>
+    private static void ResetAudioSource(AudioSourceState state)
+    {
+        lock (state.Sync)
+        {
+            state.Buffer.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Scales a float sample (nominally in [-1, 1], or an already-scaled Int16 value) into the
+    /// Int16 range with saturation instead of wraparound.
+    /// </summary>
+    private static short ClampToInt16(float value)
+    {
+        if (float.IsNaN(value))
+        {
+            return 0;
+        }
+
+        if (value >= short.MaxValue)
+        {
+            return short.MaxValue;
+        }
+
+        if (value <= short.MinValue)
+        {
+            return short.MinValue;
+        }
+
+        return (short)value;
+    }
+
+    /// <summary>
+    /// Converts WASAPI loopback audio into the 16 kHz mono 16-bit little-endian PCM the
+    /// backend expects.
+    ///
+    /// Three steps, in order:
+    ///   1. decode the interleaved source samples (32-bit IEEE float or 16-bit PCM),
+    ///   2. downmix to mono by averaging all channels,
+    ///   3. resample to 16 kHz by linear interpolation.
+    ///
+    /// The resampler keeps the previous callback's final sample and its fractional read
+    /// position in fields, so successive capture buffers are joined seamlessly - without the
+    /// carry, every callback boundary would introduce a phase jump and an audible click that
+    /// degrades ASR accuracy. Instances are used from the single NAudio capture thread.
+    /// </summary>
+    private sealed class SystemAudioFormatConverter
+    {
+        private float _previousSample;
+        private double _sourcePosition = 1.0;
+        private int _configuredSampleRate = -1;
+        private int _configuredChannels = -1;
+        private float[] _monoScratch = Array.Empty<float>();
+
+        /// <summary>Clears the interpolation carry; call when (re)starting a capture.</summary>
+        public void Reset()
+        {
+            _previousSample = 0f;
+            _sourcePosition = 1.0;
+            _configuredSampleRate = -1;
+            _configuredChannels = -1;
+        }
+
+        /// <summary>
+        /// Converts the first bytesRecorded bytes of buffer, laid out according to sourceFormat,
+        /// into 16 kHz mono 16-bit little-endian PCM.
+        /// Throws NotSupportedException when the source format cannot be decoded.
+        /// </summary>
+        public byte[] ConvertToPcm16Mono16k(WaveFormat? sourceFormat, byte[] buffer, int bytesRecorded)
+        {
+            if (sourceFormat == null)
+            {
+                throw new NotSupportedException("the capture reported no wave format");
+            }
+
+            if (bytesRecorded <= 0)
+            {
+                return Array.Empty<byte>();
+            }
+
+            int channels = sourceFormat.Channels;
+            int sampleRate = sourceFormat.SampleRate;
+            if (channels <= 0 || sampleRate <= 0)
+            {
+                throw new NotSupportedException($"implausible format: {channels} channel(s) @ {sampleRate} Hz");
+            }
+
+            // NAudio reports the endpoint's real mix format. WASAPI shared mode is normally
+            // 32-bit IEEE float; some drivers describe the same layout as WAVE_FORMAT_EXTENSIBLE,
+            // which surfaces here as Encoding.Extensible, so bit depth decides in that case.
+            bool isFloat32;
+            if (sourceFormat.BitsPerSample == 32 &&
+                (sourceFormat.Encoding == WaveFormatEncoding.IeeeFloat ||
+                 sourceFormat.Encoding == WaveFormatEncoding.Extensible))
+            {
+                isFloat32 = true;
+            }
+            else if (sourceFormat.BitsPerSample == 16 &&
+                     (sourceFormat.Encoding == WaveFormatEncoding.Pcm ||
+                      sourceFormat.Encoding == WaveFormatEncoding.Extensible))
+            {
+                isFloat32 = false;
+            }
+            else
+            {
+                throw new NotSupportedException(
+                    $"encoding {sourceFormat.Encoding} at {sourceFormat.BitsPerSample} bit(s) per sample");
+            }
+
+            int bytesPerSample = isFloat32 ? 4 : 2;
+            int bytesPerFrame = channels * bytesPerSample;
+            int frameCount = bytesRecorded / bytesPerFrame;
+            if (frameCount <= 0)
+            {
+                return Array.Empty<byte>();
+            }
+
+            // A mid-stream format change would invalidate the carried interpolation state.
+            if (sampleRate != _configuredSampleRate || channels != _configuredChannels)
+            {
+                _configuredSampleRate = sampleRate;
+                _configuredChannels = channels;
+                _previousSample = 0f;
+                _sourcePosition = 1.0;
+            }
+
+            if (_monoScratch.Length < frameCount)
+            {
+                _monoScratch = new float[frameCount];
+            }
+
+            float[] mono = _monoScratch;
+
+            // Step 1 + 2: decode and downmix to mono by averaging the channels.
+            if (isFloat32)
+            {
+                for (int frame = 0; frame < frameCount; frame++)
+                {
+                    int offset = frame * bytesPerFrame;
+                    float sum = 0f;
+                    for (int channel = 0; channel < channels; channel++)
+                    {
+                        sum += BitConverter.ToSingle(buffer, offset + (channel * 4));
+                    }
+                    mono[frame] = sum / channels;
+                }
+            }
+            else
+            {
+                for (int frame = 0; frame < frameCount; frame++)
+                {
+                    int offset = frame * bytesPerFrame;
+                    float sum = 0f;
+                    for (int channel = 0; channel < channels; channel++)
+                    {
+                        sum += BitConverter.ToInt16(buffer, offset + (channel * 2)) / 32768f;
+                    }
+                    mono[frame] = sum / channels;
+                }
+            }
+
+            // Step 3: linear-interpolation resample to 16 kHz.
+            //
+            // The virtual input stream for this callback is
+            //     c[0]    = last mono sample of the PREVIOUS callback (_previousSample)
+            //     c[k]    = mono[k - 1]   for k in 1..frameCount
+            // and _sourcePosition is a fractional index into c carried across callbacks.
+            // After the loop it is rebased by frameCount so it stays valid for the next
+            // buffer, whose c[0] is this buffer's last sample.
+            double step = (double)sampleRate / App.TRANSCRIPTION_SAMPLE_RATE;
+            double position = _sourcePosition;
+
+            int estimatedSamples = (int)((frameCount - position) / step) + 2;
+            if (estimatedSamples < 0)
+            {
+                estimatedSamples = 0;
+            }
+
+            var output = new List<byte>(estimatedSamples * 2);
+
+            while (position < frameCount)
+            {
+                int index = (int)position;              // position >= 0, so this is floor()
+                double fraction = position - index;
+                float a = index == 0 ? _previousSample : mono[index - 1];
+                float b = mono[index];                  // c[index + 1]
+                float value = (float)(a + ((b - a) * fraction));
+
+                short pcm = App.ClampToInt16(value * 32767f);
+                output.Add((byte)(pcm & 0xFF));
+                output.Add((byte)((pcm >> 8) & 0xFF));
+
+                position += step;
+            }
+
+            _previousSample = mono[frameCount - 1];
+            _sourcePosition = position - frameCount;
+            if (_sourcePosition < 0)
+            {
+                _sourcePosition = 0;
+            }
+
+            return output.ToArray();
         }
     }
 } 

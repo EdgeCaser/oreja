@@ -40,79 +40,16 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
-    
-    <!-- SQLite Database -->
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="8.0.0" />
-    
-    <!-- HTTP Client -->
+
+    <!-- HTTP Client / JSON -->
     <PackageReference Include="System.Net.Http" Version="4.3.4" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
-    
-    <!-- SkiaSharp for Volume Meters -->
-    <PackageReference Include="SkiaSharp" Version="2.88.6" />
-    <PackageReference Include="SkiaSharp.Views.WPF" Version="2.88.6" />
-    
-    <!-- Dependency Injection -->
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="8.0.0" />
-    
-    <!-- Configuration -->
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
-    
-    <!-- Logging -->
-    <PackageReference Include="Serilog" Version="3.0.1" />
-    <PackageReference Include="Serilog.Extensions.Logging" Version="7.0.0" />
-    <PackageReference Include="Serilog.Sinks.Console" Version="4.1.0" />
-    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- Test Dependencies (for test projects) -->
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" Condition="'$(IsTestProject)' == 'true'" />
-    <PackageReference Include="xunit" Version="2.6.1" Condition="'$(IsTestProject)' == 'true'" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" Condition="'$(IsTestProject)' == 'true'" />
-    <PackageReference Include="Moq" Version="4.20.69" Condition="'$(IsTestProject)' == 'true'" />
-    <PackageReference Include="FluentAssertions" Version="6.12.0" Condition="'$(IsTestProject)' == 'true'" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Embedded Resources -->
-    <!-- <Resource Include="Resources\**\*" /> -->
-    <!-- <EmbeddedResource Include="Resources\**\*" /> -->
-    
-    <!-- Application Icon -->
-    <!-- <None Include="Resources\oreja-icon.ico" /> -->
-    
-    <!-- Configuration Files -->
-    <None Include="appsettings.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="appsettings.Development.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- SQLite Native Binaries -->
-    <None Include="runtimes\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Documentation Files -->
-    <None Include="README.md" />
-    <None Include="ARCHITECTURE.md" />
-    <None Include="DEVELOPMENT.md" />
-    <None Include="CODE_STYLE.md" />
-    <None Include="CONTRIBUTING.md" />
-    <None Include=".cursorrules" />
-  </ItemGroup>
+  <!-- Documentation files in this repo use a .markdown extension (README.markdown,
+       ARCHITECTURE.markdown, etc.); the previous None includes here pointed at nonexistent
+       .md files and were removed rather than fixed, since a docs file doesn't need to be part
+       of the compiled project. -->
 
   <PropertyGroup>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
