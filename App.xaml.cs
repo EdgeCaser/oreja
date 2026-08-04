@@ -328,11 +328,11 @@ public partial class App : Application
         // Get auto speakers that were used in recent transcription segments
         var recentSpeakers = _transcriptionHistory
             .Where(t => t.Timestamp >= DateTime.Now.AddMinutes(-30)) // Last 30 minutes
-            .Where(t => autoSpeakers.Contains(t.Speaker))
+            .Where(t => t.Speaker != null && autoSpeakers.Contains(t.Speaker))
             .GroupBy(t => t.Speaker)
             .OrderByDescending(g => g.Max(t => t.Timestamp))
             .Take(maxCount)
-            .Select(g => g.Key)
+            .Select(g => g.Key!)
             .ToList();
             
         // If we don't have enough recent ones, add the most recent auto speakers by name
@@ -411,7 +411,7 @@ public partial class App : Application
         
         selectButton.Click += (s, e) =>
         {
-            string selectedSpeaker = null;
+            string? selectedSpeaker = null;
             
             if (!string.IsNullOrWhiteSpace(textBox.Text))
             {
