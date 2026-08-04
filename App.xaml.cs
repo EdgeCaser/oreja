@@ -176,6 +176,11 @@ public partial class App : Application
     private Dictionary<string, string> _speakerNames = new Dictionary<string, string>();
     private Button? _saveTranscriptionButton;
     private List<TranscriptionSegment> _transcriptionHistory = new List<TranscriptionSegment>();
+
+    // File transcription: one at a time, mutually exclusive with live recording so the
+    // transcript timeline never interleaves file-relative and recording-relative times.
+    private Button? _transcribeFileButton;
+    private bool _isFileTranscriptionRunning = false;
     
     // Manual speaker assignment functionality
     private List<string> _availableSpeakers = new List<string> { "Unknown" }; // Remove default speakers 1-4
@@ -701,11 +706,24 @@ public partial class App : Application
                 IsEnabled = false // Initially disabled until we have transcriptions
             };
             _saveTranscriptionButton.Click += SaveTranscriptionButton_Click;
-            
+
+            _transcribeFileButton = new Button
+            {
+                Content = "📂 Transcribe File",
+                Width = 150,
+                Height = 40,
+                Margin = new Thickness(10, 0, 0, 0),
+                FontSize = 14,
+                Background = Brushes.LightBlue,
+                ToolTip = "Transcribe an audio file (WAV/FLAC/OGG/MP3) through the same pipeline as live audio"
+            };
+            _transcribeFileButton.Click += TranscribeFileButton_Click;
+
             buttonPanel.Children.Add(_startRecordingButton);
             buttonPanel.Children.Add(_stopRecordingButton);
             buttonPanel.Children.Add(_monitoringToggleButton);
             buttonPanel.Children.Add(_saveTranscriptionButton);
+            buttonPanel.Children.Add(_transcribeFileButton);
             Grid.SetRow(buttonPanel, currentRow++);
 
             // Backend status indicator: a small colored dot + short text, updated by the
@@ -1588,6 +1606,7 @@ public partial class App : Application
                 if (_statusText != null) _statusText.Text = $"Recording from: {_selectedMicrophone.FriendlyName} - Transcribing in real-time... (monitoring auto-enabled)";
                 if (_startRecordingButton != null) _startRecordingButton.IsEnabled = false;
                 if (_stopRecordingButton != null) _stopRecordingButton.IsEnabled = true;
+                if (_transcribeFileButton != null) _transcribeFileButton.IsEnabled = false;
                 if (_monitoringToggleButton != null)
                 {
                     _monitoringToggleButton.Content = "🔄 Recording Mode";
@@ -1625,6 +1644,7 @@ public partial class App : Application
             if (_statusText != null) _statusText.Text = "Recording stopped. Transcription complete.";
             if (_stopRecordingButton != null) _stopRecordingButton.IsEnabled = false;
             if (_startRecordingButton != null) _startRecordingButton.IsEnabled = true;
+            if (_transcribeFileButton != null) _transcribeFileButton.IsEnabled = !_isFileTranscriptionRunning;
             
             // Re-enable monitoring toggle and restore monitoring state
             if (_monitoringToggleButton != null)
@@ -2117,6 +2137,131 @@ public partial class App : Application
             {
                 state.IsProcessing = false;
             }
+        }
+    }
+
+    /// <summary>
+    /// Picks an audio file and runs it through the same /transcribe pipeline as live audio.
+    /// Segments land in the transcript view with file-relative timestamps, so display
+    /// merging, exports, search and keyword alerts all work unchanged. Mutually exclusive
+    /// with live recording (see _isFileTranscriptionRunning) - mixing file-relative and
+    /// recording-relative timestamps in one transcript would corrupt SRT/VTT exports.
+    /// </summary>
+    private async void TranscribeFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecording || _isFileTranscriptionRunning)
+        {
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Choose an audio file to transcribe",
+            Filter = "Audio files (*.wav;*.mp3;*.flac;*.ogg;*.m4a)|*.wav;*.mp3;*.flac;*.ogg;*.m4a|All files (*.*)|*.*"
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var filePath = dialog.FileName;
+        var fileName = System.IO.Path.GetFileName(filePath);
+
+        _isFileTranscriptionRunning = true;
+        if (_transcribeFileButton != null)
+        {
+            _transcribeFileButton.IsEnabled = false;
+            _transcribeFileButton.Content = "⏳ Transcribing...";
+        }
+        if (_startRecordingButton != null) _startRecordingButton.IsEnabled = false;
+        if (_statusText != null)
+        {
+            _statusText.Text = $"Transcribing '{fileName}'... long files can take a few minutes.";
+        }
+
+        try
+        {
+            byte[] fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+
+            using var content = new MultipartFormDataContent();
+            var audioContent = new ByteArrayContent(fileBytes);
+            audioContent.Headers.ContentType =
+                new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            content.Add(audioContent, "audio", fileName);
+
+            // "file" is normalized to an unscoped probe by the backend: file audio is
+            // neither the near end nor the far end, so voices enrolled from either
+            // source may match.
+            var requestUrl = $"{_backendUrl}/transcribe?source=file";
+
+            // The shared client's 60s timeout is tuned for short live chunks; a long
+            // file legitimately transcribes for minutes.
+            using var fileClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            var response = await fileClient.PostAsync(requestUrl, content);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                if (error.Length > 200) error = error.Substring(0, 200);
+                if (_statusText != null)
+                {
+                    _statusText.Text = $"File transcription failed (HTTP {(int)response.StatusCode}): {error}";
+                }
+                return;
+            }
+
+            var jsonResponse = await response.Content.ReadAsStringAsync();
+            var transcriptionResult = JsonSerializer.Deserialize<JsonElement>(jsonResponse);
+
+            int added = 0;
+            if (transcriptionResult.TryGetProperty("segments", out var segments))
+            {
+                foreach (var segment in segments.EnumerateArray())
+                {
+                    var text = segment.GetProperty("text").GetString();
+                    var speaker = segment.GetProperty("speaker").GetString();
+                    var startTime = segment.GetProperty("start").GetDouble();
+                    var endTime = segment.TryGetProperty("end", out var endProp)
+                        ? endProp.GetDouble()
+                        : startTime;
+
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        continue;
+                    }
+
+                    // File timestamps are already absolute within the file - no chunk
+                    // offset to add, unlike the live path.
+                    AddTranscriptionSegment(speaker, text, startTime, endTime, $"File: {fileName}");
+                    added++;
+                }
+            }
+
+            ReportBackendSuccess();
+            if (_statusText != null)
+            {
+                _statusText.Text = added > 0
+                    ? $"Transcribed '{fileName}': {added} segments."
+                    : $"'{fileName}' contained no recognizable speech.";
+            }
+        }
+        catch (Exception ex)
+        {
+            ReportBackendFailure(ex.Message);
+            if (_statusText != null)
+            {
+                _statusText.Text = $"File transcription error: {ex.Message}";
+            }
+        }
+        finally
+        {
+            _isFileTranscriptionRunning = false;
+            if (_transcribeFileButton != null)
+            {
+                _transcribeFileButton.Content = "📂 Transcribe File";
+                _transcribeFileButton.IsEnabled = !_isRecording;
+            }
+            if (_startRecordingButton != null) _startRecordingButton.IsEnabled = !_isRecording;
         }
     }
 
