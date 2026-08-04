@@ -23,10 +23,14 @@ import requests
 # model - the same single embedding system the live server uses, so voiceprints
 # learned here are usable there and vice versa.
 from speaker_database_v2 import EnhancedSpeakerDatabase
+import server
 from server import (
+    ensure_embedding_model,
     extract_embedding_from_audio,
     load_audio_from_bytes,
+    merge_transcription_and_diarization,
     prepare_waveform,
+    run_diarization,
     run_transcription,
 )
 
@@ -40,9 +44,35 @@ class BatchTranscriptionProcessor:
     """
     
     def __init__(self, backend_url: str = "http://127.0.0.1:8000",
-                 speaker_data_dir: str = None):
+                 speaker_data_dir: str = None,
+                 load_local_models: bool = False):
+        """
+        Args:
+            backend_url: base URL of a running Oreja server, used only by the
+                API fallback path.
+            speaker_data_dir: on-disk v2 speaker database directory.
+            load_local_models: load ASR + diarization + embedding models into
+                THIS process (server.initialize_models()). Required when running
+                standalone - server.initialize_models() otherwise only ever runs
+                from the FastAPI startup event, so in a bare CLI process
+                server.whisper_model / diarization_pipeline / embedding_model are
+                all None: transcription silently falls through to the HTTP API
+                and every segment gets ("Unknown", 0.0) from voiceprint
+                identification. Off by default so importing this class inside the
+                server process (or in tests) does not pull in models.
+        """
         self.backend_url = backend_url
         self.results: List[Dict[str, Any]] = []
+
+        if load_local_models:
+            try:
+                logger.info("Loading local ASR / diarization / embedding models for batch processing...")
+                server.initialize_models()
+            except Exception as e:
+                logger.warning(
+                    f"Could not load local models ({e}); "
+                    "falling back to the backend API for transcription"
+                )
 
         # Configuration
         self.SAMPLE_RATE = 16000
@@ -63,11 +93,15 @@ class BatchTranscriptionProcessor:
         """
         Extract one voiceprint from a segment crop.
 
-        Returns None whenever the embedding model is not loaded in this process
-        (server.initialize_models() has not run, or pyannote is unavailable), so
-        every caller degrades to diarization-only speakers instead of failing.
+        Loads the embedding model on demand, so this works in a standalone CLI
+        process where server.initialize_models() never ran. Returns None only
+        when the model genuinely cannot be loaded (pyannote unavailable) or the
+        crop is unusable, so every caller degrades to diarization-only speakers
+        instead of failing.
         """
         try:
+            if not ensure_embedding_model():
+                return None
             waveform, sample_rate = prepare_waveform(segment_waveform, sample_rate)
             return extract_embedding_from_audio(waveform, sample_rate)
         except Exception as e:
@@ -300,6 +334,42 @@ class BatchTranscriptionProcessor:
             logger.error(f"Error loading audio {audio_path}: {e}")
             raise
     
+    def _apply_local_diarization(self, transcription_result: Dict[str, Any],
+                                 waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
+        """
+        Attach diarization speakers to a locally-produced transcription.
+
+        server.run_transcription() returns ASR "chunks" only - they carry no
+        'speaker' key at all. Without this pass every batch segment's
+        original_speaker is "Unknown" and voiceprint identification has no
+        per-speaker grouping to refine, so batch output had no usable speaker
+        labels unless the HTTP API fallback happened to fire (POST /transcribe
+        does its own merge, which is why that path was unaffected).
+        """
+        if not transcription_result:
+            return transcription_result
+        if transcription_result.get("segments") or transcription_result.get("skipped_reason"):
+            return transcription_result
+        if server.diarization_pipeline is None:
+            logger.info(
+                "Diarization model not loaded in this process - batch segments "
+                "keep ASR-only labels (construct with load_local_models=True)"
+            )
+            return transcription_result
+
+        try:
+            diarization = asyncio.run(run_diarization(waveform, sample_rate))
+            segments = merge_transcription_and_diarization(
+                transcription_result, diarization, waveform, sample_rate
+            )
+            if segments:
+                transcription_result = dict(transcription_result)
+                transcription_result["segments"] = segments
+        except Exception as e:
+            logger.warning(f"Batch diarization failed, keeping ASR-only segments: {e}")
+
+        return transcription_result
+
     def _transcribe_audio_with_progress(self, waveform: torch.Tensor, sample_rate: int, progress_callback: callable = None) -> Dict[str, Any]:
         """Get transcription from the backend with simulated progress"""
         import threading
@@ -351,9 +421,12 @@ class BatchTranscriptionProcessor:
             
             if transcription_error[0]:
                 raise transcription_error[0]
-            
-            return transcription_result[0]
-            
+
+            # Local ASR produces no speakers - run diarization and merge.
+            return self._apply_local_diarization(
+                transcription_result[0], waveform, sample_rate
+            )
+
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             # Fallback: try backend API
@@ -364,7 +437,8 @@ class BatchTranscriptionProcessor:
         try:
             # Use the existing transcription function
             result = asyncio.run(run_transcription(waveform, sample_rate))
-            return result
+            # Local ASR produces no speakers - run diarization and merge.
+            return self._apply_local_diarization(result, waveform, sample_rate)
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             # Fallback: try backend API
@@ -753,8 +827,10 @@ def main():
     
     logger.info(f"Found {len(audio_files)} audio files")
     
-    # Process files
-    processor = BatchTranscriptionProcessor(args.backend_url)
+    # Process files. Standalone CLI run: load ASR/diarization/embedding models
+    # into this process, otherwise nothing here can transcribe or identify
+    # speakers locally and every file falls through to the HTTP API.
+    processor = BatchTranscriptionProcessor(args.backend_url, load_local_models=True)
     
     try:
         results = processor.process_batch(

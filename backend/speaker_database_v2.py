@@ -23,6 +23,7 @@ instead of raising or producing nonsense similarities.
 import json
 import logging
 import os
+import threading
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, asdict, fields as dataclass_fields
@@ -130,9 +131,19 @@ class EnhancedSpeakerDatabase:
     ``(speaker_id, display_name, confidence)``. When nothing clears the match
     threshold a new auto speaker is created holding that embedding, so the next
     time the same voice appears it is recognised.
+
+    Thread safety: every public reader/mutator takes ``self._lock`` (an RLock,
+    so nested calls such as identify_speaker -> add_embedding -> _save_database
+    are fine). The server runs these from several asyncio.to_thread workers at
+    once - GET /speakers concurrent with a /transcribe chunk that auto-creates a
+    speaker used to raise "dictionary changed size during iteration", and two
+    concurrent saves could interleave a partial speaker_records.json write.
+    Callers must NOT rely on an external lock for correctness.
     """
 
     def __init__(self, data_dir: str = "speaker_data_v2"):
+        self._lock = threading.RLock()
+
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,39 +229,41 @@ class EnhancedSpeakerDatabase:
             logger.error(f"Error loading speaker database: {e}")
 
     def _save_database(self):
-        """Save speaker records and embeddings to storage"""
-        try:
-            for speaker_id, record in self.speaker_records.items():
-                embeddings = self.speaker_embeddings.get(speaker_id, [])
-                confidences = self.confidence_scores.get(speaker_id, [])
-                record.update_stats(embeddings, confidences)
+        """Save speaker records and embeddings to storage (thread-safe)."""
+        with self._lock:
+            try:
+                for speaker_id in list(self.speaker_records.keys()):
+                    record = self.speaker_records[speaker_id]
+                    embeddings = self.speaker_embeddings.get(speaker_id, [])
+                    confidences = self.confidence_scores.get(speaker_id, [])
+                    record.update_stats(embeddings, confidences)
 
-            records_data = {
-                speaker_id: asdict(record)
-                for speaker_id, record in self.speaker_records.items()
-            }
+                records_data = {
+                    speaker_id: asdict(record)
+                    for speaker_id, record in self.speaker_records.items()
+                }
 
-            with open(self.records_file, 'w') as f:
-                json.dump(records_data, f, indent=2)
+                with open(self.records_file, 'w') as f:
+                    json.dump(records_data, f, indent=2)
 
-            for speaker_id in list(self.speaker_records.keys()):
-                embeddings = self.speaker_embeddings.get(speaker_id, [])
-                embeddings_file = self.embeddings_dir / f"{speaker_id}.npy"
-                if embeddings:
-                    payload = {
-                        'embeddings': embeddings,
-                        'confidence_scores': self.confidence_scores.get(speaker_id, [])
-                    }
-                    np.save(embeddings_file, payload)
-                elif embeddings_file.exists():
-                    # A speaker whose bank was emptied must not keep a stale file
-                    # that would be re-loaded on the next start.
-                    embeddings_file.unlink()
+                for speaker_id in list(self.speaker_records.keys()):
+                    embeddings = self.speaker_embeddings.get(speaker_id, [])
+                    embeddings_file = self.embeddings_dir / f"{speaker_id}.npy"
+                    if embeddings:
+                        payload = {
+                            'embeddings': embeddings,
+                            'confidence_scores': self.confidence_scores.get(speaker_id, [])
+                        }
+                        np.save(embeddings_file, payload)
+                    elif embeddings_file.exists():
+                        # A speaker whose bank was emptied must not keep a stale file
+                        # that would be re-loaded on the next start.
+                        embeddings_file.unlink()
 
-            logger.debug("Speaker database saved successfully")
+                logger.debug("Speaker database saved successfully")
 
-        except Exception as e:
-            logger.error(f"Error saving speaker database: {e}")
+            except Exception as e:
+                logger.error(f"Error saving speaker database: {e}")
 
     def save(self):
         """Public flush of records + embeddings to disk."""
@@ -274,11 +287,13 @@ class EnhancedSpeakerDatabase:
 
     def get_speaker(self, speaker_id: str) -> Optional[SpeakerRecord]:
         """Return the record for a speaker ID, or None."""
-        return self.speaker_records.get(speaker_id)
+        with self._lock:
+            return self.speaker_records.get(speaker_id)
 
     def get_display_name(self, speaker_id: str) -> Optional[str]:
-        record = self.speaker_records.get(speaker_id)
-        return record.display_name if record else None
+        with self._lock:
+            record = self.speaker_records.get(speaker_id)
+            return record.display_name if record else None
 
     def get_all_speakers(self) -> List[Dict]:
         """
@@ -289,23 +304,27 @@ class EnhancedSpeakerDatabase:
         """
         speakers = []
 
-        for speaker_id, record in self.speaker_records.items():
-            embeddings = self.speaker_embeddings.get(speaker_id, [])
-            confidences = self.confidence_scores.get(speaker_id, [])
+        with self._lock:
+            # Snapshot the IDs: a concurrent /transcribe chunk auto-creating a
+            # speaker would otherwise mutate this dict mid-iteration.
+            for speaker_id in list(self.speaker_records.keys()):
+                record = self.speaker_records[speaker_id]
+                embeddings = self.speaker_embeddings.get(speaker_id, [])
+                confidences = self.confidence_scores.get(speaker_id, [])
 
-            speakers.append({
-                'speaker_id': speaker_id,
-                'display_name': record.display_name,
-                'created_date': record.created_date,
-                'last_seen': record.last_seen,
-                'embedding_count': int(len(embeddings)),
-                'average_confidence': float(np.mean(confidences)) if confidences else 0.0,
-                'session_count': int(record.session_count),
-                'total_audio_seconds': float(record.total_audio_seconds),
-                'is_enrolled': bool(record.is_enrolled),
-                'is_verified': bool(record.is_verified),
-                'source_type': record.source_type
-            })
+                speakers.append({
+                    'speaker_id': speaker_id,
+                    'display_name': record.display_name,
+                    'created_date': record.created_date,
+                    'last_seen': record.last_seen,
+                    'embedding_count': int(len(embeddings)),
+                    'average_confidence': float(np.mean(confidences)) if confidences else 0.0,
+                    'session_count': int(record.session_count),
+                    'total_audio_seconds': float(record.total_audio_seconds),
+                    'is_enrolled': bool(record.is_enrolled),
+                    'is_verified': bool(record.is_verified),
+                    'source_type': record.source_type
+                })
 
         speakers.sort(key=lambda x: x['embedding_count'], reverse=True)
         return speakers
@@ -314,7 +333,8 @@ class EnhancedSpeakerDatabase:
         """Find a speaker ID by display name (case-insensitive)."""
         if not display_name:
             return None
-        return self.name_to_id_index.get(display_name.strip().lower())
+        with self._lock:
+            return self.name_to_id_index.get(display_name.strip().lower())
 
     # ------------------------------------------------------------------
     # Mutation
@@ -327,46 +347,48 @@ class EnhancedSpeakerDatabase:
 
         Returns the unique speaker ID.
         """
-        speaker_id = self._generate_speaker_id()
+        with self._lock:
+            speaker_id = self._generate_speaker_id()
 
-        record = SpeakerRecord(
-            speaker_id=speaker_id,
-            display_name=display_name,
-            created_date=datetime.now().isoformat(),
-            last_seen=datetime.now().isoformat(),
-            is_enrolled=is_enrolled,
-            is_verified=is_verified,
-            source_type=source_type
-        )
+            record = SpeakerRecord(
+                speaker_id=speaker_id,
+                display_name=display_name,
+                created_date=datetime.now().isoformat(),
+                last_seen=datetime.now().isoformat(),
+                is_enrolled=is_enrolled,
+                is_verified=is_verified,
+                source_type=source_type
+            )
 
-        self.speaker_records[speaker_id] = record
-        self.speaker_embeddings[speaker_id] = []
-        self.confidence_scores[speaker_id] = []
-        self.name_to_id_index[display_name.lower()] = speaker_id
-        self._invalidate_cache(speaker_id)
+            self.speaker_records[speaker_id] = record
+            self.speaker_embeddings[speaker_id] = []
+            self.confidence_scores[speaker_id] = []
+            self.name_to_id_index[display_name.lower()] = speaker_id
+            self._invalidate_cache(speaker_id)
 
         logger.info(f"Created new speaker: {display_name} ({speaker_id})")
         return speaker_id
 
     def update_display_name(self, speaker_id: str, new_display_name: str) -> bool:
         """Update the display name of a speaker (ID remains immutable)."""
-        if speaker_id not in self.speaker_records:
-            return False
+        with self._lock:
+            if speaker_id not in self.speaker_records:
+                return False
 
-        new_display_name = (new_display_name or "").strip()
-        if not new_display_name:
-            return False
+            new_display_name = (new_display_name or "").strip()
+            if not new_display_name:
+                return False
 
-        old_name = self.speaker_records[speaker_id].display_name
-        old_name_lower = old_name.lower()
-        if self.name_to_id_index.get(old_name_lower) == speaker_id:
-            del self.name_to_id_index[old_name_lower]
+            old_name = self.speaker_records[speaker_id].display_name
+            old_name_lower = old_name.lower()
+            if self.name_to_id_index.get(old_name_lower) == speaker_id:
+                del self.name_to_id_index[old_name_lower]
 
-        self.speaker_records[speaker_id].display_name = new_display_name
-        self.speaker_records[speaker_id].is_verified = True  # user-confirmed
-        self.name_to_id_index[new_display_name.lower()] = speaker_id
+            self.speaker_records[speaker_id].display_name = new_display_name
+            self.speaker_records[speaker_id].is_verified = True  # user-confirmed
+            self.name_to_id_index[new_display_name.lower()] = speaker_id
 
-        self._save_database()
+            self._save_database()
 
         logger.info(f"Updated speaker name: {speaker_id} '{old_name}' -> '{new_display_name}'")
         return True
@@ -379,32 +401,33 @@ class EnhancedSpeakerDatabase:
         Unusable vectors are rejected rather than stored, so the bank never holds
         anything that would poison a later similarity computation.
         """
-        if speaker_id not in self.speaker_records:
-            return False
-
         vector = as_vector(embedding)
         if vector is None:
             logger.debug(f"Rejected unusable embedding for {speaker_id}")
             return False
 
-        embeddings = self.speaker_embeddings.setdefault(speaker_id, [])
-        confidences = self.confidence_scores.setdefault(speaker_id, [])
+        with self._lock:
+            if speaker_id not in self.speaker_records:
+                return False
 
-        embeddings.append(vector)
-        confidences.append(float(confidence))
+            embeddings = self.speaker_embeddings.setdefault(speaker_id, [])
+            confidences = self.confidence_scores.setdefault(speaker_id, [])
 
-        if len(embeddings) > self.max_embeddings_per_speaker:
-            # Keep the highest-confidence embeddings.
-            indices = np.argsort(confidences)[-self.max_embeddings_per_speaker:]
-            self.speaker_embeddings[speaker_id] = [embeddings[i] for i in indices]
-            self.confidence_scores[speaker_id] = [confidences[i] for i in indices]
+            embeddings.append(vector)
+            confidences.append(float(confidence))
 
-        record = self.speaker_records[speaker_id]
-        record.update_stats(self.speaker_embeddings[speaker_id], self.confidence_scores[speaker_id])
-        self._invalidate_cache(speaker_id)
+            if len(embeddings) > self.max_embeddings_per_speaker:
+                # Keep the highest-confidence embeddings.
+                indices = np.argsort(confidences)[-self.max_embeddings_per_speaker:]
+                self.speaker_embeddings[speaker_id] = [embeddings[i] for i in indices]
+                self.confidence_scores[speaker_id] = [confidences[i] for i in indices]
 
-        if save:
-            self._save_database()
+            record = self.speaker_records[speaker_id]
+            record.update_stats(self.speaker_embeddings[speaker_id], self.confidence_scores[speaker_id])
+            self._invalidate_cache(speaker_id)
+
+            if save:
+                self._save_database()
 
         return True
 
@@ -412,108 +435,124 @@ class EnhancedSpeakerDatabase:
                        save: bool = True) -> int:
         """Add several embeddings at once; returns how many were accepted."""
         added = 0
-        for embedding in embeddings or []:
-            if self.add_embedding(speaker_id, embedding, confidence=confidence, save=False):
-                added += 1
-        if added and save:
-            self._save_database()
+        with self._lock:
+            for embedding in embeddings or []:
+                if self.add_embedding(speaker_id, embedding, confidence=confidence, save=False):
+                    added += 1
+            if added and save:
+                self._save_database()
         return added
 
-    def merge_speakers(self, source_speaker_id: str, target_speaker_id: str) -> bool:
+    def merge_speakers(self, source_speaker_id: str, target_speaker_id: str,
+                       save: bool = True) -> bool:
         """
         Merge two speakers. The speaker with more samples always survives, so the
         richer voiceprint is never thrown away; the other record is deleted.
+
+        ``save=False`` skips the disk flush so batch callers (cleanup over many
+        duplicates) can do a single ``_save_database()`` at the end instead of
+        rewriting every record and .npy per merge.
         """
-        if (source_speaker_id not in self.speaker_records or
-                target_speaker_id not in self.speaker_records):
-            logger.warning(f"Cannot merge speakers: source={source_speaker_id}, target={target_speaker_id}")
-            return False
+        with self._lock:
+            if (source_speaker_id not in self.speaker_records or
+                    target_speaker_id not in self.speaker_records):
+                logger.warning(f"Cannot merge speakers: source={source_speaker_id}, target={target_speaker_id}")
+                return False
 
-        if source_speaker_id == target_speaker_id:
-            return False
+            if source_speaker_id == target_speaker_id:
+                return False
 
-        source_embeddings = self.speaker_embeddings.get(source_speaker_id, [])
-        target_embeddings = self.speaker_embeddings.get(target_speaker_id, [])
+            source_embeddings = self.speaker_embeddings.get(source_speaker_id, [])
+            target_embeddings = self.speaker_embeddings.get(target_speaker_id, [])
 
-        if len(source_embeddings) > len(target_embeddings):
-            source_speaker_id, target_speaker_id = target_speaker_id, source_speaker_id
-            source_embeddings, target_embeddings = target_embeddings, source_embeddings
-            logger.info("Swapped merge direction: speaker with more samples kept as target")
+            if len(source_embeddings) > len(target_embeddings):
+                source_speaker_id, target_speaker_id = target_speaker_id, source_speaker_id
+                source_embeddings, target_embeddings = target_embeddings, source_embeddings
+                logger.info("Swapped merge direction: speaker with more samples kept as target")
 
-        source_record = self.speaker_records[source_speaker_id]
-        target_record = self.speaker_records[target_speaker_id]
-        source_confidences = self.confidence_scores.get(source_speaker_id, [])
-        target_confidences = self.confidence_scores.get(target_speaker_id, [])
+            source_record = self.speaker_records[source_speaker_id]
+            target_record = self.speaker_records[target_speaker_id]
+            source_confidences = self.confidence_scores.get(source_speaker_id, [])
+            target_confidences = self.confidence_scores.get(target_speaker_id, [])
 
-        merged_embeddings = list(target_embeddings) + list(source_embeddings)
-        merged_confidences = list(target_confidences) + list(source_confidences)
+            merged_embeddings = list(target_embeddings) + list(source_embeddings)
+            merged_confidences = list(target_confidences) + list(source_confidences)
 
-        if len(merged_embeddings) > self.max_embeddings_per_speaker:
-            indices = np.argsort(merged_confidences)[-self.max_embeddings_per_speaker:]
-            merged_embeddings = [merged_embeddings[i] for i in indices]
-            merged_confidences = [merged_confidences[i] for i in indices]
+            if len(merged_embeddings) > self.max_embeddings_per_speaker:
+                indices = np.argsort(merged_confidences)[-self.max_embeddings_per_speaker:]
+                merged_embeddings = [merged_embeddings[i] for i in indices]
+                merged_confidences = [merged_confidences[i] for i in indices]
 
-        self.speaker_embeddings[target_speaker_id] = merged_embeddings
-        self.confidence_scores[target_speaker_id] = merged_confidences
+            self.speaker_embeddings[target_speaker_id] = merged_embeddings
+            self.confidence_scores[target_speaker_id] = merged_confidences
 
-        target_record.total_audio_seconds += source_record.total_audio_seconds
-        target_record.session_count += source_record.session_count
-        target_record.is_verified = target_record.is_verified or source_record.is_verified
-        if source_record.is_enrolled:
-            target_record.is_enrolled = True
-            if target_record.source_type == "auto":
-                target_record.source_type = "enrolled"
+            target_record.total_audio_seconds += source_record.total_audio_seconds
+            target_record.session_count += source_record.session_count
+            target_record.is_verified = target_record.is_verified or source_record.is_verified
+            if source_record.is_enrolled:
+                target_record.is_enrolled = True
+                if target_record.source_type == "auto":
+                    target_record.source_type = "enrolled"
 
-        target_record.update_stats(merged_embeddings, merged_confidences)
+            target_record.update_stats(merged_embeddings, merged_confidences)
 
-        old_source_name = source_record.display_name
-        del self.speaker_records[source_speaker_id]
-        self.speaker_embeddings.pop(source_speaker_id, None)
-        self.confidence_scores.pop(source_speaker_id, None)
+            old_source_name = source_record.display_name
+            del self.speaker_records[source_speaker_id]
+            self.speaker_embeddings.pop(source_speaker_id, None)
+            self.confidence_scores.pop(source_speaker_id, None)
 
-        source_name_lower = old_source_name.lower()
-        if self.name_to_id_index.get(source_name_lower) == source_speaker_id:
-            del self.name_to_id_index[source_name_lower]
+            source_name_lower = old_source_name.lower()
+            if self.name_to_id_index.get(source_name_lower) == source_speaker_id:
+                del self.name_to_id_index[source_name_lower]
 
-        source_embeddings_file = self.embeddings_dir / f"{source_speaker_id}.npy"
-        if source_embeddings_file.exists():
-            source_embeddings_file.unlink()
+            source_embeddings_file = self.embeddings_dir / f"{source_speaker_id}.npy"
+            if source_embeddings_file.exists():
+                source_embeddings_file.unlink()
 
-        self._invalidate_cache(source_speaker_id)
-        self._invalidate_cache(target_speaker_id)
-        self._save_database()
+            self._invalidate_cache(source_speaker_id)
+            self._invalidate_cache(target_speaker_id)
+            if save:
+                self._save_database()
 
-        logger.info(f"Successfully merged {source_speaker_id} ({old_source_name}) "
-                    f"into {target_speaker_id} ({target_record.display_name}). "
-                    f"New embedding count: {len(merged_embeddings)}, "
-                    f"New avg confidence: {target_record.average_confidence:.3f}")
+            logger.info(f"Successfully merged {source_speaker_id} ({old_source_name}) "
+                        f"into {target_speaker_id} ({target_record.display_name}). "
+                        f"New embedding count: {len(merged_embeddings)}, "
+                        f"New avg confidence: {target_record.average_confidence:.3f}")
 
-        return True
+            return True
 
-    def delete_speaker(self, speaker_id: str) -> bool:
-        """Delete a speaker completely"""
-        if speaker_id not in self.speaker_records:
-            return False
+    def delete_speaker(self, speaker_id: str, save: bool = True) -> bool:
+        """
+        Delete a speaker completely.
 
-        record = self.speaker_records[speaker_id]
+        ``save=False`` skips the disk flush; batch callers (reset / cleanup loops)
+        should pass it and call ``_save_database()`` once at the end, because
+        each save rewrites speaker_records.json plus every remaining .npy.
+        """
+        with self._lock:
+            if speaker_id not in self.speaker_records:
+                return False
 
-        name_lower = record.display_name.lower()
-        if self.name_to_id_index.get(name_lower) == speaker_id:
-            del self.name_to_id_index[name_lower]
+            record = self.speaker_records[speaker_id]
 
-        del self.speaker_records[speaker_id]
-        self.speaker_embeddings.pop(speaker_id, None)
-        self.confidence_scores.pop(speaker_id, None)
-        self._invalidate_cache(speaker_id)
+            name_lower = record.display_name.lower()
+            if self.name_to_id_index.get(name_lower) == speaker_id:
+                del self.name_to_id_index[name_lower]
 
-        embeddings_file = self.embeddings_dir / f"{speaker_id}.npy"
-        if embeddings_file.exists():
-            embeddings_file.unlink()
+            del self.speaker_records[speaker_id]
+            self.speaker_embeddings.pop(speaker_id, None)
+            self.confidence_scores.pop(speaker_id, None)
+            self._invalidate_cache(speaker_id)
 
-        self._save_database()
+            embeddings_file = self.embeddings_dir / f"{speaker_id}.npy"
+            if embeddings_file.exists():
+                embeddings_file.unlink()
 
-        logger.info(f"Deleted speaker: {speaker_id} ({record.display_name})")
-        return True
+            if save:
+                self._save_database()
+
+            logger.info(f"Deleted speaker: {speaker_id} ({record.display_name})")
+            return True
 
     # ------------------------------------------------------------------
     # Identification
@@ -593,10 +632,12 @@ class EnhancedSpeakerDatabase:
             return []
 
         scored = []
-        for speaker_id, record in self.speaker_records.items():
-            score = self.score_speaker(speaker_id, probe)
-            if score > 0.0:
-                scored.append((speaker_id, record.display_name, score))
+        with self._lock:
+            for speaker_id in list(self.speaker_records.keys()):
+                record = self.speaker_records[speaker_id]
+                score = self.score_speaker(speaker_id, probe)
+                if score > 0.0:
+                    scored.append((speaker_id, record.display_name, score))
 
         scored.sort(key=lambda item: item[2], reverse=True)
         return scored[:top_k] if top_k else scored
@@ -645,42 +686,46 @@ class EnhancedSpeakerDatabase:
 
         cutoff = self.similarity_threshold if threshold is None else float(threshold)
 
-        best_id: Optional[str] = None
-        best_score = 0.0
-        for speaker_id in self.speaker_records:
-            score = self.score_speaker(speaker_id, probe)
-            if score > best_score:
-                best_score = score
-                best_id = speaker_id
+        with self._lock:
+            best_id: Optional[str] = None
+            best_score = 0.0
+            # Snapshot the keys: create_speaker() on another worker thread would
+            # otherwise raise "dictionary changed size during iteration" here.
+            for speaker_id in list(self.speaker_records.keys()):
+                score = self.score_speaker(speaker_id, probe)
+                if score > best_score:
+                    best_score = score
+                    best_id = speaker_id
 
-        if best_id is not None and best_score >= cutoff:
-            record = self.speaker_records[best_id]
-            record.last_seen = datetime.now().isoformat()
+            if best_id is not None and best_score >= cutoff:
+                record = self.speaker_records[best_id]
+                record.last_seen = datetime.now().isoformat()
 
-            if learn and self._should_reinforce(best_id, best_score):
-                # Store the observation that produced the match, capped so it can
-                # never outrank enrolled/corrected samples during retention.
-                added = self.add_embedding(
-                    best_id, probe,
-                    confidence=min(float(best_score), AUTO_LEARN_CONFIDENCE_CAP),
-                    save=False,
-                )
-                if added and save:
-                    self._save_database()
+                if learn and self._should_reinforce(best_id, best_score):
+                    # Store the observation that produced the match, capped so it can
+                    # never outrank enrolled/corrected samples during retention.
+                    added = self.add_embedding(
+                        best_id, probe,
+                        confidence=min(float(best_score), AUTO_LEARN_CONFIDENCE_CAP),
+                        save=False,
+                    )
+                    if added and save:
+                        self._save_database()
 
-            logger.debug(f"Matched speaker {record.display_name} ({best_id}) at {best_score:.3f}")
-            return best_id, record.display_name, float(best_score)
+                logger.debug(f"Matched speaker {record.display_name} ({best_id}) at {best_score:.3f}")
+                return best_id, record.display_name, float(best_score)
 
-        if not auto_create:
-            return None, "Unknown", float(best_score)
+            if not auto_create:
+                return None, "Unknown", float(best_score)
 
-        new_id = self.create_speaker(self._next_auto_name(), source_type="auto")
-        self.add_embedding(new_id, probe, confidence=AUTO_SEED_CONFIDENCE, save=False)
-        self.speaker_records[new_id].session_count = 1
-        if save:
-            self._save_database()
+            new_id = self.create_speaker(self._next_auto_name(), source_type="auto")
+            self.add_embedding(new_id, probe, confidence=AUTO_SEED_CONFIDENCE, save=False)
+            self.speaker_records[new_id].session_count = 1
+            if save:
+                self._save_database()
 
-        display_name = self.speaker_records[new_id].display_name
+            display_name = self.speaker_records[new_id].display_name
+
         logger.info(
             f"No speaker above {cutoff:.2f} (best {best_score:.3f}); "
             f"created {display_name} ({new_id})"
@@ -705,20 +750,21 @@ class EnhancedSpeakerDatabase:
         if not display_name:
             raise ValueError("Speaker name cannot be empty")
 
-        speaker_id = self.find_speaker_by_name(display_name)
-        if speaker_id is None:
-            speaker_id = self.create_speaker(
-                display_name, source_type=source_type, is_enrolled=True, is_verified=True
-            )
-        else:
-            record = self.speaker_records[speaker_id]
-            record.is_enrolled = True
-            record.is_verified = True
-            if record.source_type == "auto":
-                record.source_type = source_type
+        with self._lock:
+            speaker_id = self.find_speaker_by_name(display_name)
+            if speaker_id is None:
+                speaker_id = self.create_speaker(
+                    display_name, source_type=source_type, is_enrolled=True, is_verified=True
+                )
+            else:
+                record = self.speaker_records[speaker_id]
+                record.is_enrolled = True
+                record.is_verified = True
+                if record.source_type == "auto":
+                    record.source_type = source_type
 
-        added = self.add_embeddings(speaker_id, embeddings or [], confidence=confidence, save=False)
-        self._save_database()
+            added = self.add_embeddings(speaker_id, embeddings or [], confidence=confidence, save=False)
+            self._save_database()
 
         logger.info(f"Enrolled '{display_name}' ({speaker_id}) with {added} embedding(s)")
         return speaker_id
@@ -744,49 +790,50 @@ class EnhancedSpeakerDatabase:
         if not new_display_name:
             raise ValueError("Speaker name cannot be empty")
 
-        existing_id = self.find_speaker_by_name(new_display_name)
-        action = "noop"
-        target_id: Optional[str] = None
+        with self._lock:
+            existing_id = self.find_speaker_by_name(new_display_name)
+            action = "noop"
+            target_id: Optional[str] = None
 
-        if old_speaker_id in self.speaker_records:
-            if existing_id and existing_id != old_speaker_id:
-                if self.merge_speakers(old_speaker_id, existing_id):
-                    # merge_speakers keeps whichever record had more samples.
-                    target_id = existing_id if existing_id in self.speaker_records else old_speaker_id
-                    action = "merged"
-                    if self.speaker_records[target_id].display_name != new_display_name:
-                        self.update_display_name(target_id, new_display_name)
+            if old_speaker_id in self.speaker_records:
+                if existing_id and existing_id != old_speaker_id:
+                    if self.merge_speakers(old_speaker_id, existing_id, save=False):
+                        # merge_speakers keeps whichever record had more samples.
+                        target_id = existing_id if existing_id in self.speaker_records else old_speaker_id
+                        action = "merged"
+                        if self.speaker_records[target_id].display_name != new_display_name:
+                            self.update_display_name(target_id, new_display_name)
+                    else:
+                        target_id = existing_id
+                        action = "merge_failed"
                 else:
-                    target_id = existing_id
-                    action = "merge_failed"
+                    target_id = old_speaker_id
+                    if self.update_display_name(old_speaker_id, new_display_name):
+                        action = "renamed"
+            elif existing_id:
+                target_id = existing_id
+                action = "matched"
+                record = self.speaker_records[target_id]
+                record.is_verified = True
             else:
-                target_id = old_speaker_id
-                if self.update_display_name(old_speaker_id, new_display_name):
-                    action = "renamed"
-        elif existing_id:
-            target_id = existing_id
-            action = "matched"
-            record = self.speaker_records[target_id]
-            record.is_verified = True
-        else:
-            target_id = self.create_speaker(
-                new_display_name, source_type="corrected", is_verified=True
-            )
-            action = "created"
+                target_id = self.create_speaker(
+                    new_display_name, source_type="corrected", is_verified=True
+                )
+                action = "created"
 
-        added = 0
-        if target_id and embeddings:
-            added = self.add_embeddings(target_id, embeddings, confidence=confidence, save=False)
+            added = 0
+            if target_id and embeddings:
+                added = self.add_embeddings(target_id, embeddings, confidence=confidence, save=False)
 
-        self._save_database()
+            self._save_database()
 
-        result = {
-            "action": action,
-            "speaker_id": target_id,
-            "display_name": self.speaker_records[target_id].display_name if target_id in self.speaker_records else new_display_name,
-            "embeddings_added": added,
-            "old_speaker_id": old_speaker_id,
-        }
+            result = {
+                "action": action,
+                "speaker_id": target_id,
+                "display_name": self.speaker_records[target_id].display_name if target_id in self.speaker_records else new_display_name,
+                "embeddings_added": added,
+                "old_speaker_id": old_speaker_id,
+            }
         logger.info(f"Name correction {old_speaker_id} -> '{new_display_name}': {result['action']}")
         return result
 
@@ -1008,42 +1055,49 @@ class EnhancedSpeakerDatabase:
             'speakers_after': 0,
         }
 
-        if merge_duplicate_names:
-            by_name: Dict[str, List[str]] = defaultdict(list)
-            for speaker_id, record in self.speaker_records.items():
-                by_name[record.display_name.strip().lower()].append(speaker_id)
+        # Every merge/delete below passes save=False: each _save_database()
+        # rewrites speaker_records.json AND every remaining .npy, so saving per
+        # operation made this O(n^2) in disk writes on a database with hundreds
+        # of auto speakers. One flush at the end is enough.
+        with self._lock:
+            if merge_duplicate_names:
+                by_name: Dict[str, List[str]] = defaultdict(list)
+                for speaker_id in list(self.speaker_records.keys()):
+                    record = self.speaker_records[speaker_id]
+                    by_name[record.display_name.strip().lower()].append(speaker_id)
 
-            for name, ids in by_name.items():
-                if len(ids) < 2:
-                    continue
-                # Merge into the best-sampled record; merge_speakers picks the
-                # survivor, so re-read the survivor each round.
-                ids.sort(key=lambda sid: len(self.speaker_embeddings.get(sid, [])), reverse=True)
-                survivor = ids[0]
-                for duplicate in ids[1:]:
-                    if duplicate not in self.speaker_records or survivor not in self.speaker_records:
+                for name, ids in by_name.items():
+                    if len(ids) < 2:
                         continue
-                    if self.merge_speakers(duplicate, survivor):
-                        results['duplicates_merged'] += 1
-                        if survivor not in self.speaker_records:
-                            survivor = duplicate
+                    # Merge into the best-sampled record; merge_speakers picks the
+                    # survivor, so re-read the survivor each round.
+                    ids.sort(key=lambda sid: len(self.speaker_embeddings.get(sid, [])), reverse=True)
+                    survivor = ids[0]
+                    for duplicate in ids[1:]:
+                        if duplicate not in self.speaker_records or survivor not in self.speaker_records:
+                            continue
+                        if self.merge_speakers(duplicate, survivor, save=False):
+                            results['duplicates_merged'] += 1
+                            if survivor not in self.speaker_records:
+                                survivor = duplicate
 
-        to_remove = []
-        for speaker_id, record in self.speaker_records.items():
-            if record.is_enrolled or record.is_verified:
-                continue
-            if record.source_type not in ("auto", "imported"):
-                continue
-            if len(self.speaker_embeddings.get(speaker_id, [])) < max(int(min_embeddings), 0):
-                to_remove.append((speaker_id, record.display_name))
+            to_remove = []
+            for speaker_id in list(self.speaker_records.keys()):
+                record = self.speaker_records[speaker_id]
+                if record.is_enrolled or record.is_verified:
+                    continue
+                if record.source_type not in ("auto", "imported"):
+                    continue
+                if len(self.speaker_embeddings.get(speaker_id, [])) < max(int(min_embeddings), 0):
+                    to_remove.append((speaker_id, record.display_name))
 
-        for speaker_id, display_name in to_remove:
-            if self.delete_speaker(speaker_id):
-                results['speakers_removed'] += 1
-                results['removed_speakers'].append({'speaker_id': speaker_id, 'display_name': display_name})
+            for speaker_id, display_name in to_remove:
+                if self.delete_speaker(speaker_id, save=False):
+                    results['speakers_removed'] += 1
+                    results['removed_speakers'].append({'speaker_id': speaker_id, 'display_name': display_name})
 
-        self._save_database()
-        results['speakers_after'] = len(self.speaker_records)
+            self._save_database()
+            results['speakers_after'] = len(self.speaker_records)
 
         logger.info(
             f"Cleanup: merged {results['duplicates_merged']} duplicate-name speakers, "
@@ -1067,17 +1121,19 @@ class EnhancedSpeakerDatabase:
             'removed_speakers': [],
         }
 
-        for speaker_id, record in list(self.speaker_records.items()):
-            if record.is_enrolled or record.is_verified or record.source_type in ("enrolled", "corrected"):
-                results['speakers_kept'] += 1
-                continue
-            display_name = record.display_name
-            if self.delete_speaker(speaker_id):
-                results['speakers_removed'] += 1
-                results['removed_speakers'].append({'speaker_id': speaker_id, 'display_name': display_name})
+        # save=False per delete, one flush at the end - see cleanup().
+        with self._lock:
+            for speaker_id, record in list(self.speaker_records.items()):
+                if record.is_enrolled or record.is_verified or record.source_type in ("enrolled", "corrected"):
+                    results['speakers_kept'] += 1
+                    continue
+                display_name = record.display_name
+                if self.delete_speaker(speaker_id, save=False):
+                    results['speakers_removed'] += 1
+                    results['removed_speakers'].append({'speaker_id': speaker_id, 'display_name': display_name})
 
-        self._save_database()
-        results['speakers_after'] = len(self.speaker_records)
+            self._save_database()
+            results['speakers_after'] = len(self.speaker_records)
 
         logger.warning(
             f"Reset removed {results['speakers_removed']} auto speakers, "

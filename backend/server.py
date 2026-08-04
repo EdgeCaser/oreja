@@ -46,7 +46,7 @@ import uvicorn
 # Persistent speaker identity lives in the v2 database. There is exactly ONE
 # embedding system in this server: the pyannote PretrainedSpeakerEmbedding model
 # loaded below. The old SpeechBrain OfflineSpeakerEmbeddingManager is gone.
-from speaker_database_v2 import EnhancedSpeakerDatabase
+from speaker_database_v2 import EnhancedSpeakerDatabase, cosine_similarity
 
 # Import enhanced transcription features
 try:
@@ -124,9 +124,25 @@ SPEAKER_MATCH_THRESHOLD = float(os.getenv("OREJA_SPEAKER_THRESHOLD", "0.72"))
 # A diarization speaker with less than this much audio in a request is not
 # embedded at all: short crops give unstable voiceprints that poison the bank.
 MIN_SPEAKER_AUDIO_SECONDS = float(os.getenv("OREJA_MIN_SPEAKER_AUDIO", "1.5"))
+# Lower floor for a READ-ONLY identification attempt (learn=False, auto_create=False).
+# A short "yeah" is too weak to learn from or to mint a speaker record from, but it
+# is usually still good enough to *recognise* an already-known voice - and doing so
+# is what stops a speaker flipping between "Speaker SPEAKER_00" and
+# "Speaker SPEAKER_01" from one 5-second chunk to the next (pyannote assigns those
+# indices arbitrarily per request; there is no session state across chunks).
+MIN_IDENTIFY_AUDIO_SECONDS = float(os.getenv("OREJA_MIN_IDENTIFY_AUDIO", "0.5"))
 # Upper bound on the audio concatenated per speaker before embedding. More than
 # ~20s buys no accuracy and costs latency on every 5-second chunk.
 MAX_SPEAKER_AUDIO_SECONDS = float(os.getenv("OREJA_MAX_SPEAKER_AUDIO", "20.0"))
+# How many times an unmatched voiceprint must recur (across requests/chunks)
+# before a new "Speaker N" record is minted for it. Auto-creating on the first
+# miss let a 30-minute call at 5s/chunk mint hundreds of throwaway speakers, each
+# one rewriting the whole database to disk and showing up in the WPF client's
+# persisted speaker list. Set to 1 to restore create-on-first-miss.
+AUTO_CREATE_AFTER_MISSES = max(1, int(os.getenv("OREJA_AUTO_CREATE_AFTER_MISSES", "2")))
+# Cap on how many distinct unmatched voiceprints are remembered while waiting for
+# a recurrence, so the pending buffer cannot grow without bound.
+_MAX_PENDING_UNMATCHED = 32
 # Where the v2 speaker database lives.
 SPEAKER_DATA_DIR = os.getenv("OREJA_SPEAKER_DATA_DIR", "speaker_data_v2")
 
@@ -141,8 +157,15 @@ _whisper_lock = threading.Lock()
 _diarization_lock = threading.Lock()
 _embedding_lock = threading.Lock()
 # The speaker database is mutated from worker threads (identify hook) and from
-# request handlers; guard every mutation with this.
+# request handlers. EnhancedSpeakerDatabase is internally locked as of the
+# thread-safety fix, so this is only needed to make multi-step read-modify-write
+# sequences in handlers atomic - it is not what keeps the database consistent.
 _speaker_db_lock = threading.RLock()
+
+# Unmatched voiceprints waiting to recur before they earn a speaker record.
+# list of [embedding vector, miss_count]; guarded by _pending_unmatched_lock.
+_pending_unmatched: List[List[Any]] = []
+_pending_unmatched_lock = threading.Lock()
 
 app = FastAPI(
     title="Oreja Enhanced Audio Processing API",
@@ -586,7 +609,10 @@ async def get_speaker_stats():
     database = require_speaker_db()
 
     try:
-        speakers = database.get_all_speakers()
+        # get_all_speakers() walks every record and averages confidences with
+        # numpy; off the event loop so a large database cannot stall the live
+        # 5-second /transcribe chunks.
+        speakers = await asyncio.to_thread(database.get_all_speakers)
         return {
             'total_speakers': len(speakers),
             'speakers': [
@@ -1050,8 +1076,11 @@ async def reset_speakers(include_enrolled: bool = False):
                 removed = []
                 for speaker_id in list(database.speaker_records.keys()):
                     display_name = database.get_display_name(speaker_id)
-                    if database.delete_speaker(speaker_id):
+                    # save=False: one flush after the loop instead of rewriting
+                    # speaker_records.json + every .npy once per deletion.
+                    if database.delete_speaker(speaker_id, save=False):
                         removed.append({"speaker_id": speaker_id, "display_name": display_name})
+                database.save()
                 results = {
                     "speakers_removed": len(removed),
                     "speakers_kept": 0,
@@ -1426,7 +1455,9 @@ async def real_time_speaker_feedback(feedback_data: dict):
         old_speaker_id: the incorrect speaker ID or per-session label
         correct_speaker_name: the correct display name
         audio_segments: [{start, end}, ...] spoken by that speaker (optional)
-        audio_file: path to the audio file those segments index into (optional)
+        audio_file: path to the audio file those segments index into (optional).
+            Also accepted per-segment as audio_segments[i]["audio_file"], which
+            is the shape transcription_editor.py actually sends.
 
     When audio is supplied the corrected speaker's voiceprint bank is updated
     from it, which is what makes the correction stick for future recordings
@@ -1438,6 +1469,17 @@ async def real_time_speaker_feedback(feedback_data: dict):
     correct_speaker_name = (feedback_data.get("correct_speaker_name") or "").strip()
     audio_segments = feedback_data.get("audio_segments", []) or []
     audio_file = feedback_data.get("audio_file")
+
+    if not audio_file:
+        # transcription_editor.py (the only client of this endpoint) nests
+        # audio_file inside each audio_segments entry and sends no top-level
+        # key, so without this fallback every editor correction was applied
+        # with embeddings_learned == 0 - i.e. the correction never stuck for
+        # future recordings, which is the whole point of this endpoint.
+        for segment in audio_segments:
+            if isinstance(segment, dict) and segment.get("audio_file"):
+                audio_file = segment["audio_file"]
+                break
 
     if not old_speaker_id or not correct_speaker_name:
         raise HTTPException(
@@ -2445,6 +2487,48 @@ def _concatenate_speaker_audio(
     return torch.cat(crops)
 
 
+def _register_unmatched_embedding(embedding) -> bool:
+    """
+    Record a voiceprint that matched no known speaker, and report whether it has
+    now recurred often enough to deserve its own database record.
+
+    The live path posts a 5-second chunk every 5 seconds. Minting a speaker on
+    the first miss meant a 30-minute call could create hundreds of one-chunk
+    "Speaker N" records - each one rewriting speaker_records.json plus every .npy
+    bank, and each one landing in the WPF client's persisted speaker list. Making
+    the voice prove itself across AUTO_CREATE_AFTER_MISSES separate misses filters
+    out the transient noise/crosstalk crops without losing a genuine new speaker,
+    who reappears in the very next chunk.
+
+    Returns True when the caller should now create the speaker (the pending entry
+    is consumed), False when it should keep the diarization label for now.
+    """
+    if AUTO_CREATE_AFTER_MISSES <= 1:
+        return True
+
+    with _pending_unmatched_lock:
+        for entry in _pending_unmatched:
+            try:
+                similarity = cosine_similarity(entry[0], embedding)
+            except Exception:
+                similarity = 0.0
+            if similarity >= SPEAKER_MATCH_THRESHOLD:
+                entry[1] += 1
+                if entry[1] >= AUTO_CREATE_AFTER_MISSES:
+                    _pending_unmatched.remove(entry)
+                    return True
+                # Keep the most recent observation of this voice as the probe.
+                entry[0] = embedding
+                return False
+
+        _pending_unmatched.append([embedding, 1])
+        # Bounded buffer: drop the oldest pending voiceprints.
+        overflow = len(_pending_unmatched) - _MAX_PENDING_UNMATCHED
+        if overflow > 0:
+            del _pending_unmatched[:overflow]
+        return False
+
+
 def identify_speakers_hook(
     waveform: torch.Tensor,
     sample_rate: int,
@@ -2461,9 +2545,18 @@ def identify_speakers_hook(
     threshold the database creates a new auto speaker so the same voice is
     recognised next time.
 
-    Speakers with less than MIN_SPEAKER_AUDIO_SECONDS of audio in this request
-    are left with their diarization label - too little audio to identify, and
-    learning from it would poison the bank.
+    Two audio floors apply per speaker per request:
+      * below MIN_IDENTIFY_AUDIO_SECONDS: not embedded at all, diarization label kept.
+      * between the two floors: a READ-ONLY match is attempted (learn=False,
+        auto_create=False). Enough to recognise a known voice - which keeps the
+        label stable across chunks - without polluting the bank with a short crop.
+      * at or above MIN_SPEAKER_AUDIO_SECONDS: the match also reinforces the
+        voiceprint, and a persistently unmatched voice can earn a new record.
+
+    New "Speaker N" records are NOT minted on the first miss: the unmatched
+    voiceprint must recur AUTO_CREATE_AFTER_MISSES times first (see
+    _register_unmatched_embedding), otherwise a long call mints a throwaway
+    speaker per chunk and rewrites the whole database each time.
 
     Degrades to a pass-through (diarization-only labels) when the embedding model
     or the database is unavailable. It must never raise: the transcript is worth
@@ -2489,17 +2582,18 @@ def identify_speakers_hook(
 
     try:
         database = enhanced_speaker_database
-        min_samples = int(MIN_SPEAKER_AUDIO_SECONDS * sample_rate)
+        learn_min_samples = int(MIN_SPEAKER_AUDIO_SECONDS * sample_rate)
+        identify_min_samples = int(MIN_IDENTIFY_AUDIO_SECONDS * sample_rate)
         identified = 0
 
         for label, label_segments in _speaker_audio_groups(segments).items():
             try:
                 audio = _concatenate_speaker_audio(waveform, sample_rate, label_segments)
-                if audio is None or audio.numel() < min_samples:
+                if audio is None or audio.numel() < identify_min_samples:
                     logger.debug(
                         f"Speaker '{label}': "
                         f"{0 if audio is None else audio.numel() / sample_rate:.2f}s "
-                        f"< {MIN_SPEAKER_AUDIO_SECONDS}s - not identified"
+                        f"< {MIN_IDENTIFY_AUDIO_SECONDS}s - not identified"
                     )
                     continue
 
@@ -2507,10 +2601,30 @@ def identify_speakers_hook(
                 if embedding is None:
                     continue
 
+                # Only crops at or above the learning floor may reinforce a
+                # voiceprint or mint a new speaker record.
+                enough_to_learn = audio.numel() >= learn_min_samples
+
                 with _speaker_db_lock:
-                    speaker_id, display_name, confidence = database.identify_speaker(embedding)
+                    speaker_id, display_name, confidence = database.identify_speaker(
+                        embedding,
+                        auto_create=False,
+                        learn=enough_to_learn,
+                        save=enough_to_learn,
+                    )
+
+                if (speaker_id is None and enough_to_learn
+                        and _register_unmatched_embedding(embedding)):
+                    # This voice has now failed to match often enough to be worth
+                    # a record of its own.
+                    with _speaker_db_lock:
+                        speaker_id, display_name, confidence = database.identify_speaker(
+                            embedding, auto_create=True, learn=True, save=True
+                        )
 
                 if speaker_id is None:
+                    # Unmatched (or too short to learn from): keep the per-request
+                    # diarization label rather than inventing a speaker.
                     continue
 
                 for segment in label_segments:
@@ -2603,8 +2717,9 @@ async def get_enhanced_speaker_statistics():
         raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
     
     try:
-        stats = await enhanced_speaker_integration.get_enhanced_speaker_stats()
-        
+        # Synchronous body (disk + numpy) - keep it off the event loop.
+        stats = await asyncio.to_thread(enhanced_speaker_integration.get_enhanced_speaker_stats)
+
         return {
             "status": "statistics_retrieved",
             "enhanced_database_active": True,
@@ -2638,7 +2753,11 @@ async def enhanced_speaker_feedback(corrections: Dict[str, str]):
 
     try:
         if enhanced_speaker_integration is not None:
-            results = await enhanced_speaker_integration.enhanced_speaker_correction_feedback(corrections)
+            # Same to_thread dispatch as the else-branch below: this writes
+            # speaker_records.json and every .npy bank.
+            results = await asyncio.to_thread(
+                enhanced_speaker_integration.enhanced_speaker_correction_feedback, corrections
+            )
         else:
             # The integration layer is a thin wrapper; go straight to the database.
             results = await asyncio.to_thread(database.send_feedback_for_learning, corrections)
@@ -2681,11 +2800,13 @@ async def save_transcription_with_enhanced_corrections(
         raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
     
     try:
-        # Use enhanced database to save with corrections (no learning feedback)
-        saved_file = enhanced_speaker_integration.enhanced_db.save_transcription_with_corrections(
-            transcription_data=transcription_data,
-            speaker_corrections=speaker_corrections,
-            output_file=output_file
+        # Use enhanced database to save with corrections (no learning feedback).
+        # Writes a JSON file, so dispatch it off the event loop.
+        saved_file = await asyncio.to_thread(
+            enhanced_speaker_integration.enhanced_db.save_transcription_with_corrections,
+            transcription_data,
+            speaker_corrections,
+            output_file,
         )
         
         return {
