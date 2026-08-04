@@ -13,26 +13,51 @@ Use this at your own risk, and do not use it in a way that breaches privacy laws
 My recommendation: keep it simple and just let people know you are using a note-taking tool and ask if that is ok. That should cover most of the gray areas. I am not a lawyer, so don't take this as legal advice either.
 
 ## Features
-- Real-time transcription with speaker diarization using Whisper and pyannote.audio.
-- Captures microphone and system audio simultaneously via NAudio.
-- Volume meters for audio sources.
-- Start/Stop transcription, save transcripts, and rename speakers.
+- Real-time transcription with speaker diarization using faster-whisper and pyannote.audio.
+- Captures microphone and system audio simultaneously via NAudio (with independent buffering per source).
+- Visible backend connection status and automatic server startup.
+- Start/Stop transcription, save transcripts in multiple formats (TXT, SRT, VTT, Markdown), and rename speakers.
 - Privacy-focused: processes audio in memory, runs models locally, no cloud interaction.
-- Improves speaker recognition over time using locally stored embeddings.
-- **🔒 Privacy Mode**: Analyze conversations without saving transcription text
-- **🗣️ Conversation Analysis**: Extract summaries, action items, topics, and insights
-- **📊 Speaker Analytics**: Comprehensive dashboard for speaker database management
+- Persistent speaker recognition with locally stored voice embeddings; learns over time.
+- Transcript search and keyword alerts for finding specific discussions.
+- Optional Ollama-powered meeting summaries (with extractive fallback when Ollama unavailable).
+- Settings persistence (backend URL, speaker database, audio preferences) via local AppData.
+- **🔒 Privacy Mode**: Analyze conversations without saving transcription text.
+- **🗣️ Conversation Analysis**: Extract summaries, action items, topics, and insights.
+- **📊 Speaker Analytics**: Comprehensive dashboard for speaker database management.
 
 ## Tech Stack
 - **C#/.NET 8**: Windows-native frontend and audio capture.
 - **Python 3.10**: Backend for transcription and diarization.
 - **NAudio**: Audio capture (microphone and system).
-- **Hugging Face Transformers (Whisper)**: Local speech-to-text.
-- **pyannote.audio**: Local speaker diarization.
+- **faster-whisper**: Local speech-to-text with word-level timestamps.
+- **pyannote.audio 3.1**: Local speaker diarization and voice embedding extraction.
 - **FastAPI**: Local server for C#/Python communication.
-- **WPF**: User interface with MVVM pattern.
-- **SQLite**: Local storage for speaker embeddings.
-- **SkiaSharp**: Volume meter visualization.
+- **WPF**: User interface (code-behind, single-file App.xaml.cs).
+- **JSON (local file storage)**: Speaker database (v2 format) with voice embeddings.
+- **Ollama (optional)**: LLM backend for meeting summaries and conversation analysis.
+
+## Configuration
+
+Oreja stores settings and speaker databases locally. Configuration is controlled via environment variables and a settings file.
+
+### Environment Variables
+
+Set these in your shell before running the backend, or in a `.env` file in the `backend/` directory:
+
+- **`OREJA_WHISPER_MODEL`**: Whisper model to use (default: `base`). Options: `tiny`, `base`, `small`, `medium`, `large`.
+- **`OREJA_DEVICE`**: Device for model inference (default: auto-detect). Options: `auto`, `cuda`, `cpu`.
+- **`OREJA_COMPUTE_TYPE`**: Compute precision for faster-whisper (default: `auto`). Options: `int8`, `int8_float32`, `int8_float16`, `float16`, `float32`, `auto`.
+- **`OREJA_LANGUAGE`**: Transcription language (default: `en`). Use ISO 639-1 codes (e.g., `es` for Spanish, `fr` for French).
+- **`OREJA_SPEAKER_THRESHOLD`**: Confidence threshold for speaker matching (default: `0.72`). Range: 0.0–1.0; lower = more lenient.
+- **`OREJA_OLLAMA_URL`**: URL to Ollama API for summaries (e.g., `http://localhost:11434`). If unset, conversation analysis falls back to extractive summaries.
+- **`OREJA_OLLAMA_MODEL`**: Ollama model for summaries (e.g., `llama2`). Ignored if `OREJA_OLLAMA_URL` is unset.
+
+### Settings Storage
+
+Settings and the speaker database are stored in your user's local AppData directory:
+- **Windows**: `%LOCALAPPDATA%\Oreja\` (typically `C:\Users\<YourName>\AppData\Local\Oreja\`)
+- **Speaker database**: `speaker_database.json` (persisted across sessions).
 
 ## 📦 Quick Start - Building the Live Transcription Application
 
