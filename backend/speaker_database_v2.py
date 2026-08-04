@@ -115,6 +115,11 @@ class SpeakerRecord:
     is_enrolled: bool = False  # True if manually enrolled by user
     is_verified: bool = False  # True if user has confirmed this speaker's identity
     source_type: str = "auto"  # "auto", "enrolled", "corrected", "imported"
+    # Audio source this voice was first heard on ("mic" / "system"). Auto-matching
+    # never crosses scopes: a far-end voice on system audio must not reinforce or
+    # steal a microphone speaker's profile. None (legacy records, manual
+    # enrollments) matches any scope.
+    source_scope: Optional[str] = None
 
     def update_stats(self, embeddings: Sequence, confidences: Sequence):
         """Update statistics based on current embeddings"""
@@ -341,7 +346,8 @@ class EnhancedSpeakerDatabase:
     # ------------------------------------------------------------------
 
     def create_speaker(self, display_name: str, source_type: str = "auto",
-                       is_enrolled: bool = False, is_verified: bool = False) -> str:
+                       is_enrolled: bool = False, is_verified: bool = False,
+                       source_scope: Optional[str] = None) -> str:
         """
         Create a new speaker with immutable ID and mutable display name.
 
@@ -357,6 +363,7 @@ class EnhancedSpeakerDatabase:
                 last_seen=datetime.now().isoformat(),
                 is_enrolled=is_enrolled,
                 is_verified=is_verified,
+                source_scope=source_scope,
                 source_type=source_type
             )
 
@@ -664,7 +671,8 @@ class EnhancedSpeakerDatabase:
 
     def identify_speaker(self, embedding, threshold: Optional[float] = None,
                          auto_create: bool = True, learn: bool = True,
-                         save: bool = True) -> Tuple[Optional[str], str, float]:
+                         save: bool = True,
+                         scope: Optional[str] = None) -> Tuple[Optional[str], str, float]:
         """
         Identify one embedding against the database.
 
@@ -674,6 +682,11 @@ class EnhancedSpeakerDatabase:
             auto_create: create a new auto speaker when nothing matches
             learn: store the probe on the matched/created speaker
             save: flush to disk when anything changed
+            scope: audio source of the probe ("mic" / "system"). When given,
+                candidates whose source_scope is set to a DIFFERENT scope are
+                excluded, and an auto-created speaker inherits this scope. A
+                None scope (unknown origin) matches everything, as do records
+                with a None scope (legacy / manual enrollments).
 
         Returns:
             (speaker_id, display_name, confidence). speaker_id is None and the
@@ -692,6 +705,10 @@ class EnhancedSpeakerDatabase:
             # Snapshot the keys: create_speaker() on another worker thread would
             # otherwise raise "dictionary changed size during iteration" here.
             for speaker_id in list(self.speaker_records.keys()):
+                if scope is not None:
+                    record_scope = getattr(self.speaker_records[speaker_id], "source_scope", None)
+                    if record_scope is not None and record_scope != scope:
+                        continue
                 score = self.score_speaker(speaker_id, probe)
                 if score > best_score:
                     best_score = score
@@ -718,7 +735,8 @@ class EnhancedSpeakerDatabase:
             if not auto_create:
                 return None, "Unknown", float(best_score)
 
-            new_id = self.create_speaker(self._next_auto_name(), source_type="auto")
+            new_id = self.create_speaker(self._next_auto_name(), source_type="auto",
+                                         source_scope=scope)
             self.add_embedding(new_id, probe, confidence=AUTO_SEED_CONFIDENCE, save=False)
             self.speaker_records[new_id].session_count = 1
             if save:

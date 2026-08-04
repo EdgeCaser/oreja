@@ -111,7 +111,20 @@ public partial class App : Application
     // Backing field for the configurable backend base URL (settings.BackendUrl). Kept mutable -
     // unlike the old const - so a saved setting actually takes effect.
     private string _backendUrl = DEFAULT_BACKEND_URL;
-    private const int AUDIO_CHUNK_DURATION_MS = 5000; // Send audio every 5 seconds (increased from 3)
+    // Dispatch is pause-aware rather than fixed-interval: the timer below only POLLS at this
+    // rate; a chunk is actually sent when the speaker pauses (tail of the buffer goes silent)
+    // or the buffer hits MAX_CHUNK_SECONDS. Cutting on pauses instead of a hard 5-second timer
+    // stops sentences from being split mid-word and gives Whisper full utterances of context.
+    private const int DISPATCH_POLL_INTERVAL_MS = 1000;
+    private const double MIN_CHUNK_SECONDS = 3.0;   // never send fragments shorter than this
+    private const double MAX_CHUNK_SECONDS = 15.0;  // hard cap: flush mid-speech at this size
+    private const int SILENCE_WINDOW_MS = 400;      // trailing window inspected for a pause
+    private const double SILENCE_RMS_THRESHOLD = 300.0; // int16 RMS ≈ -40 dBFS
+
+    // Display merging: a newly arrived fragment is appended to the previous card when it is
+    // the same speaker and source and starts within this gap of the card's end.
+    private const double SEGMENT_MERGE_MAX_GAP_SECONDS = 2.0;
+    private const int SEGMENT_MERGE_MAX_CHARS = 500; // start a fresh card beyond this length
 
     // --- Backend status indicator -------------------------------------------------------
     private enum BackendStatus { Connecting, Connected, Offline }
@@ -984,7 +997,7 @@ public partial class App : Application
                     
                     // Setup transcription timer
                     _transcriptionTimer = new DispatcherTimer();
-                    _transcriptionTimer.Interval = TimeSpan.FromMilliseconds(AUDIO_CHUNK_DURATION_MS);
+                    _transcriptionTimer.Interval = TimeSpan.FromMilliseconds(DISPATCH_POLL_INTERVAL_MS);
                     _transcriptionTimer.Tick += TranscriptionTimer_Tick;
                     
                     Console.WriteLine("Initialization complete!");
@@ -1887,6 +1900,35 @@ public partial class App : Application
                 return;
             }
 
+            double bufferedSeconds = state.Buffer.Count / (double)TRANSCRIPTION_BYTES_PER_SECOND;
+
+            if (bufferedSeconds < MAX_CHUNK_SECONDS)
+            {
+                if (bufferedSeconds < MIN_CHUNK_SECONDS)
+                {
+                    // Too little audio to be worth a request; keep accumulating.
+                    return;
+                }
+
+                if (!PcmTailIsSilent(state.Buffer))
+                {
+                    // Mid-utterance: wait for a natural pause so the cut does not
+                    // land mid-word. The MAX_CHUNK_SECONDS cap above bounds how
+                    // long an uninterrupted speaker can defer the flush.
+                    return;
+                }
+
+                if (PcmIsAllSilent(state.Buffer))
+                {
+                    // Nothing but silence buffered (e.g. an idle microphone).
+                    // Drop it instead of posting dead air, but keep the timeline
+                    // accounting intact - these bytes were still consumed.
+                    state.ConsumedBytes += state.Buffer.Count;
+                    state.Buffer.Clear();
+                    return;
+                }
+            }
+
             chunk = state.Buffer.ToArray();
             state.Buffer.Clear();
 
@@ -2085,6 +2127,36 @@ public partial class App : Application
         if (_transcriptionPanel == null || string.IsNullOrWhiteSpace(text))
         {
             Console.WriteLine("Skipping - transcription panel is null or text is empty");
+            return;
+        }
+
+        // Consecutive fragments from the same speaker and source read as one
+        // utterance, so absorb this fragment into the previous card when the two
+        // are nearly contiguous - instead of stacking one card per audio chunk.
+        // Skipped while that card's text is being edited (the in-place update
+        // would be suppressed and history would silently diverge from the UI).
+        var previous = _transcriptionHistory.Count > 0
+            ? _transcriptionHistory[_transcriptionHistory.Count - 1]
+            : null;
+        if (previous != null
+            && previous.Source == source
+            && string.Equals(previous.Speaker, speaker, StringComparison.Ordinal)
+            && startTime >= previous.StartTime
+            && (startTime - previous.EndTime) <= SEGMENT_MERGE_MAX_GAP_SECONDS
+            && (previous.Text?.Length ?? 0) + text.Length <= SEGMENT_MERGE_MAX_CHARS
+            && previous.SplitSegments == null
+            && (previous.TextDisplayElement?.IsReadOnly ?? true))
+        {
+            previous.Text = string.IsNullOrWhiteSpace(previous.Text)
+                ? text
+                : $"{previous.Text} {text}";
+            previous.EndTime = Math.Max(previous.EndTime, endTime);
+
+            UpdateSegmentCardInPlace(previous);
+            if (ApplyKeywordAlertHighlight(previous))
+            {
+                FlashStatusTextForKeywordAlert();
+            }
             return;
         }
 
@@ -4945,6 +5017,41 @@ public partial class App : Application
         /// recording starts. Guarded by Sync like the members above.
         /// </summary>
         public long ConsumedBytes { get; set; }
+    }
+
+    /// <summary>
+    /// RMS of 16-bit little-endian PCM over [start, end) byte offsets of a buffer.
+    /// Callers must hold the owning source's Sync lock.
+    /// </summary>
+    private static double PcmRms(List<byte> buffer, int start, int end)
+    {
+        if (start < 0) start = 0;
+        if (start % 2 != 0) start++; // keep sample alignment
+        if (end > buffer.Count) end = buffer.Count;
+
+        double sumSquares = 0;
+        int sampleCount = 0;
+        for (int i = start; i + 1 < end; i += 2)
+        {
+            short sample = (short)(buffer[i] | (buffer[i + 1] << 8));
+            sumSquares += (double)sample * sample;
+            sampleCount++;
+        }
+
+        return sampleCount == 0 ? 0.0 : Math.Sqrt(sumSquares / sampleCount);
+    }
+
+    /// <summary>True when the trailing SILENCE_WINDOW_MS of the buffer is below the silence floor.</summary>
+    private static bool PcmTailIsSilent(List<byte> buffer)
+    {
+        int windowBytes = TRANSCRIPTION_BYTES_PER_SECOND * SILENCE_WINDOW_MS / 1000;
+        return PcmRms(buffer, buffer.Count - windowBytes, buffer.Count) < SILENCE_RMS_THRESHOLD;
+    }
+
+    /// <summary>True when the entire buffer is below the silence floor (idle source).</summary>
+    private static bool PcmIsAllSilent(List<byte> buffer)
+    {
+        return PcmRms(buffer, 0, buffer.Count) < SILENCE_RMS_THRESHOLD;
     }
 
     /// <summary>

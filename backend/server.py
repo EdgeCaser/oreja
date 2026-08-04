@@ -1245,12 +1245,18 @@ async def delete_speaker(speaker_id: str):
 async def transcribe_audio(
     audio: UploadFile = File(...),
     include_analysis: bool = False,
+    source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Transcribe and diarize audio file, optionally with sentiment analysis and audio features.
 
     Args:
         audio: Audio file (WAV format preferred)
+        source: Audio origin tag sent by the WPF client ("mic" / "system").
+            Scopes persistent speaker identification: voices heard on one
+            source never auto-match or reinforce profiles first heard on the
+            other, so a far-end conference voice cannot contaminate the local
+            user's voiceprint. Omitted/unknown values match all profiles.
         include_analysis: Run the sentiment/conversation-analysis enhancement
             inline. QUERY PARAMETER ONLY (POST /transcribe?include_analysis=true):
             FastAPI treats a bare `bool` alongside `File(...)` as a query
@@ -1356,8 +1362,15 @@ async def transcribe_audio(
         # Integration hook for voiceprint-based speaker naming (see function
         # docstring). Dispatched off the event loop so the next implementation can
         # do real embedding work here without blocking the server.
+        # Normalize the client's source tag to a known scope; anything else
+        # (including absence) means "unknown origin" and matches all profiles.
+        source_scope = source.strip().lower() if source else None
+        if source_scope not in ("mic", "system"):
+            source_scope = None
+
         segments = await asyncio.to_thread(
-            identify_speakers_hook, waveform, sample_rate, segments, diarization_result
+            identify_speakers_hook, waveform, sample_rate, segments,
+            diarization_result, source_scope
         )
 
         # Generate full text
@@ -2500,7 +2513,7 @@ def _concatenate_speaker_audio(
     return torch.cat(crops)
 
 
-def _register_unmatched_embedding(embedding) -> bool:
+def _register_unmatched_embedding(embedding, scope: Optional[str] = None) -> bool:
     """
     Record a voiceprint that matched no known speaker, and report whether it has
     now recurred often enough to deserve its own database record.
@@ -2521,6 +2534,10 @@ def _register_unmatched_embedding(embedding) -> bool:
 
     with _pending_unmatched_lock:
         for entry in _pending_unmatched:
+            # A pending miss only accumulates within its own source scope, so a
+            # far-end voice cannot ride a mic voice's miss count into a record.
+            if entry[2] != scope:
+                continue
             try:
                 similarity = cosine_similarity(entry[0], embedding)
             except Exception:
@@ -2534,7 +2551,7 @@ def _register_unmatched_embedding(embedding) -> bool:
                 entry[0] = embedding
                 return False
 
-        _pending_unmatched.append([embedding, 1])
+        _pending_unmatched.append([embedding, 1, scope])
         # Bounded buffer: drop the oldest pending voiceprints.
         overflow = len(_pending_unmatched) - _MAX_PENDING_UNMATCHED
         if overflow > 0:
@@ -2547,6 +2564,7 @@ def identify_speakers_hook(
     sample_rate: int,
     segments: List[Dict[str, Any]],
     diarization: Any = None,
+    source_scope: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Voiceprint-based speaker naming, run once per request after diarization.
@@ -2624,15 +2642,17 @@ def identify_speakers_hook(
                         auto_create=False,
                         learn=enough_to_learn,
                         save=enough_to_learn,
+                        scope=source_scope,
                     )
 
                 if (speaker_id is None and enough_to_learn
-                        and _register_unmatched_embedding(embedding)):
+                        and _register_unmatched_embedding(embedding, source_scope)):
                     # This voice has now failed to match often enough to be worth
                     # a record of its own.
                     with _speaker_db_lock:
                         speaker_id, display_name, confidence = database.identify_speaker(
-                            embedding, auto_create=True, learn=True, save=True
+                            embedding, auto_create=True, learn=True, save=True,
+                            scope=source_scope,
                         )
 
                 if speaker_id is None:

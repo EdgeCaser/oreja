@@ -266,3 +266,54 @@ class TestRankSpeakers:
 
     def test_empty_database_returns_empty(self, db):
         assert db.rank_speakers(unit_vector(1)) == []
+
+
+# ---------------------------------------------------------------------------
+# Source scoping (mic vs system audio)
+# ---------------------------------------------------------------------------
+
+class TestSourceScoping:
+    def test_probe_never_matches_other_scope(self, db):
+        """A system-audio voice must not match a mic-scoped profile, even when
+        the embeddings are nearly identical (e.g. echo/crosstalk)."""
+        voice = unit_vector(1)
+        mic_id, mic_name, _ = db.identify_speaker(voice, scope="mic")
+        assert mic_id is not None
+
+        sys_id, sys_name, _ = db.identify_speaker(nudge(voice, 0.01), scope="system")
+        assert sys_id != mic_id
+
+    def test_same_scope_still_matches(self, db):
+        voice = unit_vector(2)
+        first_id, _, _ = db.identify_speaker(voice, scope="mic")
+        second_id, _, confidence = db.identify_speaker(nudge(voice, 0.01), scope="mic")
+        assert second_id == first_id
+        assert confidence > 0.9
+
+    def test_unscoped_records_match_any_scope(self, db):
+        """Manual enrollments (scope None) stay matchable from both sources."""
+        voice = unit_vector(3)
+        enrolled_id = db.enroll_speaker("Ian", [voice])
+
+        mic_id, mic_name, _ = db.identify_speaker(nudge(voice, 0.01), scope="mic")
+        sys_id, sys_name, _ = db.identify_speaker(nudge(voice, 0.01, seed=7), scope="system")
+        assert mic_id == enrolled_id
+        assert sys_id == enrolled_id
+
+    def test_unscoped_probe_matches_scoped_records(self, db):
+        """Endpoints without source info (scope None) keep full-database matching."""
+        voice = unit_vector(4)
+        scoped_id, _, _ = db.identify_speaker(voice, scope="system")
+
+        unscoped_id, _, _ = db.identify_speaker(nudge(voice, 0.01))
+        assert unscoped_id == scoped_id
+
+    def test_auto_created_speaker_inherits_probe_scope(self, db):
+        speaker_id, _, _ = db.identify_speaker(unit_vector(5), scope="system")
+        assert db.speaker_records[speaker_id].source_scope == "system"
+
+    def test_scope_survives_save_and_reload(self, db, tmp_path):
+        speaker_id, _, _ = db.identify_speaker(unit_vector(6), scope="mic")
+
+        reloaded = EnhancedSpeakerDatabase(data_dir=str(db.data_dir))
+        assert reloaded.speaker_records[speaker_id].source_scope == "mic"
