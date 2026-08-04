@@ -42,6 +42,10 @@ import _stub_heavy_deps
 # stub is installed.
 import torch
 import torchaudio
+# WAV encoding for fixtures goes through audio_io.save_wav (soundfile-backed):
+# torchaudio 2.9+ delegates save() to torchcodec, which requires system FFmpeg
+# DLLs that a dev machine may not have.
+from audio_io import save_wav
 TORCH_AVAILABLE = True
 HEAVY_DEPS_STUBBED = _stub_heavy_deps.HEAVY_DEPS_STUBBED
 
@@ -107,7 +111,7 @@ def sample_audio_bytes(sample_audio_data):
     waveform, sample_rate = sample_audio_data
     
     buffer = io.BytesIO()
-    torchaudio.save(buffer, waveform, sample_rate, format="wav")
+    save_wav(buffer, waveform, sample_rate)
     buffer.seek(0)
     
     return buffer.getvalue()
@@ -126,7 +130,7 @@ def sample_short_audio():
     waveform = torch.sin(2 * torch.pi * frequency * t).unsqueeze(0)
     
     buffer = io.BytesIO()
-    torchaudio.save(buffer, waveform, sample_rate, format="wav")
+    save_wav(buffer, waveform, sample_rate)
     buffer.seek(0)
     
     return buffer.getvalue()
@@ -152,7 +156,7 @@ def sample_long_audio():
     waveform = torch.sin(2 * torch.pi * frequency * t).unsqueeze(0)
     
     buffer = io.BytesIO()
-    torchaudio.save(buffer, waveform, sample_rate, format="wav")
+    save_wav(buffer, waveform, sample_rate)
     buffer.seek(0)
     
     return buffer.getvalue()

@@ -132,9 +132,13 @@ def install():
     _install_scipy()
     _install_simple("sklearn")
     _install_simple("librosa")
+    _install_simple("soundfile")
     _install_simple("nltk")
     _install_simple("textblob")
-    _install_simple("speechbrain")
+    # speechbrain is intentionally NOT probed here: it was removed from
+    # requirements.txt (nothing imports it) and stubbing a permanently-absent
+    # package would keep HEAVY_DEPS_STUBBED True on fully provisioned machines,
+    # silently skipping every real-audio test forever.
 
 
 install()

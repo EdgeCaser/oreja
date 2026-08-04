@@ -3,7 +3,10 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pytest-cov>=4.1.0
 pytest-mock>=3.11.1
-httpx>=0.24.0
+# httpx 0.28 removed the Client(app=...) shortcut that fastapi 0.104's
+# TestClient (and conftest's AsyncClient(app=...)) still pass; stay below it
+# until fastapi/starlette are upgraded.
+httpx>=0.24.0,<0.28
 factory-boy>=3.3.0
 faker>=19.3.0
 coverage>=7.2.0

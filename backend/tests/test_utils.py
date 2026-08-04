@@ -373,8 +373,8 @@ class TestPerformance:
             
             # Convert to bytes
             buffer = io.BytesIO()
-            import torchaudio
-            torchaudio.save(buffer, waveform, sample_rate, format="wav")
+            from audio_io import save_wav
+            save_wav(buffer, waveform, sample_rate)
             audio_bytes = buffer.getvalue()
             
             # Measure loading time

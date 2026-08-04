@@ -34,6 +34,7 @@ from datetime import datetime
 import numpy as np
 import torch
 import torchaudio
+from audio_io import load_audio
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -282,10 +283,12 @@ def initialize_models():
     try:
         logger.info(f"Loading diarization model: {DIARIZATION_MODEL}")
         from pyannote.audio import Pipeline as DiarizationPipeline  # lazy import
-        hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
+        # pyannote.audio 4.x renamed use_auth_token= to token=. None lets
+        # huggingface_hub fall back to HF_TOKEN / cached CLI login.
+        hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
         diarization_pipeline = DiarizationPipeline.from_pretrained(
             DIARIZATION_MODEL,
-            use_auth_token=hf_token if hf_token else True
+            token=hf_token,
         )
         if device.type == "cuda":
             diarization_pipeline.to(device)
@@ -303,7 +306,8 @@ def initialize_models():
         )
         embedding_model = PretrainedSpeakerEmbedding(
             EMBEDDING_MODEL,
-            device=device
+            device=device,
+            token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN"),
         )
         logger.info("✓ Embedding model loaded successfully")
     except Exception as e:
@@ -448,7 +452,11 @@ def ensure_embedding_model() -> bool:
             from pyannote.audio.pipelines.speaker_verification import (  # lazy import
                 PretrainedSpeakerEmbedding,
             )
-            embedding_model = PretrainedSpeakerEmbedding(EMBEDDING_MODEL, device=device)
+            embedding_model = PretrainedSpeakerEmbedding(
+                EMBEDDING_MODEL,
+                device=device,
+                token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN"),
+            )
             logger.info("✓ Embedding model loaded successfully")
             return True
         except Exception as e:
@@ -754,7 +762,7 @@ async def enroll_speaker_from_segments(payload: Dict[str, Any]):
     def _enroll() -> Dict[str, Any]:
         vectors = []
         if audio_file and Path(audio_file).exists() and segments and embedding_model is not None:
-            waveform, sample_rate = torchaudio.load(audio_file)
+            waveform, sample_rate = load_audio(audio_file)
             waveform, sample_rate = prepare_waveform(waveform, sample_rate)
             vectors = embeddings_for_segments(waveform, sample_rate, segments, min_duration=0.5, limit=10)
 
@@ -1493,7 +1501,7 @@ async def real_time_speaker_feedback(feedback_data: dict):
         vectors = []
         if audio_file and audio_segments and embedding_model is not None and Path(audio_file).exists():
             try:
-                waveform, sample_rate = torchaudio.load(audio_file)
+                waveform, sample_rate = load_audio(audio_file)
                 waveform, sample_rate = prepare_waveform(waveform, sample_rate)
                 vectors = embeddings_for_segments(
                     waveform, sample_rate, audio_segments, min_duration=0.5, limit=10
@@ -1564,7 +1572,7 @@ async def reattribute_speakers(reattribution_data: dict):
     logger.info(f"Re-attributing {len(segments)} segments from {audio_file}")
 
     def _reattribute() -> List[Dict[str, Any]]:
-        waveform, sample_rate = torchaudio.load(audio_file)
+        waveform, sample_rate = load_audio(audio_file)
         waveform, sample_rate = prepare_waveform(waveform, sample_rate)
 
         improved = []
@@ -1761,7 +1769,7 @@ async def reprocess_segment_embeddings(
             "improvements": []
         }
 
-        waveform, sample_rate = torchaudio.load(audio_file)
+        waveform, sample_rate = load_audio(audio_file)
         waveform, sample_rate = prepare_waveform(waveform, sample_rate)
 
         # Group by corrected speaker name so each speaker is enrolled once with
@@ -1842,12 +1850,12 @@ def load_audio_from_bytes(audio_data: bytes) -> tuple[torch.Tensor, int]:
     try:
         # Create a BytesIO stream from the audio data
         audio_stream = io.BytesIO(audio_data)
-        
-        # Load with torchaudio
-        waveform, sample_rate = torchaudio.load(audio_stream)
-        
+
+        # Decode via audio_io (soundfile first, torchaudio fallback)
+        waveform, sample_rate = load_audio(audio_stream)
+
         return waveform, sample_rate
-        
+
     except Exception as e:
         logger.error(f"Failed to load audio from bytes: {e}")
         raise ValueError(f"Invalid audio format: {e}")

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import Mock, patch, AsyncMock
 import numpy as np
 
+from audio_io import save_wav
 from server import app, initialize_models, load_audio_from_bytes, merge_transcription_and_diarization
 
 # Real audio fixtures below are built with real torch/torchaudio calls
@@ -67,7 +68,7 @@ def sample_audio_bytes():
     
     # Convert to bytes
     buffer = io.BytesIO()
-    torchaudio.save(buffer, waveform, sample_rate, format="wav")
+    save_wav(buffer, waveform, sample_rate)
     buffer.seek(0)
     
     return buffer.getvalue()
@@ -294,7 +295,7 @@ class TestAudioValidation:
         waveform = torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)
 
         buffer = io.BytesIO()
-        torchaudio.save(buffer, waveform, sample_rate, format="wav")
+        save_wav(buffer, waveform, sample_rate)
         buffer.seek(0)
 
         files = {"audio": ("short.wav", buffer, "audio/wav")}
@@ -328,7 +329,7 @@ class TestAudioValidation:
         waveform = torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)
 
         buffer = io.BytesIO()
-        torchaudio.save(buffer, waveform, sample_rate, format="wav")
+        save_wav(buffer, waveform, sample_rate)
         buffer.seek(0)
 
         files = {"audio": ("long.wav", buffer, "audio/wav")}

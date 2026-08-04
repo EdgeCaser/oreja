@@ -7,6 +7,8 @@ import torch
 import torchaudio
 import numpy as np
 import json
+
+from audio_io import load_audio
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import logging
@@ -45,7 +47,7 @@ class AudioSegmentSplitter:
         """
         try:
             # Load original audio segment
-            waveform, sr = torchaudio.load(audio_file)
+            waveform, sr = load_audio(audio_file)
             
             start_time = original_segment.get('start', 0)
             end_time = original_segment.get('end', start_time + 1)

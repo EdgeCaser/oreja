@@ -71,12 +71,12 @@ class TestBatchTranscriptionProcessor:
     
     @pytest.mark.unit
     @requires_real_torch
-    @patch('batch_transcription.torchaudio.load')
+    @patch('batch_transcription.load_audio')
     def test_load_audio(self, mock_load):
         """Test audio loading functionality."""
         import torch
-        
-        # Mock torchaudio.load
+
+        # Mock audio_io.load_audio as imported by batch_transcription
         mock_waveform = torch.randn(1, 16000)  # 1 second of audio
         mock_load.return_value = (mock_waveform, 16000)
         
@@ -185,22 +185,22 @@ class TestBatchProcessing:
         for result in results:
             assert "success" in result
     
-    @pytest.mark.unit 
+    @pytest.mark.unit
+    @requires_real_torch
     def test_tensor_to_wav_bytes(self):
         """Test converting tensor to WAV bytes."""
         import torch
-        
+
         processor = BatchTranscriptionProcessor()
         waveform = torch.randn(1, 16000)
-        
-        with patch('batch_transcription.torchaudio.save') as mock_save:
-            mock_save.return_value = None
-            
-            wav_bytes = processor._tensor_to_wav_bytes(waveform, 16000)
-            
-            mock_save.assert_called_once()
-            # Should return bytes from the buffer
-            assert isinstance(wav_bytes, bytes)
+
+        wav_bytes = processor._tensor_to_wav_bytes(waveform, 16000)
+
+        # A real RIFF/WAVE container holding one second of PCM16 audio.
+        assert isinstance(wav_bytes, bytes)
+        assert wav_bytes[:4] == b"RIFF"
+        assert wav_bytes[8:12] == b"WAVE"
+        assert len(wav_bytes) > 16000
 
 
 @pytest.mark.integration
@@ -209,7 +209,7 @@ class TestBatchTranscriptionIntegration:
     
     @pytest.mark.integration
     @requires_real_torch
-    @patch('batch_transcription.torchaudio.load')
+    @patch('batch_transcription.load_audio')
     @patch('batch_transcription.asyncio.run')
     def test_full_processing_pipeline(self, mock_asyncio, mock_load):
         """Test complete processing pipeline."""

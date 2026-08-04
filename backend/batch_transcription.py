@@ -19,6 +19,8 @@ import torchaudio
 from torchaudio.transforms import Resample
 import requests
 
+from audio_io import load_audio, wav_bytes
+
 # Speaker identity comes from the v2 database plus server.py's pyannote embedding
 # model - the same single embedding system the live server uses, so voiceprints
 # learned here are usable there and vice versa.
@@ -315,7 +317,7 @@ class BatchTranscriptionProcessor:
     def _load_audio(self, audio_path: Path) -> Tuple[torch.Tensor, int]:
         """Load and preprocess audio file"""
         try:
-            waveform, sample_rate = torchaudio.load(audio_path)
+            waveform, sample_rate = load_audio(audio_path)
             
             # Resample if needed
             if sample_rate != self.SAMPLE_RATE:
@@ -775,10 +777,7 @@ class BatchTranscriptionProcessor:
     
     def _tensor_to_wav_bytes(self, waveform: torch.Tensor, sample_rate: int) -> bytes:
         """Convert tensor to WAV bytes for API calls"""
-        import io
-        buffer = io.BytesIO()
-        torchaudio.save(buffer, waveform, sample_rate, format='wav')
-        return buffer.getvalue()
+        return wav_bytes(waveform, sample_rate)
 
 
 def main():
