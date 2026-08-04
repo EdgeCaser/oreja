@@ -25,11 +25,34 @@ except ImportError:
     AUDIO_AVAILABLE = False
     logging.warning("Audio recording dependencies not available. Install sounddevice and soundfile.")
 
-# Import existing database and embedding modules
+# Import existing database module. Voice embeddings come from server.py's
+# single pyannote PretrainedSpeakerEmbedding model (the former
+# speaker_embeddings.OfflineSpeakerEmbeddingManager is gone) so that vectors
+# trained here live in the same space as the ones the live server stores.
 from speaker_database_v2 import EnhancedSpeakerDatabase
-from speaker_embeddings import OfflineSpeakerEmbeddingManager
 
 logger = logging.getLogger(__name__)
+
+
+def extract_user_embedding(audio_data, sample_rate: int = 16000):
+    """
+    Embed a mono 16kHz audio buffer using the server's embedding model.
+
+    server is imported lazily: it pulls in torch/pyannote, which should not be
+    a cost of merely importing this GUI module. Returns None when the model
+    cannot be loaded or the audio is unusable.
+    """
+    try:
+        import server
+    except Exception as e:
+        logger.error(f"Speaker embedding model unavailable (cannot import server): {e}")
+        return None
+
+    if not server.ensure_embedding_model():
+        logger.error("Speaker embedding model could not be loaded")
+        return None
+
+    return server.extract_embedding_from_audio(audio_data, sample_rate)
 
 class UserEmbeddingTrainer:
     """GUI module for training and updating user embeddings"""
@@ -87,8 +110,7 @@ class UserEmbeddingTrainer:
         else:
             # Create a new instance if no shared database provided
             self.speaker_db = EnhancedSpeakerDatabase()
-        self.embedding_manager = OfflineSpeakerEmbeddingManager()
-        
+
         # Recording state
         self.is_recording = False
         self.current_recording = None
@@ -657,7 +679,7 @@ Status: {'New user - needs first voice sample' if selected_speaker['embedding_co
             
             # Generate embedding
             self.status_var.set("Generating voice embedding...")
-            embedding = self.embedding_manager.extract_embedding(audio_data)
+            embedding = extract_user_embedding(audio_data, 16000)
             
             if embedding is None:
                 messagebox.showerror("Error", "Failed to extract embedding from audio.")

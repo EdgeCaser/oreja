@@ -38,11 +38,11 @@ def check_dependencies():
     except ImportError:
         missing.append("speaker_database_v2 (Oreja core)")
     
-    try:
-        from speaker_embeddings import OfflineSpeakerEmbeddingManager
-    except ImportError:
-        missing.append("speaker_embeddings (Oreja core)")
-    
+    # NOTE: speaker_embeddings (OfflineSpeakerEmbeddingManager) was removed.
+    # Voice embeddings now come from server.extract_embedding_from_audio, which
+    # is loaded lazily at training time - it is not a launch prerequisite, so
+    # it is deliberately not checked here.
+
     return missing
 
 def main():

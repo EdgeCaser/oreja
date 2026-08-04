@@ -36,7 +36,7 @@ pathlib2>=2.3.0
 # GUI and Analytics
 matplotlib>=3.7.0
 pandas>=2.0.0
-tkinter>=8.6  # Usually included with Python
+# tkinter ships with the standard Python installer on Windows (not a pip package)
 
 # Optional: GPU support (uncomment if using CUDA)
 # torch>=2.1.0+cu118 --index-url https://download.pytorch.org/whl/cu118

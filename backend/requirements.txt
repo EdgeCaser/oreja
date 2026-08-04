@@ -9,20 +9,48 @@ torchaudio>=2.1.0
 numpy>=1.24.0
 librosa>=0.10.0
 
-# Hugging Face transformers and models
-transformers>=4.35.0
+# Speech recognition (ASR)
+# faster-whisper runs Whisper on ctranslate2: native long-audio streaming,
+# built-in Silero VAD and word-level timestamps. This replaces the old
+# transformers `pipeline("automatic-speech-recognition")` backend in server.py.
+faster-whisper>=1.0.0
+
+# Speaker diarization
 pyannote.audio>=3.1.0
-sentencepiece>=0.1.99
+# NOTE: sentencepiece was removed. It was only ever pulled in for the
+# transformers Whisper tokenizer; ASR moved to faster-whisper (ctranslate2),
+# and the remaining transformers use (cardiffnlp RoBERTa sentiment) is
+# BPE-tokenized. Nothing in this repo imports it.
+
+# transformers is NO LONGER used by server.py (ASR moved to faster-whisper).
+# It is still required by enhanced_transcription_processor.py (transformer-based
+# sentiment models) and by the legacy server_simple.py, so it stays installed.
+transformers>=4.35.0
 
 # Speaker recognition (100% offline)
-speechbrain>=1.0.0
+# NOTE: speechbrain was removed. It backed the deleted
+# speaker_embeddings.OfflineSpeakerEmbeddingManager; voiceprints now come from
+# pyannote's PretrainedSpeakerEmbedding (already required above), so this
+# several-hundred-MB install bought nothing. Nothing in this repo imports it.
 scipy>=1.11.0
 scikit-learn>=1.3.0
 
 # Enhanced Transcription Features - Sentiment Analysis & Audio Features
+# NOTE: these run out-of-band by default. Set OREJA_INLINE_ENHANCEMENT=1, or
+# pass include_analysis=true to POST /transcribe, to apply them per request.
+# POST /transcribe_with_summary and /summarize_transcription (batch/file
+# endpoints) always run them.
 vaderSentiment>=3.3.2
 textblob>=0.17.1
-# Note: transformers already included above for compatibility
+# Used by enhanced_transcription_processor.py for topic/keyword extraction in
+# conversation summaries. Optional - the import is guarded and falls back to
+# simple word-frequency keyword extraction when this isn't installed.
+nltk>=3.8.0
+
+# Optional local-LLM summarizer (backend/llm_summarizer.py). It talks to a
+# locally-running Ollama server (https://ollama.com) over stdlib urllib only -
+# no package to install here. If Ollama isn't running, summarization falls
+# back to the extractive engine above automatically.
 
 # Additional utilities
 typing-extensions>=4.8.0

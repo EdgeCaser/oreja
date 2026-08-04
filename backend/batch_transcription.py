@@ -18,10 +18,23 @@ import torch
 import torchaudio
 from torchaudio.transforms import Resample
 import requests
-from scipy.spatial.distance import cosine
 
-from speaker_embeddings import OfflineSpeakerEmbeddingManager
-from server import load_audio_from_bytes, run_transcription
+from audio_io import load_audio, wav_bytes
+
+# Speaker identity comes from the v2 database plus server.py's pyannote embedding
+# model - the same single embedding system the live server uses, so voiceprints
+# learned here are usable there and vice versa.
+from speaker_database_v2 import EnhancedSpeakerDatabase
+import server
+from server import (
+    ensure_embedding_model,
+    extract_embedding_from_audio,
+    load_audio_from_bytes,
+    merge_transcription_and_diarization,
+    prepare_waveform,
+    run_diarization,
+    run_transcription,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,17 +45,72 @@ class BatchTranscriptionProcessor:
     Batch processor for recorded calls that leverages existing speaker embeddings
     """
     
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, backend_url: str = "http://127.0.0.1:8000",
+                 speaker_data_dir: str = None,
+                 load_local_models: bool = False):
+        """
+        Args:
+            backend_url: base URL of a running Oreja server, used only by the
+                API fallback path.
+            speaker_data_dir: on-disk v2 speaker database directory.
+            load_local_models: load ASR + diarization + embedding models into
+                THIS process (server.initialize_models()). Required when running
+                standalone - server.initialize_models() otherwise only ever runs
+                from the FastAPI startup event, so in a bare CLI process
+                server.whisper_model / diarization_pipeline / embedding_model are
+                all None: transcription silently falls through to the HTTP API
+                and every segment gets ("Unknown", 0.0) from voiceprint
+                identification. Off by default so importing this class inside the
+                server process (or in tests) does not pull in models.
+        """
         self.backend_url = backend_url
-        self.speaker_manager = OfflineSpeakerEmbeddingManager()
         self.results: List[Dict[str, Any]] = []
-        
+
+        if load_local_models:
+            try:
+                logger.info("Loading local ASR / diarization / embedding models for batch processing...")
+                server.initialize_models()
+            except Exception as e:
+                logger.warning(
+                    f"Could not load local models ({e}); "
+                    "falling back to the backend API for transcription"
+                )
+
         # Configuration
         self.SAMPLE_RATE = 16000
         self.MIN_SEGMENT_LENGTH = 0.5  # seconds
         self.CONFIDENCE_THRESHOLD = 0.7
         self.SIMILARITY_THRESHOLD = 0.75
-        
+
+        # The same on-disk speaker database the live server uses, so batch runs
+        # both benefit from and contribute to the user's enrolled speakers.
+        data_dir = speaker_data_dir or os.getenv("OREJA_SPEAKER_DATA_DIR", "speaker_data_v2")
+        try:
+            self.speaker_db = EnhancedSpeakerDatabase(data_dir)
+        except Exception as e:
+            logger.warning(f"Speaker database unavailable ({e}); speakers stay as diarized")
+            self.speaker_db = None
+
+    def _embed_segment(self, segment_waveform: torch.Tensor, sample_rate: int):
+        """
+        Extract one voiceprint from a segment crop.
+
+        Loads the embedding model on demand, so this works in a standalone CLI
+        process where server.initialize_models() never ran. Returns None only
+        when the model genuinely cannot be loaded (pyannote unavailable) or the
+        crop is unusable, so every caller degrades to diarization-only speakers
+        instead of failing.
+        """
+        try:
+            if not ensure_embedding_model():
+                return None
+            waveform, sample_rate = prepare_waveform(segment_waveform, sample_rate)
+            return extract_embedding_from_audio(waveform, sample_rate)
+        except Exception as e:
+            logger.debug(f"Embedding extraction failed: {e}")
+            return None
+
+
     def process_recording_with_progress(self, 
                                       audio_path: Path,
                                       output_dir: Optional[Path] = None,
@@ -249,7 +317,7 @@ class BatchTranscriptionProcessor:
     def _load_audio(self, audio_path: Path) -> Tuple[torch.Tensor, int]:
         """Load and preprocess audio file"""
         try:
-            waveform, sample_rate = torchaudio.load(audio_path)
+            waveform, sample_rate = load_audio(audio_path)
             
             # Resample if needed
             if sample_rate != self.SAMPLE_RATE:
@@ -268,6 +336,42 @@ class BatchTranscriptionProcessor:
             logger.error(f"Error loading audio {audio_path}: {e}")
             raise
     
+    def _apply_local_diarization(self, transcription_result: Dict[str, Any],
+                                 waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
+        """
+        Attach diarization speakers to a locally-produced transcription.
+
+        server.run_transcription() returns ASR "chunks" only - they carry no
+        'speaker' key at all. Without this pass every batch segment's
+        original_speaker is "Unknown" and voiceprint identification has no
+        per-speaker grouping to refine, so batch output had no usable speaker
+        labels unless the HTTP API fallback happened to fire (POST /transcribe
+        does its own merge, which is why that path was unaffected).
+        """
+        if not transcription_result:
+            return transcription_result
+        if transcription_result.get("segments") or transcription_result.get("skipped_reason"):
+            return transcription_result
+        if server.diarization_pipeline is None:
+            logger.info(
+                "Diarization model not loaded in this process - batch segments "
+                "keep ASR-only labels (construct with load_local_models=True)"
+            )
+            return transcription_result
+
+        try:
+            diarization = asyncio.run(run_diarization(waveform, sample_rate))
+            segments = merge_transcription_and_diarization(
+                transcription_result, diarization, waveform, sample_rate
+            )
+            if segments:
+                transcription_result = dict(transcription_result)
+                transcription_result["segments"] = segments
+        except Exception as e:
+            logger.warning(f"Batch diarization failed, keeping ASR-only segments: {e}")
+
+        return transcription_result
+
     def _transcribe_audio_with_progress(self, waveform: torch.Tensor, sample_rate: int, progress_callback: callable = None) -> Dict[str, Any]:
         """Get transcription from the backend with simulated progress"""
         import threading
@@ -319,9 +423,12 @@ class BatchTranscriptionProcessor:
             
             if transcription_error[0]:
                 raise transcription_error[0]
-            
-            return transcription_result[0]
-            
+
+            # Local ASR produces no speakers - run diarization and merge.
+            return self._apply_local_diarization(
+                transcription_result[0], waveform, sample_rate
+            )
+
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             # Fallback: try backend API
@@ -332,7 +439,8 @@ class BatchTranscriptionProcessor:
         try:
             # Use the existing transcription function
             result = asyncio.run(run_transcription(waveform, sample_rate))
-            return result
+            # Local ASR produces no speakers - run diarization and merge.
+            return self._apply_local_diarization(result, waveform, sample_rate)
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             # Fallback: try backend API
@@ -369,8 +477,15 @@ class BatchTranscriptionProcessor:
         enhanced_segments = []
         speaker_anonymization_map = {}  # For privacy mode
         anonymous_speaker_counter = 0
-        
-        for segment in transcription_result.get('segments', []):
+
+        # run_transcription() (server.py) returns per-chunk ASR output under
+        # "chunks" (timestamp/start/end/text/words) - there is no diarization
+        # pass in this batch pipeline, so "chunks" IS the segment list here.
+        # Fall back to "segments" too for callers that already pre-merged
+        # diarization (e.g. a transcript re-loaded from a saved JSON file).
+        raw_segments = transcription_result.get('segments') or transcription_result.get('chunks') or []
+
+        for segment in raw_segments:
             start_time = segment.get('start', 0)
             end_time = segment.get('end', 0)
             text = segment.get('text', '')
@@ -467,18 +582,30 @@ class BatchTranscriptionProcessor:
     
     def _identify_speaker_from_segment(self, segment_waveform: torch.Tensor, sample_rate: int) -> Tuple[str, float]:
         """
-        Identify speaker using existing embeddings
+        Identify the speaker of one segment against the persistent v2 database.
+
+        Returns ("Unknown", 0.0) when identification is not possible - no
+        database, no embedding model, or an unusable crop - so callers keep the
+        diarization label rather than inventing one. Nothing is written to the
+        database here: batch identification is read-only, and learning happens
+        explicitly in _improve_speaker_models().
         """
         try:
-            # Extract speaker embeddings from segment
-            segment_numpy = segment_waveform.squeeze().numpy()
-            
-            # Use the speaker embeddings system to identify
-            # This would interface with your existing speaker identification
-            
-            # For now, return a placeholder
-            return "Unknown", 0.0
-            
+            if self.speaker_db is None:
+                return "Unknown", 0.0
+
+            embedding = self._embed_segment(segment_waveform, sample_rate)
+            if embedding is None:
+                return "Unknown", 0.0
+
+            speaker_id, display_name, confidence = self.speaker_db.identify_speaker(
+                embedding, auto_create=False, learn=False, save=False
+            )
+            if speaker_id is None:
+                return "Unknown", float(confidence)
+
+            return display_name, float(confidence)
+
         except Exception as e:
             logger.error(f"Error identifying speaker: {e}")
             return "Unknown", 0.0
@@ -515,37 +642,49 @@ class BatchTranscriptionProcessor:
                                waveform: torch.Tensor,
                                sample_rate: int):
         """
-        Use the recording to improve existing speaker models
+        Feed high-confidence segments back into the persistent speaker database.
+
+        Only segments that were identified by voiceprint at >= 0.8 confidence are
+        used: anything weaker would teach the database its own guesses.
         """
-        improvement_count = 0
-        
+        if self.speaker_db is None:
+            return
+
+        vectors_by_speaker: Dict[str, List[Any]] = {}
+
         for segment in transcription_result.get('segments', []):
-            if segment.get('identification_method') == 'embedding_enhanced':
-                speaker_name = segment.get('enhanced_speaker')
-                confidence = segment.get('speaker_confidence', 0)
-                
-                # Only use high-confidence segments for improvement
-                if confidence >= 0.8 and speaker_name and speaker_name != 'Unknown':
-                    start_time = segment.get('start', 0)
-                    end_time = segment.get('end', 0)
-                    
-                    # Extract segment audio
-                    start_sample = int(start_time * sample_rate)
-                    end_sample = int(end_time * sample_rate)
-                    
-                    if end_sample > start_sample and end_sample <= waveform.shape[1]:
-                        segment_waveform = waveform[:, start_sample:end_sample]
-                        audio_numpy = segment_waveform.squeeze().numpy()
-                        
-                        # Provide feedback to improve the model
-                        success = self.speaker_manager.provide_correction_feedback(
-                            speaker_name, audio_numpy
-                        )
-                        
-                        if success:
-                            improvement_count += 1
-                            logger.debug(f"Improved model for {speaker_name}")
-        
+            if segment.get('identification_method') != 'embedding_enhanced':
+                continue
+
+            speaker_name = segment.get('enhanced_speaker')
+            confidence = segment.get('speaker_confidence', 0)
+
+            if confidence < 0.8 or not speaker_name or speaker_name == 'Unknown':
+                continue
+
+            start_time = segment.get('start', 0)
+            end_time = segment.get('end', 0)
+            start_sample = int(start_time * sample_rate)
+            end_sample = int(end_time * sample_rate)
+
+            if not (end_sample > start_sample and end_sample <= waveform.shape[-1]):
+                continue
+
+            embedding = self._embed_segment(waveform[:, start_sample:end_sample], sample_rate)
+            if embedding is not None:
+                vectors_by_speaker.setdefault(speaker_name, []).append(embedding)
+
+        improvement_count = 0
+        for speaker_name, vectors in vectors_by_speaker.items():
+            try:
+                self.speaker_db.enroll_speaker(
+                    speaker_name, vectors, confidence=0.9, source_type="corrected"
+                )
+                improvement_count += len(vectors)
+                logger.debug(f"Improved model for {speaker_name} with {len(vectors)} sample(s)")
+            except Exception as e:
+                logger.warning(f"Could not update speaker '{speaker_name}': {e}")
+
         if improvement_count > 0:
             logger.info(f"Improved speaker models with {improvement_count} segments")
     
@@ -638,10 +777,7 @@ class BatchTranscriptionProcessor:
     
     def _tensor_to_wav_bytes(self, waveform: torch.Tensor, sample_rate: int) -> bytes:
         """Convert tensor to WAV bytes for API calls"""
-        import io
-        buffer = io.BytesIO()
-        torchaudio.save(buffer, waveform, sample_rate, format='wav')
-        return buffer.getvalue()
+        return wav_bytes(waveform, sample_rate)
 
 
 def main():
@@ -690,8 +826,10 @@ def main():
     
     logger.info(f"Found {len(audio_files)} audio files")
     
-    # Process files
-    processor = BatchTranscriptionProcessor(args.backend_url)
+    # Process files. Standalone CLI run: load ASR/diarization/embedding models
+    # into this process, otherwise nothing here can transcribe or identify
+    # speakers locally and every file falls through to the HTTP API.
+    processor = BatchTranscriptionProcessor(args.backend_url, load_local_models=True)
     
     try:
         results = processor.process_batch(

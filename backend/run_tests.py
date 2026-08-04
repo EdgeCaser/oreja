@@ -147,21 +147,23 @@ class OrejaTestRunner:
             print("💡 Run: python run_tests.py --install-deps")
             return False
         
-        # Check if main modules can be imported
+        # Check if main modules can be imported. speaker_embeddings.py was
+        # removed - speaker_database_v2 is the only speaker store now.
         try:
             sys.path.insert(0, str(self.backend_dir))
             import server
-            import speaker_embeddings
+            import speaker_database_v2
             print("✅ Main modules can be imported")
         except ImportError as e:
             print(f"❌ Cannot import main modules: {e}")
             return False
-        
+
         # Check if test files exist
         test_files = [
             "tests/conftest.py",
-            "tests/test_api_endpoints.py", 
-            "tests/test_speaker_embeddings.py",
+            "tests/test_server.py",
+            "tests/test_speaker_identification.py",
+            "tests/test_word_speaker_attribution.py",
             "tests/test_utils.py"
         ]
         
