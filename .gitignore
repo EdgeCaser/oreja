@@ -73,3 +73,11 @@ Transcriptions/
 
 # Build output directories
 publish-standalone/
+publish/
+*_wpftmp.csproj
+
+# Local user data (speaker voiceprints, transcription output)
+backend/speaker_data*/
+backend/transcription_results/
+backend/output/
+.coverage
