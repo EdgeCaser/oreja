@@ -2126,7 +2126,12 @@ def _diarize_sync(waveform: torch.Tensor, sample_rate: int) -> Any:
     audio_data = {"waveform": waveform, "sample_rate": sample_rate}
     with _diarization_lock:
         with torch.inference_mode():
-            return diarization_pipeline(audio_data)
+            result = diarization_pipeline(audio_data)
+    # pyannote.audio 4.x returns a DiarizeOutput dataclass whose Annotation
+    # (the object with .itertracks) lives on .speaker_diarization; 3.x returned
+    # the Annotation directly. Unwrap here so every downstream consumer keeps
+    # working against the Annotation API.
+    return getattr(result, "speaker_diarization", result)
 
 
 async def run_diarization(waveform: torch.Tensor, sample_rate: int) -> Any:
