@@ -8,8 +8,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Oreja</AssemblyName>
     <RootNamespace>Oreja</RootNamespace>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <!-- Assembly-info generation must stay ON: WPF bakes the AssemblyVersion
+         below into compiled BAML pack URIs, and Application.LoadComponent
+         throws FileNotFoundException at startup if the built assembly is not
+         actually stamped with that same version. The old
+         GenerateAssemblyInfo=false workaround (for duplicate attributes from
+         a stray sibling csproj sharing obj/) caused exactly that crash. -->
     <!-- <ApplicationIcon>Resources\oreja-icon.ico</ApplicationIcon> -->
     <StartupObject>Oreja.App</StartupObject>
     <Version>1.0.0</Version>
