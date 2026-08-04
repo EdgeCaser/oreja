@@ -15,8 +15,21 @@ from unittest.mock import Mock, patch, MagicMock, mock_open
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import _stub_heavy_deps  # noqa: F401 - installs sys.modules stubs before `import batch_transcription`
+
 import batch_transcription
 from batch_transcription import BatchTranscriptionProcessor, process_audio_file, save_transcription_result
+
+# torch.randn() under the stub returns a MagicMock, not a real tensor - `.shape`
+# indexing/comparisons on it blow up with a TypeError deep inside
+# _load_audio()/process_recording(), long before any real audio math happens.
+# Tests that build a "mock waveform" via torch.randn and rely on it behaving
+# like a real tensor (.shape[0] comparisons, resampling, mono-mixing) need the
+# real package and are skipped when heavy ML deps are stubbed.
+requires_real_torch = pytest.mark.skipif(
+    _stub_heavy_deps.HEAVY_DEPS_STUBBED,
+    reason="requires a real torch tensor (heavy ML deps are stubbed)",
+)
 
 
 class TestBatchTranscriptionModule:
@@ -57,6 +70,7 @@ class TestBatchTranscriptionProcessor:
         assert isinstance(processor.results, list)
     
     @pytest.mark.unit
+    @requires_real_torch
     @patch('batch_transcription.torchaudio.load')
     def test_load_audio(self, mock_load):
         """Test audio loading functionality."""
@@ -194,6 +208,7 @@ class TestBatchTranscriptionIntegration:
     """Integration tests for batch transcription."""
     
     @pytest.mark.integration
+    @requires_real_torch
     @patch('batch_transcription.torchaudio.load')
     @patch('batch_transcription.asyncio.run')
     def test_full_processing_pipeline(self, mock_asyncio, mock_load):

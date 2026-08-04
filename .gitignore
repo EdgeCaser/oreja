@@ -81,3 +81,4 @@ backend/speaker_data*/
 backend/transcription_results/
 backend/output/
 .coverage
+/output/

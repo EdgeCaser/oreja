@@ -52,8 +52,10 @@ python run_tests.py --report
 
 | File | Purpose | Coverage |
 |------|---------|----------|
-| `test_api_endpoints.py` | FastAPI endpoint testing | All `/transcribe/*` endpoints, error handling, file uploads |
-| `test_speaker_embeddings.py` | Speaker recognition system | SpeakerProfile class, embedding manager, database operations |
+| `test_server.py` | FastAPI endpoint testing | `/health`, `/transcribe`, `/extract_embeddings`, error handling |
+| `test_api_contract.py` | Frozen WPF client contract | `POST /transcribe` and `GET /speakers` response shapes |
+| `test_speaker_identification.py` | Speaker recognition system | `identify_speakers_hook`, EnhancedSpeakerDatabase matching |
+| `test_enhanced_speaker_database.py` | Speaker database v2 | create/merge/delete/enroll, embedding retention |
 | `test_utils.py` | Utility function testing | Audio processing, transcription merging, validation |
 | `test_batch_transcription.py` | Batch processing | File transcription, directory processing, result saving |
 | `conftest.py` | Shared test fixtures | Mock data, audio samples, validation utilities |
@@ -98,10 +100,10 @@ The `conftest.py` provides these reusable fixtures:
 
 ```bash
 # Run specific test function
-python -m pytest tests/test_api_endpoints.py::TestTranscriptionEndpoints::test_transcribe_file_success -v
+python -m pytest tests/test_api_contract.py::TestTranscribeContract::test_transcribe_returns_wpf_client_shape -v
 
 # Run all tests in a class
-python -m pytest tests/test_speaker_embeddings.py::TestSpeakerProfile -v
+python -m pytest tests/test_speaker_identification.py -v
 ```
 
 ### By Marker

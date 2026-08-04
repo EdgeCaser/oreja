@@ -16,22 +16,34 @@ import numpy as np
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 
+# MUST run before `import torch` below (and before any other test module in
+# this directory imports torch/server): installs MagicMock stand-ins for
+# torch/torchaudio/faster_whisper/pyannote/scipy into sys.modules when the
+# real packages are not installed, so this whole suite - not just the files
+# that individually `import _stub_heavy_deps` - can be collected and run on a
+# machine without the heavy ML wheels. Importing it here, first, makes stub
+# installation independent of which test file pytest happens to collect
+# first (relying on collection order for this was fragile - a conftest.py
+# that itself grabbed a real `import torch` failure into a None global before
+# any test module got a chance to install the stub left that None baked into
+# every fixture below for the rest of the session).
+import _stub_heavy_deps
+
 # torch/torchaudio and the "server" module (which imports torch at module
 # scope for its waveform handling) are real hard dependencies of this whole
 # suite - on a fully provisioned dev/CI machine (see requirements.txt) both
-# imports succeed exactly as before. Guarded here only so that dependency-light
-# tests elsewhere in this directory (pure-Python/numpy - no torch, no models)
-# can still be collected and run on a machine where the heavy ML wheels are not
-# installed; any test that actually needs torch/app is skipped via
-# pytest.importorskip inside the fixture that builds it, not silently faked.
-try:
-    import torch
-    import torchaudio
-    TORCH_AVAILABLE = True
-except ImportError:
-    torch = None
-    torchaudio = None
-    TORCH_AVAILABLE = False
+# imports succeed exactly as before, importing the genuine packages.
+# On a lightweight machine, _stub_heavy_deps has already put MagicMock
+# stand-ins into sys.modules, so this import still succeeds - it does NOT
+# mean real torch is available. HEAVY_DEPS_STUBBED (below) is the reliable
+# flag for that; fixtures that build real tensors/audio must skip on it
+# instead of on TORCH_AVAILABLE / pytest.importorskip("torch"), both of which
+# only see "is *something* importable as torch" and would never skip once the
+# stub is installed.
+import torch
+import torchaudio
+TORCH_AVAILABLE = True
+HEAVY_DEPS_STUBBED = _stub_heavy_deps.HEAVY_DEPS_STUBBED
 
 try:
     from server import app, initialize_models
@@ -76,7 +88,8 @@ async def async_client():
 @pytest.fixture
 def sample_audio_data():
     """Generate sample audio data for testing."""
-    pytest.importorskip("torch")
+    if HEAVY_DEPS_STUBBED:
+        pytest.skip("requires real torch/torchaudio (heavy ML deps are stubbed)")
     sample_rate = 16000
     duration = 2.0  # seconds
     frequency = 440.0  # A4 note
@@ -103,7 +116,8 @@ def sample_audio_bytes(sample_audio_data):
 @pytest.fixture
 def sample_short_audio():
     """Generate short audio sample (under minimum length)."""
-    pytest.importorskip("torch")
+    if HEAVY_DEPS_STUBBED:
+        pytest.skip("requires real torch/torchaudio (heavy ML deps are stubbed)")
     sample_rate = 16000
     duration = 0.05  # 50ms - very short
     frequency = 440.0
@@ -128,7 +142,8 @@ def sample_long_audio():
     generating a genuinely over-limit buffer here would cost gigabytes. This
     fixture just exercises the multi-segment / long-buffer path.
     """
-    pytest.importorskip("torch")
+    if HEAVY_DEPS_STUBBED:
+        pytest.skip("requires real torch/torchaudio (heavy ML deps are stubbed)")
     sample_rate = 16000
     duration = 35.0  # 35 seconds - long, but well within MAX_AUDIO_LENGTH
     frequency = 440.0

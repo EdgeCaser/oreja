@@ -3,6 +3,8 @@ Unit tests for utility functions and audio processing.
 Tests audio loading, validation, and processing helper functions.
 """
 
+import _stub_heavy_deps  # noqa: F401 - installs sys.modules stubs before `import server`
+
 import io
 import pytest
 import torch
@@ -10,9 +12,18 @@ import numpy as np
 from unittest.mock import Mock, patch
 
 from server import (
-    load_audio_from_bytes, 
+    load_audio_from_bytes,
     merge_transcription_and_diarization,
     find_speaker_for_segment
+)
+
+# Real torchaudio decoding of WAV bytes into a tensor cannot be faked by
+# MagicMock - it needs the genuine package. Tests that decode real (or
+# realistic) WAV bytes are skipped when heavy ML deps are stubbed; they run
+# for real on a fully provisioned machine.
+requires_real_torch = pytest.mark.skipif(
+    _stub_heavy_deps.HEAVY_DEPS_STUBBED,
+    reason="requires real torch/torchaudio (heavy ML deps are stubbed)",
 )
 
 
@@ -303,14 +314,16 @@ class TestAudioProcessingIntegration:
     """Integration tests for audio processing pipeline."""
     
     @pytest.mark.integration
+    @requires_real_torch
     def test_full_audio_processing_pipeline(self):
         """Test complete audio processing from bytes to final segments."""
         # Use the sample audio from fixture
         sample_bytes = b"RIFF" + b"\x24\x00\x00\x00" + b"WAVE" + b"fmt " + b"\x10\x00\x00\x00" + \
                       b"\x01\x00\x01\x00\x44\xAC\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00" + \
                       b"data" + b"\x00\x00\x00\x00"
-        
-        # Load audio
+
+        # Load audio - this is a real (if minimal) WAV byte stream, so it needs
+        # the real torchaudio decoder to succeed.
         waveform, sample_rate = load_audio_from_bytes(sample_bytes)
         
         # Create mock transcription and diarization
@@ -345,6 +358,7 @@ class TestPerformance:
     """Performance tests for audio processing functions."""
     
     @pytest.mark.slow
+    @requires_real_torch
     def test_audio_loading_performance(self):
         """Test audio loading performance with various file sizes."""
         import time

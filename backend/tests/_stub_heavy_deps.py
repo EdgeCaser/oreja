@@ -40,6 +40,16 @@ def _installed(name: str) -> bool:
         return False
 
 
+# Names of heavy packages this module actually replaced with a MagicMock, filled
+# in as install() runs. Reliable, order-independent way for tests/conftest to
+# tell "torch is importable" (always true after install() - real or fake) apart
+# from "torch is the REAL package" (false on a machine with no ML wheels).
+# `TORCH_STUBBED` / `HEAVY_DEPS_STUBBED` below are the flags tests should key
+# skips off; do not re-derive this by probing sys.modules, since a MagicMock is
+# indistinguishable from a real module by simple presence checks.
+STUBBED_MODULES: set = set()
+
+
 class FakeTensor(list):
     """Real (non-Mock) placeholder type so isinstance(x, torch.Tensor) works."""
 
@@ -47,6 +57,7 @@ class FakeTensor(list):
 def _install_torch():
     if _installed("torch"):
         return
+    STUBBED_MODULES.add("torch")
     torch_mod = MagicMock(name="torch")
     torch_mod.Tensor = FakeTensor
     torch_mod.cuda.is_available.return_value = False
@@ -63,6 +74,7 @@ def _install_torch():
 def _install_faster_whisper():
     if _installed("faster_whisper"):
         return
+    STUBBED_MODULES.add("faster_whisper")
     mod = MagicMock(name="faster_whisper")
     mod.WhisperModel = MagicMock(name="WhisperModel")
     sys.modules.setdefault("faster_whisper", mod)
@@ -71,6 +83,7 @@ def _install_faster_whisper():
 def _install_pyannote():
     if _installed("pyannote"):
         return
+    STUBBED_MODULES.add("pyannote")
     pkg = types.ModuleType("pyannote")
     pkg.__path__ = []  # mark as a package so "pyannote.audio" submodule imports resolve
     audio_mod = MagicMock(name="pyannote.audio")
@@ -90,6 +103,7 @@ def _install_pyannote():
 def _install_scipy():
     if _installed("scipy"):
         return
+    STUBBED_MODULES.add("scipy")
     scipy_mod = MagicMock(name="scipy")
     spatial_mod = MagicMock(name="scipy.spatial")
     distance_mod = MagicMock(name="scipy.spatial.distance")
@@ -107,6 +121,7 @@ def _install_scipy():
 def _install_simple(name: str):
     if _installed(name):
         return
+    STUBBED_MODULES.add(name)
     sys.modules.setdefault(name, MagicMock(name=name))
 
 
@@ -123,3 +138,11 @@ def install():
 
 
 install()
+
+# Reliable, order-independent detection flags for tests/conftest.py. Computed
+# once, right here, from what install() actually did (backed by
+# importlib.util.find_spec) - NOT by probing sys.modules later, since by then
+# every heavy package name resolves to *something* (real or MagicMock) and the
+# two are indistinguishable by presence alone.
+TORCH_STUBBED = "torch" in STUBBED_MODULES
+HEAVY_DEPS_STUBBED = bool(STUBBED_MODULES)
