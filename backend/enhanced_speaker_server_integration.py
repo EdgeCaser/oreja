@@ -10,6 +10,13 @@ and its migration path were removed along with speaker_embeddings.py. Voiceprint
 extraction belongs to server.py (pyannote PretrainedSpeakerEmbedding); this module
 only ever handles vectors that have already been extracted, so it imports nothing
 heavier than the database itself.
+
+Every method here is a plain (synchronous) ``def``: the bodies are disk I/O and
+numpy, with nothing to await. They used to be ``async def``, which meant an
+``await`` from a FastAPI handler ran the whole thing - including
+send_feedback_for_learning()'s rewrite of speaker_records.json and every .npy -
+directly on the asyncio event loop, stalling the live 5-second /transcribe
+chunks. Call them with ``await asyncio.to_thread(...)`` from async handlers.
 """
 
 import logging
@@ -39,7 +46,7 @@ class EnhancedSpeakerServerIntegration:
             f"({len(self.enhanced_db.speaker_records)} speakers)"
         )
 
-    async def get_enhanced_speaker_stats(self) -> Dict:
+    def get_enhanced_speaker_stats(self) -> Dict:
         """Get comprehensive speaker statistics from the v2 database."""
         try:
             speakers = self.enhanced_db.get_all_speakers()
@@ -83,7 +90,7 @@ class EnhancedSpeakerServerIntegration:
             logger.error(f"Failed to get enhanced speaker stats: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def enhanced_speaker_correction_feedback(self,
+    def enhanced_speaker_correction_feedback(self,
                                                    corrections: Dict[str, str],
                                                    audio_file: str = None,
                                                    segments: List[Dict] = None,
@@ -122,7 +129,7 @@ class EnhancedSpeakerServerIntegration:
             logger.error(f"Enhanced speaker correction feedback failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def reprocess_stored_embeddings(self, segments: List[Dict] = None,
+    def reprocess_stored_embeddings(self, segments: List[Dict] = None,
                                           audio_file: str = None) -> Dict:
         """
         Re-run identification and report what would change. Mutates nothing.
@@ -135,7 +142,7 @@ class EnhancedSpeakerServerIntegration:
             logger.error(f"Reprocessing audit failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def validate_system_consistency(self) -> Dict:
+    def validate_system_consistency(self) -> Dict:
         """Report data-quality problems in the speaker database."""
         try:
             speakers = self.enhanced_db.get_all_speakers()
@@ -193,7 +200,7 @@ class EnhancedSpeakerServerIntegration:
             logger.error(f"System validation failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def cleanup_and_optimize(self, min_embeddings: int = 1) -> Dict:
+    def cleanup_and_optimize(self, min_embeddings: int = 1) -> Dict:
         """Merge duplicate-name speakers and drop under-sampled auto speakers."""
         try:
             results = self.enhanced_db.cleanup(

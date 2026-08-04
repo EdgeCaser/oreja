@@ -9,8 +9,12 @@ import sys
 from pathlib import Path
 from typing import Dict, Any
 
-# Add the current directory to Python path
+# Add the repo root AND backend/ to the Python path. The modules this demo
+# imports (enhanced_transcription_processor, enhanced_server_integration) live
+# under backend/, not at the repo root, so the root-only path used before made
+# this script exit(1) with a misleading "install the enhanced requirements".
 sys.path.append(str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent / "backend"))
 
 try:
     from enhanced_transcription_processor import EnhancedTranscriptionProcessor

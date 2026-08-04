@@ -5,10 +5,19 @@ Demonstrates sentiment analysis and audio features capabilities
 """
 
 import json
+import sys
 import numpy as np
 import torch
 from pathlib import Path
 from datetime import datetime
+
+# enhanced_transcription_processor / enhanced_server_integration live under
+# backend/, not at the repo root. Without this every `from
+# enhanced_transcription_processor import ...` below hits its ImportError
+# branch and the demo reports "enhanced features not installed" on a machine
+# where they are perfectly well installed.
+sys.path.append(str(Path(__file__).parent / "backend"))
+
 
 def create_demo_data():
     """Create realistic demo transcription data"""
@@ -288,6 +297,8 @@ def show_integration_example():
     
     code_example = '''
 # Example: Adding enhanced features to your existing transcription
+# (enhanced_server_integration lives in backend/ - run from there, or put
+#  backend/ on sys.path first.)
 
 from enhanced_server_integration import EnhancedTranscriptionService
 

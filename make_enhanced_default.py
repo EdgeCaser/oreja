@@ -23,7 +23,7 @@ def modify_server_for_enhanced_default():
     
     2. ADD enhanced service initialization after loading models:
     ```python
-    # Add after model loading in load_models()
+    # Add after model loading in initialize_models()
     global enhanced_service
     enhanced_service = EnhancedTranscriptionService(
         sentiment_model="vader",  # Fast default
@@ -89,9 +89,10 @@ import torchaudio
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import existing server components
+# Import existing server components (run this file from backend/, or put
+# backend/ on sys.path first - server.py lives there, not at the repo root).
 from server import (
-    load_models, load_audio_from_bytes, run_transcription, 
+    initialize_models, load_audio_from_bytes, run_transcription,
     run_diarization, merge_transcription_and_diarization
 )
 
@@ -125,8 +126,9 @@ async def startup_event():
     """Initialize models and enhanced features on startup"""
     global enhanced_service
     
-    # Load basic transcription models
-    await load_models()
+    # Load basic transcription models. initialize_models() is synchronous
+    # (there is no `load_models`, and nothing to await).
+    initialize_models()
     
     # Initialize enhanced features
     try:
