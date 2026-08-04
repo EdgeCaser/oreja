@@ -36,7 +36,10 @@ class TestBatchTranscriptionModule:
         
         assert processor.backend_url == "http://127.0.0.1:8000"
         assert processor.SAMPLE_RATE == 16000
-        assert hasattr(processor, 'speaker_manager')
+        # speaker_manager (legacy OfflineSpeakerEmbeddingManager) was renamed to
+        # speaker_db (speaker_database_v2.EnhancedSpeakerDatabase) - see
+        # BatchTranscriptionProcessor.__init__.
+        assert hasattr(processor, 'speaker_db')
         assert hasattr(processor, 'results')
 
 

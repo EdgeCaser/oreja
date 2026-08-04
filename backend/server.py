@@ -1,6 +1,20 @@
 """
 FastAPI server for Oreja audio transcription and diarization.
-Processes audio in memory using local Hugging Face models with no cloud interaction.
+Processes audio in memory using local models with no cloud interaction.
+
+Pipeline shape:
+    bytes -> waveform (16 kHz mono)
+          -> ASR:         faster-whisper (ctranslate2) with built-in Silero VAD and
+                          word-level timestamps. Handles arbitrary-length audio
+                          internally - there is NO manual chunking / overlap stitching.
+          -> diarization: pyannote speaker-diarization on the full waveform.
+          -> attribution: every ASR *word* is mapped to the diarization turn covering
+                          its midpoint; ASR segments are then split wherever the
+                          word-level speaker changes.
+          -> hook:        identify_speakers_hook() for voiceprint-based naming.
+
+ASR and diarization both run off the event loop via asyncio.to_thread and are
+serialized by per-model locks so concurrent requests cannot corrupt model state.
 
 PRIVACY GUARANTEE: NO AUDIO DATA EVER LEAVES THIS MACHINE
 """
@@ -10,6 +24,7 @@ import io
 import logging
 import os
 import sys
+import threading
 import time
 from typing import List, Dict, Any, Optional
 import warnings
@@ -22,13 +37,16 @@ import torchaudio
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from transformers import pipeline, AutoProcessor, WhisperForConditionalGeneration
-from pyannote.audio import Pipeline as DiarizationPipeline
-from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
 import uvicorn
 
-# Import our offline speaker embedding manager
-from speaker_embeddings import OfflineSpeakerEmbeddingManager
+# NOTE: faster-whisper (ctranslate2) and pyannote.audio are imported lazily inside
+# initialize_models() so that this module can be imported for tooling/tests on
+# machines where the heavy ASR/diarization wheels are not installed.
+
+# Persistent speaker identity lives in the v2 database. There is exactly ONE
+# embedding system in this server: the pyannote PretrainedSpeakerEmbedding model
+# loaded below. The old SpeechBrain OfflineSpeakerEmbeddingManager is gone.
+from speaker_database_v2 import EnhancedSpeakerDatabase
 
 # Import enhanced transcription features
 try:
@@ -68,12 +86,63 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 SAMPLE_RATE = 16000
-MAX_AUDIO_LENGTH = 7200  # seconds (2 hours) - realistic maximum for chunked processing
+MAX_AUDIO_LENGTH = 7200  # seconds (2 hours) - faster-whisper streams long audio internally
 MIN_AUDIO_LENGTH = 0.1  # seconds
-CHUNK_THRESHOLD = 30  # seconds - audio longer than this will be chunked
-WHISPER_MODEL = "openai/whisper-large-v3-turbo"  # Latest model from October 2024 - faster with same accuracy as large-v3
-DIARIZATION_MODEL = "pyannote/speaker-diarization-3.0"
+
+# --- ASR (faster-whisper / ctranslate2) -------------------------------------
+# Model name is a faster-whisper identifier ("large-v3-turbo", "medium", ...) or a
+# path to a converted ctranslate2 model directory.
+WHISPER_MODEL = os.getenv("OREJA_WHISPER_MODEL", "large-v3-turbo")
+WHISPER_FALLBACK_MODEL = os.getenv("OREJA_WHISPER_FALLBACK_MODEL", "base")
+# "auto" -> cuda when available, otherwise cpu.
+WHISPER_DEVICE_SETTING = os.getenv("OREJA_DEVICE", "auto")
+# Empty/unset -> float16 on cuda, int8 on cpu.
+WHISPER_COMPUTE_TYPE_SETTING = os.getenv("OREJA_COMPUTE_TYPE", "")
+# Empty/unset -> auto-detect the language (applies to ALL audio lengths).
+WHISPER_LANGUAGE = os.getenv("OREJA_LANGUAGE") or None
+WHISPER_BEAM_SIZE = int(os.getenv("OREJA_BEAM_SIZE", "5"))
+VAD_MIN_SILENCE_MS = int(os.getenv("OREJA_VAD_MIN_SILENCE_MS", "500"))
+
+# Hallucination gating thresholds, applied uniformly to every segment.
+NO_SPEECH_PROB_THRESHOLD = float(os.getenv("OREJA_NO_SPEECH_PROB", "0.6"))
+AVG_LOGPROB_THRESHOLD = float(os.getenv("OREJA_AVG_LOGPROB", "-1.0"))
+COMPRESSION_RATIO_THRESHOLD = float(os.getenv("OREJA_COMPRESSION_RATIO", "2.4"))
+# avg_logprob at or above this means the decode was confident; short outputs are
+# then kept rather than treated as noise artifacts.
+CONFIDENT_LOGPROB = float(os.getenv("OREJA_CONFIDENT_LOGPROB", "-0.5"))
+
+# Cheap fast-path: clips quieter than this are certainly silence. Deliberately far
+# below the old 0.015 whole-clip VAD gate, which discarded legitimate quiet speech.
+SILENCE_RMS_THRESHOLD = float(os.getenv("OREJA_SILENCE_RMS", "0.001"))
+
+DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 EMBEDDING_MODEL = "pyannote/embedding"
+
+# --- Persistent speaker identification ---------------------------------------
+# Cosine similarity a voiceprint must reach to be called a known speaker.
+SPEAKER_MATCH_THRESHOLD = float(os.getenv("OREJA_SPEAKER_THRESHOLD", "0.72"))
+# A diarization speaker with less than this much audio in a request is not
+# embedded at all: short crops give unstable voiceprints that poison the bank.
+MIN_SPEAKER_AUDIO_SECONDS = float(os.getenv("OREJA_MIN_SPEAKER_AUDIO", "1.5"))
+# Upper bound on the audio concatenated per speaker before embedding. More than
+# ~20s buys no accuracy and costs latency on every 5-second chunk.
+MAX_SPEAKER_AUDIO_SECONDS = float(os.getenv("OREJA_MAX_SPEAKER_AUDIO", "20.0"))
+# Where the v2 speaker database lives.
+SPEAKER_DATA_DIR = os.getenv("OREJA_SPEAKER_DATA_DIR", "speaker_data_v2")
+
+# Whether the per-request sentiment / conversation-analysis enhancement runs inline.
+# Off by default: it is expensive and belongs on an explicit analysis pass.
+ENHANCEMENT_INLINE = os.getenv("OREJA_INLINE_ENHANCEMENT", "0").lower() in ("1", "true", "yes")
+
+# Models are not thread-safe. Serialize access so that concurrent /transcribe
+# requests queue on the model instead of corrupting its internal state, while the
+# asyncio event loop stays free (calls are dispatched via asyncio.to_thread).
+_whisper_lock = threading.Lock()
+_diarization_lock = threading.Lock()
+_embedding_lock = threading.Lock()
+# The speaker database is mutated from worker threads (identify hook) and from
+# request handlers; guard every mutation with this.
+_speaker_db_lock = threading.RLock()
 
 app = FastAPI(
     title="Oreja Enhanced Audio Processing API",
@@ -90,27 +159,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Consolidated summarization / annotation endpoints: /transcribe_enhanced,
+# /analyze_sentiment, /enhanced_features_status, /transcribe_with_summary,
+# /summarize_transcription, /summary_options. These are batch/file-style
+# endpoints (not the live 5-second-chunk path) so they run analysis by
+# default. Each route lazily imports from this module at request time, by
+# which point initialize_models() has already run.
+if ENHANCED_FEATURES_AVAILABLE:
+    try:
+        from enhanced_server_integration import add_enhanced_endpoints
+        add_enhanced_endpoints(app)
+        logger.info("Enhanced summarization endpoints registered")
+    except Exception as e:
+        logger.warning(f"Failed to register enhanced summarization endpoints: {e}")
+
 # Global variables
 device = None
 whisper_model = None
 diarization_pipeline = None
 embedding_model = None
-speaker_embedding_manager = None
 enhanced_speaker_database = None
 enhanced_service = None
 enhanced_speaker_integration = None
 
 
+def resolve_asr_device() -> str:
+    """Resolve the faster-whisper device string ("cuda" or "cpu") from OREJA_DEVICE."""
+    setting = (WHISPER_DEVICE_SETTING or "auto").strip().lower()
+    if setting in ("", "auto"):
+        try:
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # pragma: no cover - torch without CUDA runtime
+            return "cpu"
+    return setting
+
+
+def resolve_compute_type(asr_device: str) -> str:
+    """Resolve the ctranslate2 compute type: float16 on cuda, int8 on cpu by default."""
+    setting = (WHISPER_COMPUTE_TYPE_SETTING or "").strip().lower()
+    if setting:
+        return setting
+    return "float16" if asr_device == "cuda" else "int8"
+
+
+def _load_faster_whisper(model_name: str, asr_device: str, compute_type: str):
+    """Instantiate a faster-whisper model. Import is lazy so the module stays importable."""
+    from faster_whisper import WhisperModel  # noqa: PLC0415 - intentionally lazy
+
+    return WhisperModel(
+        model_name,
+        device=asr_device,
+        compute_type=compute_type,
+        download_root=os.getenv("OREJA_MODEL_CACHE") or None,
+    )
+
+
 def initialize_models():
     """Initialize all models and set up the device."""
-    global device, whisper_model, diarization_pipeline, embedding_model, speaker_embedding_manager, enhanced_speaker_database, enhanced_service
-    
+    global device, whisper_model, diarization_pipeline, embedding_model, enhanced_speaker_database, enhanced_service
+
     logger.info("🚀 STARTING MODEL INITIALIZATION")
     logger.info(f"🔧 Current working directory: {os.getcwd()}")
     logger.info(f"🐍 Python executable: {sys.executable}")
-    logger.info(f"📦 Transformers version: {__import__('transformers').__version__}")
     logger.info(f"🔥 PyTorch version: {torch.__version__}")
-    
+
     # Set up device (GPU if available, otherwise CPU)
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -119,42 +231,34 @@ def initialize_models():
     else:
         device = torch.device("cpu")
         logger.info("Using device: cpu")
-    
-    # Load Whisper model with proper error handling
+
+    # Load the faster-whisper ASR model. faster-whisper handles arbitrary-length
+    # audio and voice activity detection internally, so no manual chunking is used.
+    asr_device = resolve_asr_device()
+    compute_type = resolve_compute_type(asr_device)
     try:
-        logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
-        whisper_model = pipeline(
-            "automatic-speech-recognition",
-            model=WHISPER_MODEL,
-            device=device,
-            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-            return_timestamps=True,
-            chunk_length_s=30,  # Optimal chunk length for quality
-            stride_length_s=5,  # Overlap for better continuity
+        logger.info(
+            f"Loading faster-whisper model: {WHISPER_MODEL} "
+            f"(device={asr_device}, compute_type={compute_type}, "
+            f"language={WHISPER_LANGUAGE or 'auto-detect'})"
         )
-        logger.info("✓ Whisper model loaded successfully")
+        whisper_model = _load_faster_whisper(WHISPER_MODEL, asr_device, compute_type)
+        logger.info("✓ faster-whisper model loaded successfully")
     except Exception as e:
-        logger.error(f"Failed to load Whisper model: {e}")
-        logger.info("Trying fallback to smaller Whisper model...")
+        logger.error(f"Failed to load faster-whisper model '{WHISPER_MODEL}': {e}")
+        logger.info(f"Trying fallback model '{WHISPER_FALLBACK_MODEL}' on cpu/int8...")
         try:
-            whisper_model = pipeline(
-                "automatic-speech-recognition",
-                model="openai/whisper-base",
-                device=device,
-                torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-                return_timestamps=True,
-                chunk_length_s=30,
-                stride_length_s=5,
-            )
-            logger.info("✓ Whisper base model loaded successfully (fallback)")
+            whisper_model = _load_faster_whisper(WHISPER_FALLBACK_MODEL, "cpu", "int8")
+            logger.info(f"✓ faster-whisper '{WHISPER_FALLBACK_MODEL}' loaded (fallback)")
         except Exception as e2:
             logger.error(f"Failed to load any Whisper model: {e2}")
             logger.error("Transcription will not be available!")
             whisper_model = None
-    
+
     # Try to load pyannote.audio for speaker diarization
     try:
         logger.info(f"Loading diarization model: {DIARIZATION_MODEL}")
+        from pyannote.audio import Pipeline as DiarizationPipeline  # lazy import
         hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
         diarization_pipeline = DiarizationPipeline.from_pretrained(
             DIARIZATION_MODEL,
@@ -167,10 +271,13 @@ def initialize_models():
         logger.warning(f"Failed to load diarization model: {e}")
         logger.warning("Continuing without speaker diarization - only transcription will be available")
         diarization_pipeline = None
-    
+
     # Try to load embedding model for speaker recognition
     try:
         logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+        from pyannote.audio.pipelines.speaker_verification import (  # lazy import
+            PretrainedSpeakerEmbedding,
+        )
         embedding_model = PretrainedSpeakerEmbedding(
             EMBEDDING_MODEL,
             device=device
@@ -181,25 +288,29 @@ def initialize_models():
         logger.warning("Continuing without speaker embeddings")
         embedding_model = None
     
-    # Initialize enhanced speaker database as primary system
+    # The v2 speaker database is the only speaker store.
     try:
-        logger.info("Initializing enhanced speaker database v2...")
-        from speaker_database_v2 import EnhancedSpeakerDatabase
-        enhanced_speaker_database = EnhancedSpeakerDatabase("speaker_data_v2")
-        logger.info("✓ Enhanced speaker database v2 initialized successfully")
+        logger.info(f"Initializing speaker database v2 at {SPEAKER_DATA_DIR}...")
+        enhanced_speaker_database = EnhancedSpeakerDatabase(SPEAKER_DATA_DIR)
+        enhanced_speaker_database.similarity_threshold = SPEAKER_MATCH_THRESHOLD
+        logger.info(
+            f"✓ Speaker database v2 ready: {len(enhanced_speaker_database.speaker_records)} speakers, "
+            f"match threshold {SPEAKER_MATCH_THRESHOLD:.2f}"
+        )
     except Exception as e:
-        logger.warning(f"Failed to initialize enhanced speaker database: {e}")
+        logger.warning(f"Failed to initialize speaker database v2: {e}")
         enhanced_speaker_database = None
-    
-    # Legacy speaker embedding manager disabled - using enhanced database only
-    speaker_embedding_manager = None
-    logger.info("Legacy speaker embedding manager disabled - using enhanced database v2 only")
-    
+
     # Initialize enhanced transcription features
     if ENHANCED_FEATURES_AVAILABLE:
         try:
             logger.info("Initializing enhanced transcription features...")
-            enhanced_service = EnhancedTranscriptionService(
+            # get_enhanced_service() returns the shared, cached instance, so
+            # the /transcribe inline path and the /transcribe_enhanced &
+            # /transcribe_with_summary endpoints all use one service rather
+            # than constructing a new one here and again per request.
+            from enhanced_server_integration import get_enhanced_service
+            enhanced_service = get_enhanced_service(
                 sentiment_model="vader",  # Fast and reliable for production
                 enable_audio_features=True
             )
@@ -218,18 +329,20 @@ def initialize_models():
 @app.on_event("startup")
 async def startup_event():
     """Initialize models when the server starts."""
-    global speaker_embedding_manager, enhanced_speaker_database, enhanced_speaker_integration
-    
+    global enhanced_speaker_database, enhanced_speaker_integration
+
     initialize_models()
-    
-    # Initialize enhanced speaker integration
+
+    # The integration layer wraps the *same* database instance the transcription
+    # path uses - two instances would each hold their own in-memory copy and
+    # silently overwrite each other's saves.
     try:
         enhanced_speaker_integration = EnhancedSpeakerServerIntegration(
-            legacy_speaker_manager=speaker_embedding_manager
+            enhanced_db=enhanced_speaker_database,
+            enhanced_db_path=SPEAKER_DATA_DIR,
         )
-        # Override to use enhanced database directly if available
-        if enhanced_speaker_database is not None:
-            enhanced_speaker_integration.enhanced_db = enhanced_speaker_database
+        if enhanced_speaker_database is None:
+            enhanced_speaker_database = enhanced_speaker_integration.enhanced_db
         logger.info("Enhanced speaker integration initialized")
     except Exception as e:
         logger.warning(f"Enhanced speaker integration failed to initialize: {e}")
@@ -259,9 +372,13 @@ async def health_check():
             "whisper": whisper_model is not None,
             "diarization": diarization_pipeline is not None,
             "embedding": embedding_model is not None,
-            "speaker_embeddings": speaker_embedding_manager is not None,
+            # Kept for wire compatibility: true when persistent speaker
+            # identification (embedding model + v2 database) is fully available.
+            "speaker_embeddings": embedding_model is not None and enhanced_speaker_database is not None,
+            "speaker_database": enhanced_speaker_database is not None,
             "enhanced_features": enhanced_service is not None
         },
+        "speaker_count": len(enhanced_speaker_database.speaker_records) if enhanced_speaker_database else 0,
         "enhanced_capabilities": {
             "sentiment_analysis": enhanced_service is not None,
             "audio_features": enhanced_service is not None,
@@ -271,37 +388,222 @@ async def health_check():
     }
 
 
+# ---------------------------------------------------------------------------
+# Speaker embedding extraction
+#
+# ONE embedding system for the whole server: the pyannote PretrainedSpeakerEmbedding
+# model loaded in initialize_models(). Every voiceprint - transcription-time
+# identification, enrollment, correction learning, segment splitting - goes
+# through extract_embedding_from_audio() so that all stored vectors live in the
+# same space and remain comparable.
+# ---------------------------------------------------------------------------
+
+_embedding_load_lock = threading.Lock()
+
+
+def ensure_embedding_model() -> bool:
+    """
+    Load only the speaker-embedding model (and pick a device) if it isn't loaded.
+
+    initialize_models() runs from the FastAPI startup event, so standalone
+    callers - batch transcription, the user training GUI - would otherwise find
+    ``embedding_model is None`` and silently get no speaker identification at
+    all. Returns True when an embedding model is available. Never raises.
+    """
+    global device, embedding_model
+
+    if embedding_model is not None:
+        return True
+
+    with _embedding_load_lock:
+        if embedding_model is not None:
+            return True
+        try:
+            if device is None:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            logger.info(f"Loading embedding model on demand: {EMBEDDING_MODEL} (device={device})")
+            from pyannote.audio.pipelines.speaker_verification import (  # lazy import
+                PretrainedSpeakerEmbedding,
+            )
+            embedding_model = PretrainedSpeakerEmbedding(EMBEDDING_MODEL, device=device)
+            logger.info("✓ Embedding model loaded successfully")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load embedding model on demand: {e}")
+            embedding_model = None
+            return False
+
+
+def extract_embedding_from_audio(audio, sample_rate: int = SAMPLE_RATE) -> Optional["np.ndarray"]:
+    """
+    Embed a mono audio buffer into a speaker vector.
+
+    Accepts a torch tensor or anything numpy can view as float32 samples.
+    Returns None - never raises - when the model is unavailable, the crop is too
+    short to be meaningful, or the model produces a non-finite vector. Callers
+    are expected to degrade to diarization-only labels on None.
+    """
+    if embedding_model is None:
+        return None
+
+    try:
+        if isinstance(audio, torch.Tensor):
+            samples = audio.detach().to(torch.float32).cpu().reshape(-1)
+        else:
+            samples = torch.from_numpy(np.asarray(audio, dtype=np.float32).reshape(-1))
+
+        # Anything under ~0.2s is noise as far as a voiceprint is concerned.
+        if samples.numel() < int(max(sample_rate, 1) * 0.2):
+            return None
+
+        batch = samples.reshape(1, 1, -1)
+        if device is not None and getattr(device, "type", "cpu") == "cuda":
+            batch = batch.to(device)
+
+        with _embedding_lock:
+            with torch.inference_mode():
+                raw = embedding_model(batch)
+
+        if isinstance(raw, torch.Tensor):
+            vector = raw.detach().cpu().numpy()
+        else:
+            vector = np.asarray(raw)
+
+        vector = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if vector.size == 0 or not np.all(np.isfinite(vector)):
+            return None
+        return vector
+
+    except Exception as e:
+        logger.warning(f"Speaker embedding extraction failed: {e}")
+        return None
+
+
+def prepare_waveform(waveform: torch.Tensor, sample_rate: int) -> tuple:
+    """Resample to 16 kHz and downmix to mono - the shape every model here wants."""
+    if sample_rate != SAMPLE_RATE:
+        waveform = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)(waveform)
+        sample_rate = SAMPLE_RATE
+    if waveform.dim() > 1 and waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+    return waveform, sample_rate
+
+
+def embed_audio_bytes(audio_data: bytes) -> Optional["np.ndarray"]:
+    """Decode an uploaded audio blob and embed it."""
+    waveform, sample_rate = load_audio_from_bytes(audio_data)
+    waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+    return extract_embedding_from_audio(waveform, sample_rate)
+
+
+def crop_waveform(waveform: torch.Tensor, sample_rate: int,
+                  start: float, end: float) -> Optional[torch.Tensor]:
+    """Slice [start, end) seconds out of a waveform; None when out of bounds."""
+    total = waveform.shape[-1]
+    start_sample = max(int(float(start) * sample_rate), 0)
+    end_sample = min(int(float(end) * sample_rate), total)
+    if end_sample <= start_sample:
+        return None
+    return waveform[..., start_sample:end_sample]
+
+
+def embeddings_for_segments(waveform: torch.Tensor, sample_rate: int,
+                            segments: List[Dict[str, Any]],
+                            min_duration: float = 0.5,
+                            limit: int = 20) -> List["np.ndarray"]:
+    """Embed each usable segment crop of a waveform. Short crops are skipped."""
+    vectors = []
+    for segment in segments or []:
+        if len(vectors) >= limit:
+            break
+        try:
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        if end - start < min_duration:
+            continue
+        crop = crop_waveform(waveform, sample_rate, start, end)
+        if crop is None:
+            continue
+        vector = extract_embedding_from_audio(crop, sample_rate)
+        if vector is not None:
+            vectors.append(vector)
+    return vectors
+
+
+class SpeakerDatabaseAdapter:
+    """
+    Duck-typed shim so enhanced_segment_splitting.AudioSegmentSplitter can run
+    against the v2 database. It expects exactly two methods from the old legacy
+    manager: extract_embedding() and provide_correction_feedback().
+    """
+
+    def extract_embedding(self, audio_numpy):
+        return extract_embedding_from_audio(audio_numpy)
+
+    def provide_correction_feedback(self, speaker_name: str, audio_numpy) -> bool:
+        if enhanced_speaker_database is None or not speaker_name:
+            return False
+        vector = extract_embedding_from_audio(audio_numpy)
+        if vector is None:
+            return False
+        with _speaker_db_lock:
+            enhanced_speaker_database.enroll_speaker(
+                speaker_name, [vector], confidence=0.9, source_type="corrected"
+            )
+        return True
+
+
+def require_speaker_db() -> EnhancedSpeakerDatabase:
+    """Return the speaker database or fail the request with a clear 503."""
+    if enhanced_speaker_database is None:
+        raise HTTPException(status_code=503, detail="Speaker database not available")
+    return enhanced_speaker_database
+
+
+def require_embedding_model():
+    """Fail the request when voiceprint work is asked for but unavailable."""
+    if embedding_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Speaker embedding model not loaded - voiceprint operations unavailable"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Speaker management endpoints (all v2-database backed)
+# ---------------------------------------------------------------------------
+
 @app.get("/speakers")
 async def get_speaker_stats():
-    """Get statistics about known speakers."""
-    # Use enhanced database as primary, fallback to legacy
-    if enhanced_speaker_database is not None:
-        try:
-            speakers = enhanced_speaker_database.get_all_speakers()
-            # Convert to legacy format for compatibility
-            stats = {
-                'total_speakers': len(speakers),
-                'speakers': [
-                    {
-                        'id': s['speaker_id'],
-                        'name': s['display_name'],
-                        'embedding_count': s['embedding_count'],
-                        'last_seen': s['last_seen'],
-                        'avg_confidence': s['average_confidence']
-                    }
-                    for s in speakers
-                ]
-            }
-            return stats
-        except Exception as e:
-            logger.warning(f"Enhanced database failed, falling back to legacy: {e}")
-    
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="No speaker database available")
-    
+    """
+    Get statistics about known speakers.
+
+    Response shape is frozen: the shipped WPF client reads
+    speakers[].name / .id / .embedding_count (as an int).
+    """
+    database = require_speaker_db()
+
     try:
-        stats = speaker_embedding_manager.get_speaker_stats()
-        return stats
+        speakers = database.get_all_speakers()
+        return {
+            'total_speakers': len(speakers),
+            'speakers': [
+                {
+                    'id': s['speaker_id'],
+                    'name': s['display_name'],
+                    'embedding_count': int(s['embedding_count']),
+                    'last_seen': s['last_seen'],
+                    'avg_confidence': float(s['average_confidence']),
+                    'average_confidence': float(s['average_confidence']),
+                    'is_enrolled': s['is_enrolled'],
+                    'is_verified': s['is_verified'],
+                    'source_type': s['source_type'],
+                }
+                for s in speakers
+            ]
+        }
     except Exception as e:
         logger.error(f"Error getting speaker stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -313,117 +615,204 @@ async def enroll_speaker(
     audio: UploadFile = File(...)
 ):
     """
-    Enroll a new speaker with a known name using an audio sample.
-    
+    Enroll a speaker with a known name from an audio sample.
+
     Args:
         speaker_name: Human-readable name for the speaker
         audio: Audio file containing the speaker's voice
-        
+
     Returns:
-        Generated speaker ID and enrollment status
+        Speaker ID and enrollment status
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+    require_embedding_model()
+
+    speaker_name = (speaker_name or "").strip()
+    if not speaker_name:
+        raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
+
     try:
-        # Read and process audio
         audio_data = await audio.read()
-        waveform, sample_rate = load_audio_from_bytes(audio_data)
-        
-        # Convert to numpy array for embedding extraction
-        audio_numpy = waveform.squeeze().numpy()
-        
-        # Enroll speaker
-        speaker_id = speaker_embedding_manager.enroll_speaker(speaker_name, audio_numpy)
-        
+        embedding = await asyncio.to_thread(embed_audio_bytes, audio_data)
+
+        if embedding is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract a voiceprint from the supplied audio"
+            )
+
+        with _speaker_db_lock:
+            speaker_id = database.enroll_speaker(speaker_name, [embedding], confidence=0.95)
+
         return {
             "speaker_id": speaker_id,
-            "speaker_name": speaker_name,
+            "speaker_name": database.get_display_name(speaker_id) or speaker_name,
+            "embedding_count": len(database.speaker_embeddings.get(speaker_id, [])),
             "status": "enrolled_successfully"
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error enrolling speaker: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/speakers/identify")
-async def identify_speaker(audio: UploadFile = File(...)):
+@app.post("/speakers/create_profile")
+async def create_speaker_profile(payload: Dict[str, Any]):
     """
-    Identify a speaker from an audio sample.
-    
-    Args:
-        audio: Audio file containing speaker's voice
-        
-    Returns:
-        Speaker identification result
+    Create a named speaker profile with no audio (name-only enrollment).
+
+    Used by the transcription editor when it has a speaker name but no audio to
+    train on. The profile starts with zero embeddings and picks them up later
+    through corrections or /speakers/enroll_from_segments.
+
+    Body: {"speaker_name": "..."} (also accepts "name" / "display_name")
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
+    speaker_name = (
+        payload.get("speaker_name")
+        or payload.get("name")
+        or payload.get("display_name")
+        or ""
+    ).strip()
+    if not speaker_name:
+        raise HTTPException(status_code=400, detail="speaker_name is required")
+
     try:
-        # Read and process audio
+        with _speaker_db_lock:
+            existing_id = database.find_speaker_by_name(speaker_name)
+            speaker_id = database.enroll_speaker(speaker_name, [], confidence=0.9)
+
+        return {
+            "status": "profile_exists" if existing_id else "profile_created",
+            "speaker_id": speaker_id,
+            "speaker_name": speaker_name,
+            "embedding_count": len(database.speaker_embeddings.get(speaker_id, [])),
+            "message": (
+                f"Speaker '{speaker_name}' already existed - reused {speaker_id}"
+                if existing_id else
+                f"Created speaker profile '{speaker_name}' ({speaker_id})"
+            )
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating speaker profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/speakers/enroll_from_segments")
+async def enroll_speaker_from_segments(payload: Dict[str, Any]):
+    """
+    Enroll a speaker from labelled segments of an audio file already on disk.
+
+    Body: {"speaker_name": str, "audio_file": path, "segments": [{start, end}, ...]}
+
+    Each segment long enough to be meaningful is embedded separately, so the
+    speaker's bank captures the natural variation across their turns rather than
+    one averaged blob. Falls back to a name-only profile when no segment yields
+    a usable voiceprint.
+    """
+    database = require_speaker_db()
+
+    speaker_name = (payload.get("speaker_name") or payload.get("name") or "").strip()
+    if not speaker_name:
+        raise HTTPException(status_code=400, detail="speaker_name is required")
+
+    audio_file = payload.get("audio_file")
+    segments = payload.get("segments") or []
+
+    def _enroll() -> Dict[str, Any]:
+        vectors = []
+        if audio_file and Path(audio_file).exists() and segments and embedding_model is not None:
+            waveform, sample_rate = torchaudio.load(audio_file)
+            waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+            vectors = embeddings_for_segments(waveform, sample_rate, segments, min_duration=0.5, limit=10)
+
+        with _speaker_db_lock:
+            speaker_id = database.enroll_speaker(speaker_name, vectors, confidence=0.9)
+
+        return {
+            "speaker_id": speaker_id,
+            "embeddings_added": len(vectors),
+            "embedding_count": len(database.speaker_embeddings.get(speaker_id, [])),
+        }
+
+    try:
+        if audio_file and not Path(audio_file).exists():
+            logger.warning(f"enroll_from_segments: audio file not found: {audio_file}")
+
+        result = await asyncio.to_thread(_enroll)
+
+        return {
+            "status": "enrolled_successfully" if result["embeddings_added"] else "profile_created",
+            "speaker_name": speaker_name,
+            "segments_supplied": len(segments),
+            **result,
+            "message": (
+                f"Enrolled '{speaker_name}' from {result['embeddings_added']} segment(s)"
+                if result["embeddings_added"]
+                else f"Created '{speaker_name}' without voiceprints "
+                     f"(no usable audio segments or embedding model unavailable)"
+            )
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error enrolling speaker from segments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/speakers/identify")
+async def identify_speaker(audio: UploadFile = File(...), learn: bool = True):
+    """
+    Identify a speaker from an audio sample against the v2 database.
+
+    Args:
+        audio: Audio file containing the speaker's voice
+        learn: store this observation on the matched/created speaker
+
+    Returns:
+        Speaker identification result, including whether a new speaker was made
+    """
+    database = require_speaker_db()
+    require_embedding_model()
+
+    try:
         audio_data = await audio.read()
-        waveform, sample_rate = load_audio_from_bytes(audio_data)
-        
-        # Convert to numpy array for embedding extraction
-        audio_numpy = waveform.squeeze().numpy()
-        
-        # Identify speaker
-        speaker_id, confidence, is_new = speaker_embedding_manager.identify_or_create_speaker(audio_numpy)
-        
-        # Get speaker info
-        if speaker_id in speaker_embedding_manager.speaker_profiles:
-            speaker_name = speaker_embedding_manager.speaker_profiles[speaker_id].name
-        else:
-            speaker_name = "Unknown"
-        
+        embedding = await asyncio.to_thread(embed_audio_bytes, audio_data)
+
+        if embedding is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract a voiceprint from the supplied audio"
+            )
+
+        known_before = set(database.speaker_records.keys())
+        with _speaker_db_lock:
+            speaker_id, speaker_name, confidence = database.identify_speaker(
+                embedding, learn=learn
+            )
+
+        is_new = speaker_id is not None and speaker_id not in known_before
+
         return {
             "speaker_id": speaker_id,
             "speaker_name": speaker_name,
-            "confidence": confidence,
+            "confidence": float(confidence),
             "is_new_speaker": is_new,
-            "status": "identified" if not is_new else "new_speaker_created"
+            "threshold": database.similarity_threshold,
+            "status": "new_speaker_created" if is_new else "identified"
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error identifying speaker: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/speakers/{speaker_id}/name")
-async def update_speaker_name(speaker_id: str, new_name: str):
-    """Update the name of an existing speaker."""
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        success = speaker_embedding_manager.update_speaker_name(speaker_id, new_name)
-        if success:
-            return {"status": "updated", "speaker_id": speaker_id, "new_name": new_name}
-        else:
-            raise HTTPException(status_code=404, detail="Speaker not found")
-            
-    except Exception as e:
-        logger.error(f"Error updating speaker name: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/speakers/{speaker_id}")
-async def delete_speaker(speaker_id: str):
-    """Delete a speaker profile."""
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        success = speaker_embedding_manager.delete_speaker(speaker_id)
-        if success:
-            return {"status": "deleted", "speaker_id": speaker_id}
-        else:
-            raise HTTPException(status_code=404, detail="Speaker not found")
-            
-    except Exception as e:
-        logger.error(f"Error deleting speaker: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -435,116 +824,129 @@ async def provide_speaker_feedback(
     audio: UploadFile = File(...)
 ):
     """
-    Provide feedback on speaker identification to improve future recognition.
-    
+    Teach the database that one audio segment belongs to a named speaker.
+
     Args:
         correct_speaker_name: The correct speaker name for this audio segment
         audio_segment_start: Start time of the segment in seconds
         audio_segment_end: End time of the segment in seconds
         audio: The audio file containing the segment
-        
+
     Returns:
         Status of the feedback processing
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+    require_embedding_model()
+
+    correct_speaker_name = (correct_speaker_name or "").strip()
+    if not correct_speaker_name:
+        raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
+
     try:
-        # Read and process audio
         audio_data = await audio.read()
-        waveform, sample_rate = load_audio_from_bytes(audio_data)
-        
-        # Extract the specific segment
-        start_sample = int(audio_segment_start * sample_rate)
-        end_sample = int(audio_segment_end * sample_rate)
-        
-        if start_sample < waveform.shape[1] and end_sample <= waveform.shape[1]:
-            segment_waveform = waveform[:, start_sample:end_sample]
-            segment_audio = segment_waveform.squeeze().numpy()
-            
-            # Provide feedback to the speaker embedding system
-            success = speaker_embedding_manager.provide_correction_feedback(
-                correct_speaker_name, segment_audio
+
+        def _learn() -> Optional[str]:
+            waveform, sample_rate = load_audio_from_bytes(audio_data)
+            waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+            crop = crop_waveform(waveform, sample_rate, audio_segment_start, audio_segment_end)
+            if crop is None:
+                return None
+            vector = extract_embedding_from_audio(crop, sample_rate)
+            if vector is None:
+                return None
+            with _speaker_db_lock:
+                return database.enroll_speaker(
+                    correct_speaker_name, [vector], confidence=0.9, source_type="corrected"
+                )
+
+        speaker_id = await asyncio.to_thread(_learn)
+
+        if speaker_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid segment timing or no voiceprint could be extracted"
             )
-            
-            if success:
-                return {
-                    "status": "feedback_processed",
-                    "speaker_name": correct_speaker_name,
-                    "segment_duration": audio_segment_end - audio_segment_start
-                }
-            else:
-                raise HTTPException(status_code=500, detail="Failed to process feedback")
-        else:
-            raise HTTPException(status_code=400, detail="Invalid segment timing")
-            
+
+        return {
+            "status": "feedback_processed",
+            "speaker_id": speaker_id,
+            "speaker_name": correct_speaker_name,
+            "segment_duration": audio_segment_end - audio_segment_start,
+            "embedding_count": len(database.speaker_embeddings.get(speaker_id, [])),
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing speaker feedback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/speakers/batch_feedback")
-async def provide_batch_speaker_feedback(
-    feedback_data: dict
-):
+async def provide_batch_speaker_feedback(feedback_data: dict):
     """
     Provide batch feedback for multiple speaker corrections.
-    
-    Args:
-        feedback_data: Dictionary containing speaker corrections
-        Format: {
-            "corrections": [
-                {
-                    "speaker_name": "John",
-                    "audio_segments": [
-                        {"start": 0.0, "end": 2.5, "audio_data": "base64_encoded_wav"},
-                        ...
-                    ]
-                },
-                ...
-            ]
-        }
-        
-    Returns:
-        Status of the batch feedback processing
+
+    Body: {
+        "corrections": [
+            {"speaker_name": "John",
+             "audio_segments": [{"audio_data": "<base64 wav>"}, ...]},
+            ...
+        ]
+    }
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        corrections = feedback_data.get("corrections", [])
-        processed_count = 0
-        
+    database = require_speaker_db()
+    require_embedding_model()
+
+    corrections = feedback_data.get("corrections", []) or []
+
+    def _process() -> Dict[str, Any]:
+        import base64
+
+        processed = 0
+        failed = 0
+        updated_speakers = []
+
         for correction in corrections:
-            speaker_name = correction.get("speaker_name")
-            audio_segments = correction.get("audio_segments", [])
-            
-            for segment in audio_segments:
+            speaker_name = (correction.get("speaker_name") or "").strip()
+            if not speaker_name:
+                continue
+
+            vectors = []
+            for segment in correction.get("audio_segments", []) or []:
                 try:
-                    # Decode base64 audio data
-                    import base64
                     audio_bytes = base64.b64decode(segment["audio_data"])
-                    
-                    # Load audio
-                    waveform, sample_rate = load_audio_from_bytes(audio_bytes)
-                    audio_array = waveform.squeeze().numpy()
-                    
-                    # Provide feedback
-                    speaker_embedding_manager.provide_correction_feedback(
-                        speaker_name, audio_array
-                    )
-                    processed_count += 1
-                    
+                    vector = embed_audio_bytes(audio_bytes)
+                    if vector is None:
+                        failed += 1
+                        continue
+                    vectors.append(vector)
+                    processed += 1
                 except Exception as e:
                     logger.warning(f"Failed to process segment for {speaker_name}: {e}")
-                    continue
-        
+                    failed += 1
+
+            if vectors:
+                with _speaker_db_lock:
+                    database.enroll_speaker(
+                        speaker_name, vectors, confidence=0.9, source_type="corrected"
+                    )
+                updated_speakers.append(speaker_name)
+
+        return {
+            "processed_segments": processed,
+            "failed_segments": failed,
+            "updated_speakers": updated_speakers,
+        }
+
+    try:
+        results = await asyncio.to_thread(_process)
         return {
             "status": "batch_feedback_processed",
-            "processed_segments": processed_count,
-            "total_corrections": len(corrections)
+            "total_corrections": len(corrections),
+            **results,
         }
-        
+
     except Exception as e:
         logger.error(f"Error processing batch speaker feedback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -554,48 +956,42 @@ async def provide_batch_speaker_feedback(
 async def merge_speakers(source_speaker_id: str, target_speaker_id: str, target_name: str = None):
     """
     Manually merge two speaker profiles.
-    
-    Args:
-        source_speaker_id: The speaker ID to merge from (will be deleted)
-        target_speaker_id: The speaker ID to merge into (will be kept)
-        target_name: Optional new name for the target speaker
-        
-    Returns:
-        Status of the merge operation
+
+    The database keeps whichever record holds more samples, so the surviving ID
+    is reported back rather than assumed.
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
+    if source_speaker_id == target_speaker_id:
+        raise HTTPException(status_code=400, detail="Cannot merge speaker with itself")
+    if source_speaker_id not in database.speaker_records:
+        raise HTTPException(status_code=404, detail=f"Source speaker {source_speaker_id} not found")
+    if target_speaker_id not in database.speaker_records:
+        raise HTTPException(status_code=404, detail=f"Target speaker {target_speaker_id} not found")
+
     try:
-        # Validate inputs
-        if source_speaker_id == target_speaker_id:
-            raise HTTPException(status_code=400, detail="Cannot merge speaker with itself")
-        
-        # Check if both speakers exist
-        if source_speaker_id not in speaker_embedding_manager.speaker_profiles:
-            raise HTTPException(status_code=404, detail=f"Source speaker {source_speaker_id} not found")
-        
-        if target_speaker_id not in speaker_embedding_manager.speaker_profiles:
-            raise HTTPException(status_code=404, detail=f"Target speaker {target_speaker_id} not found")
-        
-        # Perform the merge
-        success = speaker_embedding_manager.merge_speakers(source_speaker_id, target_speaker_id)
-        
-        if success:
-            # Update target speaker name if provided
+        with _speaker_db_lock:
+            success = database.merge_speakers(source_speaker_id, target_speaker_id)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to merge speakers")
+
+            survivor = (
+                target_speaker_id
+                if target_speaker_id in database.speaker_records
+                else source_speaker_id
+            )
             if target_name and target_name.strip():
-                speaker_embedding_manager.update_speaker_name(target_speaker_id, target_name.strip())
-            
-            return {
-                "status": "merged_successfully",
-                "source_speaker_id": source_speaker_id,
-                "target_speaker_id": target_speaker_id,
-                "target_name": target_name or speaker_embedding_manager.speaker_profiles[target_speaker_id].name,
-                "message": f"Successfully merged {source_speaker_id} into {target_speaker_id}"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to merge speakers")
-            
+                database.update_display_name(survivor, target_name.strip())
+
+        return {
+            "status": "merged_successfully",
+            "source_speaker_id": source_speaker_id,
+            "target_speaker_id": survivor,
+            "target_name": database.get_display_name(survivor),
+            "embedding_count": len(database.speaker_embeddings.get(survivor, [])),
+            "message": f"Successfully merged into {survivor}"
+        }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -603,83 +999,85 @@ async def merge_speakers(source_speaker_id: str, target_speaker_id: str, target_
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/speakers/{speaker_id}/name")
-async def update_speaker_name(speaker_id: str, new_name: str):
+@app.post("/speakers/cleanup")
+async def cleanup_speakers(min_embeddings: int = 1, merge_duplicate_names: bool = True):
     """
-    Update a speaker's display name.
-    
-    Args:
-        speaker_id: The speaker ID to update
-        new_name: The new display name for the speaker
-        
-    Returns:
-        Status of the name update operation
+    Housekeeping on the speaker database.
+
+    Merges speakers whose display names are exact duplicates and deletes
+    auto-created speakers holding fewer than `min_embeddings` voiceprints.
+    Enrolled and user-verified speakers are never removed.
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
     try:
-        # Check if speaker exists
-        if not speaker_embedding_manager.speaker_exists(speaker_id):
-            raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
-        
-        # Update the speaker name
-        success = speaker_embedding_manager.update_speaker_name(speaker_id, new_name)
-        
-        if success:
-            logger.info(f"Updated speaker name: {speaker_id} -> {new_name}")
-            return {
-                "status": "success",
-                "message": f"Speaker name updated to: {new_name}",
-                "speaker_id": speaker_id,
-                "new_name": new_name
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to update speaker name")
-            
-    except HTTPException:
-        raise
+        with _speaker_db_lock:
+            results = database.cleanup(
+                min_embeddings=min_embeddings,
+                merge_duplicate_names=merge_duplicate_names,
+            )
+
+        return {
+            "status": "cleanup_complete",
+            "results": results,
+            "message": (
+                f"Merged {results['duplicates_merged']} duplicate-name speakers, "
+                f"removed {results['speakers_removed']} under-sampled auto speakers "
+                f"({results['speakers_before']} -> {results['speakers_after']})"
+            )
+        }
+
     except Exception as e:
-        logger.error(f"Error updating speaker name: {e}")
+        logger.error(f"Speaker cleanup failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/speakers/{speaker_id}")
-async def delete_speaker(speaker_id: str):
+@app.post("/speakers/reset")
+async def reset_speakers(include_enrolled: bool = False):
     """
-    Delete a speaker profile completely.
-    
-    Args:
-        speaker_id: The speaker ID to delete
-        
-    Returns:
-        Status of the deletion operation
+    DANGER: clear learned speakers.
+
+    By default only auto-created speakers are deleted; enrolled and verified
+    speakers survive, because those represent identities the user established
+    deliberately and cannot be reconstructed. Pass include_enrolled=true to wipe
+    everything.
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
     try:
-        # Check if speaker exists
-        if not speaker_embedding_manager.speaker_exists(speaker_id):
-            raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
-        
-        # Delete the speaker
-        success = speaker_embedding_manager.delete_speaker(speaker_id)
-        
-        if success:
-            logger.info(f"Deleted speaker: {speaker_id}")
-            return {
-                "status": "success",
-                "message": f"Speaker {speaker_id} deleted successfully",
-                "speaker_id": speaker_id
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to delete speaker")
-            
-    except HTTPException:
-        raise
+        with _speaker_db_lock:
+            if include_enrolled:
+                removed = []
+                for speaker_id in list(database.speaker_records.keys()):
+                    display_name = database.get_display_name(speaker_id)
+                    if database.delete_speaker(speaker_id):
+                        removed.append({"speaker_id": speaker_id, "display_name": display_name})
+                results = {
+                    "speakers_removed": len(removed),
+                    "speakers_kept": 0,
+                    "removed_speakers": removed,
+                    "speakers_after": len(database.speaker_records),
+                }
+            else:
+                results = database.reset_auto_speakers()
+
+        logger.warning(
+            f"Speaker database reset (include_enrolled={include_enrolled}): "
+            f"{results['speakers_removed']} removed"
+        )
+
+        return {
+            "status": "reset_complete",
+            "include_enrolled": include_enrolled,
+            "results": results,
+            "message": (
+                f"Removed {results['speakers_removed']} speakers, "
+                f"kept {results.get('speakers_kept', 0)} enrolled/verified"
+            )
+        }
+
     except Exception as e:
-        logger.error(f"Error deleting speaker: {e}")
+        logger.error(f"Speaker reset failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -689,80 +1087,147 @@ async def update_speaker_name_mapping(
     new_speaker_name: str
 ):
     """
-    Update speaker name mapping and consolidate speakers.
-    
-    This is a simpler feedback mechanism that allows the frontend to:
-    1. Rename existing speakers
-    2. Merge auto-generated speakers with user-named speakers
-    
-    Args:
-        old_speaker_id: The original speaker ID (e.g., "SPEAKER_00", "AUTO_SPEAKER_001")
-        new_speaker_name: The correct speaker name (e.g., "John", "Speaker 1")
-        
-    Returns:
-        Status of the name mapping update
+    Rename / consolidate a speaker. THIS IS THE ENDPOINT THE WPF CLIENT CALLS.
+
+    The client posts query params old_speaker_id and new_speaker_name whenever a
+    user renames a speaker in the transcript, and treats any 2xx as success while
+    logging the "status" field.
+
+    Three cases are handled:
+      * old_speaker_id is a real v2 ID -> rename it (or merge into the speaker
+        that already owns the target name)
+      * old_speaker_id is an anonymous per-session label ("Speaker SPEAKER_00",
+        "AUTO_SPEAKER_001") -> attach to an existing speaker of that name, or
+        create one
+      * the target name already exists -> merge rather than duplicate
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
+    new_speaker_name = (new_speaker_name or "").strip()
+    if not new_speaker_name:
+        raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
+
     try:
-        # Validate speaker name is not empty
-        new_speaker_name = new_speaker_name.strip()
-        if not new_speaker_name:
-            raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
-        
-        # Check if there's already a speaker with the new name
-        existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(new_speaker_name)
-        
-        if existing_speaker_id and existing_speaker_id != old_speaker_id:
-            # Merge the old speaker into the existing one
-            success = speaker_embedding_manager.merge_speakers(old_speaker_id, existing_speaker_id)
-            if success:
-                return {
-                    "status": "speakers_merged",
-                    "old_speaker_id": old_speaker_id,
-                    "target_speaker_id": existing_speaker_id,
-                    "speaker_name": new_speaker_name,
-                    "message": f"Merged {old_speaker_id} into existing speaker {new_speaker_name}"
-                }
-            else:
-                return {
-                    "status": "merge_failed",
-                    "message": "Could not merge speakers"
-                }
-        else:
-            # Just rename the speaker
-            success = speaker_embedding_manager.update_speaker_name(old_speaker_id, new_speaker_name)
-            if success:
-                return {
-                    "status": "name_updated",
-                    "speaker_id": old_speaker_id,
-                    "new_name": new_speaker_name
-                }
-            else:
-                # Speaker might not exist, try creating a new mapping
-                logger.info(f"Speaker {old_speaker_id} not found, treating as name mapping")
-                return {
-                    "status": "mapping_noted",
-                    "old_speaker_id": old_speaker_id,
-                    "new_name": new_speaker_name
-                }
-        
+        with _speaker_db_lock:
+            outcome = database.apply_name_correction(old_speaker_id, new_speaker_name)
+
+        status_by_action = {
+            "merged": "speakers_merged",
+            "renamed": "name_updated",
+            "matched": "name_updated",
+            "created": "speaker_created",
+            "merge_failed": "merge_failed",
+            "noop": "mapping_noted",
+        }
+        status = status_by_action.get(outcome["action"], "mapping_noted")
+
+        return {
+            "status": status,
+            "action": outcome["action"],
+            "old_speaker_id": old_speaker_id,
+            "speaker_id": outcome["speaker_id"],
+            "target_speaker_id": outcome["speaker_id"],
+            "speaker_name": outcome["display_name"],
+            "new_name": outcome["display_name"],
+            "embeddings_learned": outcome["embeddings_added"],
+            "message": f"{old_speaker_id} -> '{outcome['display_name']}' ({outcome['action']})"
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error updating speaker name mapping: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.put("/speakers/{speaker_id}/name")
+async def update_speaker_name(speaker_id: str, new_name: str):
+    """Update a speaker's display name (the immutable ID is unchanged)."""
+    database = require_speaker_db()
+
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Speaker name cannot be empty")
+    if speaker_id not in database.speaker_records:
+        raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
+
+    try:
+        with _speaker_db_lock:
+            success = database.update_display_name(speaker_id, new_name)
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update speaker name")
+
+        logger.info(f"Updated speaker name: {speaker_id} -> {new_name}")
+        return {
+            "status": "success",
+            "message": f"Speaker name updated to: {new_name}",
+            "speaker_id": speaker_id,
+            "new_name": new_name
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating speaker name: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/speakers/{speaker_id}")
+async def delete_speaker(speaker_id: str):
+    """Delete a speaker profile and its voiceprints."""
+    database = require_speaker_db()
+
+    if speaker_id not in database.speaker_records:
+        raise HTTPException(status_code=404, detail=f"Speaker {speaker_id} not found")
+
+    try:
+        display_name = database.get_display_name(speaker_id)
+        with _speaker_db_lock:
+            success = database.delete_speaker(speaker_id)
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete speaker")
+
+        logger.info(f"Deleted speaker: {speaker_id}")
+        return {
+            "status": "success",
+            "message": f"Speaker {speaker_id} deleted successfully",
+            "speaker_id": speaker_id,
+            "speaker_name": display_name
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting speaker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/transcribe")
-async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
+async def transcribe_audio(
+    audio: UploadFile = File(...),
+    include_analysis: bool = False,
+) -> Dict[str, Any]:
     """
-    Transcribe and diarize audio file with enhanced sentiment analysis and audio features.
-    
+    Transcribe and diarize audio file, optionally with sentiment analysis and audio features.
+
     Args:
         audio: Audio file (WAV format preferred)
-        
+        include_analysis: Run the sentiment/conversation-analysis enhancement
+            inline. QUERY PARAMETER ONLY (POST /transcribe?include_analysis=true):
+            FastAPI treats a bare `bool` alongside `File(...)` as a query
+            parameter, so sending it as a multipart form field is silently
+            ignored and you get the fast path. Defaults to False - the shipped WPF
+            client posts 5-second chunks and sends nothing extra, so it always
+            gets the fast path. Set OREJA_INLINE_ENHANCEMENT=1 to flip the
+            server-wide default instead of passing this per request. Batch/file
+            callers that want the richer result should either pass
+            include_analysis=true here or call POST /transcribe_with_summary.
+
     Returns:
-        Enhanced transcription result with speaker diarization, sentiment analysis, and audio features
+        Transcription result with speaker diarization, and - only when
+        analysis was requested - sentiment analysis and audio features.
     """
     start_time = time.time()
     
@@ -787,9 +1252,7 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail=f"Audio too short: {duration:.2f}s")
         if duration > MAX_AUDIO_LENGTH:
             raise HTTPException(status_code=400, detail=f"Audio too long: {duration:.2f}s (max: {MAX_AUDIO_LENGTH/3600:.1f} hours)")
-        if duration > CHUNK_THRESHOLD:
-            logger.info(f"Audio length {duration:.2f}s will be processed in chunks for optimal performance")
-        
+
         # Resample to 16kHz if needed
         if sample_rate != SAMPLE_RATE:
             resampler = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)
@@ -800,26 +1263,38 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
-        # Run transcription and diarization concurrently (if available)
+        # Run transcription and diarization concurrently. Both helpers dispatch the
+        # blocking model call onto a worker thread (asyncio.to_thread), so the event
+        # loop stays responsive and the two models genuinely overlap.
         transcription_task = asyncio.create_task(
             run_transcription(waveform, sample_rate)
         )
-        
+
         if diarization_pipeline is not None:
             diarization_task = asyncio.create_task(
                 run_diarization(waveform, sample_rate)
             )
-            # Wait for both tasks to complete
+            # Wait for both tasks to complete. return_exceptions=True so a
+            # failure on one side does not leave the other task orphaned in a
+            # worker thread still holding _whisper_lock / _diarization_lock
+            # (which also produces an "exception was never retrieved" warning).
             transcription_result, diarization_result = await asyncio.gather(
-                transcription_task, diarization_task
+                transcription_task, diarization_task, return_exceptions=True
             )
+            if isinstance(transcription_result, BaseException):
+                raise transcription_result
+            if isinstance(diarization_result, BaseException):
+                logger.warning(
+                    f"Diarization failed, continuing transcription-only: {diarization_result}"
+                )
+                diarization_result = None
         else:
             # Only run transcription
             transcription_result = await transcription_task
             diarization_result = None
             logger.info("Diarization skipped - model not available")
-        
-        # Check if transcription was skipped due to voice activity detection
+
+        # Check if transcription was skipped (silent clip / nothing survived gating)
         if transcription_result and "skipped_reason" in transcription_result:
             processing_time = time.time() - start_time
             logger.info(f"Transcription skipped: {transcription_result['skipped_reason']}")
@@ -835,11 +1310,19 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
             }
             return result
         
-        # Merge transcription with speaker information (if available)
+        # Merge transcription with speaker information (if available). This does
+        # word-level speaker attribution and splits ASR segments at speaker changes.
         segments = merge_transcription_and_diarization(
             transcription_result, diarization_result, waveform, sample_rate
         )
-        
+
+        # Integration hook for voiceprint-based speaker naming (see function
+        # docstring). Dispatched off the event loop so the next implementation can
+        # do real embedding work here without blocking the server.
+        segments = await asyncio.to_thread(
+            identify_speakers_hook, waveform, sample_rate, segments, diarization_result
+        )
+
         # Generate full text
         full_text = " ".join([segment["text"] for segment in segments])
         
@@ -855,8 +1338,11 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
             "sample_rate": sample_rate
         }
         
-        # 🚀 ENHANCE WITH SENTIMENT ANALYSIS AND AUDIO FEATURES
-        if enhanced_service:
+        # 🚀 OPTIONAL: SENTIMENT ANALYSIS AND AUDIO FEATURES
+        # Off by default: it adds significant latency to what the WPF client
+        # expects to be a fast 5-second-chunk round trip. Turned on either per
+        # request (include_analysis=true) or server-wide (OREJA_INLINE_ENHANCEMENT=1).
+        if enhanced_service and (include_analysis or ENHANCEMENT_INLINE):
             try:
                 logger.info("Applying enhanced features (sentiment analysis & audio features)...")
                 enhanced_result = enhanced_service.enhance_transcription_result(
@@ -873,8 +1359,8 @@ async def transcribe_audio(audio: UploadFile = File(...)) -> Dict[str, Any]:
                 logger.warning(f"⚠️ Enhanced features failed, returning basic result: {e}")
                 # Continue with basic result if enhancement fails
         else:
-            logger.info("Enhanced features not available - returning basic transcription")
-        
+            logger.debug("Inline enhancement disabled - returning basic transcription")
+
         logger.info(f"Transcription completed in {processing_time:.2f}s for {duration:.2f}s audio")
         return basic_result
         
@@ -894,39 +1380,38 @@ async def extract_speaker_embeddings(audio: UploadFile = File(...)) -> Dict[str,
         audio: Audio file containing speech
         
     Returns:
-        Speaker embeddings as base64-encoded bytes
+        The float32 voiceprint as hex bytes, plus its dimensionality.
     """
+    require_embedding_model()
+
     try:
-        # Read and process audio
         audio_data = await audio.read()
-        waveform, sample_rate = load_audio_from_bytes(audio_data)
-        
-        # Resample if needed
-        if sample_rate != SAMPLE_RATE:
-            resampler = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)
-            waveform = resampler(waveform)
-        
-        # Ensure mono
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
-        
-        # Extract embeddings
-        if embedding_model is None:
-            raise HTTPException(status_code=500, detail="Embedding model not loaded")
-        
-        # Convert to the format expected by pyannote
-        audio_array = waveform.numpy().flatten()
-        embeddings = embedding_model(audio_array)
-        
-        # Convert to bytes for storage
-        embedding_bytes = embeddings.cpu().numpy().tobytes()
-        
+
+        def _extract():
+            waveform, sample_rate = load_audio_from_bytes(audio_data)
+            waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+            vector = extract_embedding_from_audio(waveform, sample_rate)
+            return vector, waveform.shape[-1] / sample_rate
+
+        embedding, duration = await asyncio.to_thread(_extract)
+
+        if embedding is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract a voiceprint from the supplied audio"
+            )
+
+        embedding_bytes = embedding.astype(np.float32).tobytes()
+
         return {
             "embeddings": embedding_bytes.hex(),
             "embedding_size": len(embedding_bytes),
-            "audio_duration": waveform.shape[1] / SAMPLE_RATE
+            "embedding_dim": int(embedding.shape[0]),
+            "audio_duration": duration
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error extracting embeddings: {e}")
         raise HTTPException(status_code=500, detail=f"Embedding extraction failed: {str(e)}")
@@ -935,98 +1420,77 @@ async def extract_speaker_embeddings(audio: UploadFile = File(...)) -> Dict[str,
 @app.post("/speakers/real_time_feedback")
 async def real_time_speaker_feedback(feedback_data: dict):
     """
-    Process real-time speaker corrections and immediately update embeddings for learning.
-    
-    This endpoint receives speaker corrections from the transcription editor and:
-    1. Updates the speaker embeddings with the corrected attribution
-    2. Returns status indicating what learning occurred
-    
-    Args:
-        feedback_data: Dictionary containing:
-            - old_speaker_id: The incorrect speaker ID
-            - correct_speaker_name: The correct speaker name
-            - audio_segments: List of audio segment data for learning
-            - transcription_file: Path to transcription file
-            - audio_file: Path to audio file
-    
-    Returns:
-        Status of the learning update
+    Apply a speaker correction made in the transcription editor, and learn from it.
+
+    Body:
+        old_speaker_id: the incorrect speaker ID or per-session label
+        correct_speaker_name: the correct display name
+        audio_segments: [{start, end}, ...] spoken by that speaker (optional)
+        audio_file: path to the audio file those segments index into (optional)
+
+    When audio is supplied the corrected speaker's voiceprint bank is updated
+    from it, which is what makes the correction stick for future recordings
+    rather than being a one-off relabel.
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    database = require_speaker_db()
+
+    old_speaker_id = feedback_data.get("old_speaker_id")
+    correct_speaker_name = (feedback_data.get("correct_speaker_name") or "").strip()
+    audio_segments = feedback_data.get("audio_segments", []) or []
+    audio_file = feedback_data.get("audio_file")
+
+    if not old_speaker_id or not correct_speaker_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: old_speaker_id, correct_speaker_name"
+        )
+
+    logger.info(f"Processing real-time feedback: {old_speaker_id} -> {correct_speaker_name}")
+
+    def _apply() -> Dict[str, Any]:
+        vectors = []
+        if audio_file and audio_segments and embedding_model is not None and Path(audio_file).exists():
+            try:
+                waveform, sample_rate = torchaudio.load(audio_file)
+                waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+                vectors = embeddings_for_segments(
+                    waveform, sample_rate, audio_segments, min_duration=0.5, limit=10
+                )
+            except Exception as e:
+                logger.warning(f"Could not learn from audio for {correct_speaker_name}: {e}")
+
+        with _speaker_db_lock:
+            return database.apply_name_correction(
+                old_speaker_id, correct_speaker_name, embeddings=vectors
+            )
+
     try:
-        old_speaker_id = feedback_data.get("old_speaker_id")
-        correct_speaker_name = feedback_data.get("correct_speaker_name")
-        audio_segments = feedback_data.get("audio_segments", [])
-        audio_file = feedback_data.get("audio_file")
-        
-        if not old_speaker_id or not correct_speaker_name:
-            raise HTTPException(status_code=400, detail="Missing required fields: old_speaker_id, correct_speaker_name")
-        
-        logger.info(f"Processing real-time feedback: {old_speaker_id} → {correct_speaker_name}")
-        
-        # Check if the correct speaker already exists
-        existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(correct_speaker_name)
-        
-        if existing_speaker_id:
-            # Merge the old speaker into the existing one
-            success = speaker_embedding_manager.merge_speakers(old_speaker_id, existing_speaker_id, correct_speaker_name)
-            if success:
-                # Learn from the audio segments
-                if audio_file and audio_segments:
-                    for segment in audio_segments:
-                        try:
-                            start_time = float(segment.get('start', 0))
-                            end_time = float(segment.get('end', start_time + 1))
-                            
-                            # Extract and learn from this audio segment
-                            speaker_embedding_manager.learn_from_segment(
-                                audio_file, start_time, end_time, existing_speaker_id
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not learn from segment: {e}")
-                
-                return {
-                    "status": "speakers_merged",
-                    "message": f"Merged {old_speaker_id} into existing speaker {correct_speaker_name}",
-                    "target_speaker_id": existing_speaker_id
-                }
-            else:
-                raise HTTPException(status_code=500, detail="Failed to merge speakers")
-        else:
-            # Update the speaker name and learn from segments
-            success = speaker_embedding_manager.update_speaker_name(old_speaker_id, correct_speaker_name)
-            if success:
-                # Learn from the audio segments to improve the model
-                if audio_file and audio_segments:
-                    for segment in audio_segments:
-                        try:
-                            start_time = float(segment.get('start', 0))
-                            end_time = float(segment.get('end', start_time + 1))
-                            
-                            # Extract and learn from this audio segment
-                            speaker_embedding_manager.learn_from_segment(
-                                audio_file, start_time, end_time, old_speaker_id
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not learn from segment: {e}")
-                
-                return {
-                    "status": "learned",
-                    "message": f"Updated speaker name and learned from {len(audio_segments)} segments",
-                    "speaker_id": old_speaker_id,
-                    "new_name": correct_speaker_name
-                }
-            else:
-                return {
-                    "status": "name_updated", 
-                    "message": f"Updated speaker name to {correct_speaker_name}",
-                    "speaker_id": old_speaker_id
-                }
-    
-    except HTTPException:
-        raise
+        outcome = await asyncio.to_thread(_apply)
+
+        status_by_action = {
+            "merged": "speakers_merged",
+            "renamed": "learned" if outcome["embeddings_added"] else "name_updated",
+            "matched": "learned" if outcome["embeddings_added"] else "name_updated",
+            "created": "speaker_created",
+            "merge_failed": "merge_failed",
+        }
+
+        return {
+            "status": status_by_action.get(outcome["action"], "mapping_noted"),
+            "action": outcome["action"],
+            "speaker_id": outcome["speaker_id"],
+            "target_speaker_id": outcome["speaker_id"],
+            "new_name": outcome["display_name"],
+            "embeddings_learned": outcome["embeddings_added"],
+            "segments_supplied": len(audio_segments),
+            "message": (
+                f"{old_speaker_id} -> '{outcome['display_name']}' ({outcome['action']}); "
+                f"learned {outcome['embeddings_added']} voiceprint(s)"
+            )
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error in real-time speaker feedback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1035,80 +1499,88 @@ async def real_time_speaker_feedback(feedback_data: dict):
 @app.post("/reattribute_speakers")
 async def reattribute_speakers(reattribution_data: dict):
     """
-    Re-run speaker attribution on segments that could benefit from improved models.
-    
-    This endpoint takes segments with low confidence or unknown speakers and
-    re-runs the speaker identification using the updated embeddings.
-    
-    Args:
-        reattribution_data: Dictionary containing:
-            - audio_file: Path to the audio file
-            - segments: List of segments to re-attribute
-            - transcription_context: Context about the transcription
-    
-    Returns:
-        Updated speaker attributions with improved confidence scores
+    Re-run voiceprint identification on existing segments of an audio file.
+
+    Body:
+        audio_file: path to the audio file
+        segments: [{segment_index, start, end, current_speaker, current_confidence}]
+
+    Only segments whose confidence would actually improve are reported. Nothing
+    is written back: the caller decides what to accept.
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        audio_file = reattribution_data.get("audio_file")
-        segments = reattribution_data.get("segments", [])
-        context = reattribution_data.get("transcription_context", {})
-        
-        if not audio_file or not segments:
-            raise HTTPException(status_code=400, detail="Missing audio_file or segments")
-        
-        logger.info(f"Re-attributing {len(segments)} segments from {audio_file}")
-        
-        updated_segments = []
-        
+    database = require_speaker_db()
+    require_embedding_model()
+
+    audio_file = reattribution_data.get("audio_file")
+    segments = reattribution_data.get("segments", []) or []
+
+    if not audio_file or not segments:
+        raise HTTPException(status_code=400, detail="Missing audio_file or segments")
+    if not Path(audio_file).exists():
+        raise HTTPException(status_code=400, detail="Audio file not found")
+
+    logger.info(f"Re-attributing {len(segments)} segments from {audio_file}")
+
+    def _reattribute() -> List[Dict[str, Any]]:
+        waveform, sample_rate = torchaudio.load(audio_file)
+        waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+
+        improved = []
         for segment in segments:
             try:
-                start_time = float(segment.get('start', 0))
-                end_time = float(segment.get('end', start_time + 1))
+                start = float(segment.get('start', 0))
+                end = float(segment.get('end', start + 1))
                 current_speaker = segment.get('current_speaker', 'Unknown')
-                current_confidence = float(segment.get('current_confidence', 0))
-                
-                # Re-run speaker identification on this segment
-                new_attribution = speaker_embedding_manager.identify_speaker_in_segment(
-                    audio_file, start_time, end_time
+                current_confidence = float(segment.get('current_confidence', 0) or 0)
+
+                crop = crop_waveform(waveform, sample_rate, start, end)
+                if crop is None or crop.shape[-1] < sample_rate * MIN_SPEAKER_AUDIO_SECONDS:
+                    continue
+
+                vector = extract_embedding_from_audio(crop, sample_rate)
+                if vector is None:
+                    continue
+
+                speaker_id, speaker_name, confidence = database.identify_speaker(
+                    vector, auto_create=False, learn=False, save=False
                 )
-                
-                if new_attribution:
-                    new_speaker = new_attribution.get('speaker_id', current_speaker)
-                    new_confidence = float(new_attribution.get('confidence', current_confidence))
-                    
-                    # Only include if confidence improved significantly
-                    if new_confidence > current_confidence + 0.1:
-                        # Get the display name for the speaker
-                        speaker_name = speaker_embedding_manager.get_speaker_name(new_speaker) or new_speaker
-                        
-                        updated_segments.append({
-                            'segment_index': segment.get('segment_index'),
-                            'new_speaker': speaker_name,
-                            'new_confidence': new_confidence,
-                            'old_speaker': current_speaker,
-                            'old_confidence': current_confidence,
-                            'improvement': new_confidence - current_confidence
-                        })
-                        
-                        logger.info(f"Improved segment {segment.get('segment_index')}: {current_speaker} ({current_confidence:.3f}) → {speaker_name} ({new_confidence:.3f})")
-            
+                if speaker_id is None:
+                    continue
+
+                if speaker_name != current_speaker and confidence > current_confidence + 0.1:
+                    improved.append({
+                        'segment_index': segment.get('segment_index'),
+                        'new_speaker': speaker_name,
+                        'new_speaker_id': speaker_id,
+                        'new_confidence': float(confidence),
+                        'old_speaker': current_speaker,
+                        'old_confidence': current_confidence,
+                        'improvement': float(confidence - current_confidence)
+                    })
+                    logger.info(
+                        f"Improved segment {segment.get('segment_index')}: "
+                        f"{current_speaker} ({current_confidence:.3f}) -> "
+                        f"{speaker_name} ({confidence:.3f})"
+                    )
+
             except Exception as e:
                 logger.warning(f"Could not re-attribute segment: {e}")
                 continue
-        
+
+        return improved
+
+    try:
+        updated_segments = await asyncio.to_thread(_reattribute)
+
         logger.info(f"Re-attribution complete: {len(updated_segments)} segments improved")
-        
+
         return {
             "status": "success",
             "updated_segments": updated_segments,
             "total_segments_processed": len(segments),
             "improvements_found": len(updated_segments)
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1140,19 +1612,20 @@ async def split_segment_with_audio_analysis(
     Returns:
         Enhanced split results with audio analysis and embedding extraction
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
+    require_speaker_db()
+    require_embedding_model()
+
     try:
         # Validate inputs
         if not (0.0 <= split_text_position <= 1.0):
             raise HTTPException(status_code=400, detail="Split position must be between 0.0 and 1.0")
-        
+
         if not audio_file or not Path(audio_file).exists():
             raise HTTPException(status_code=400, detail="Audio file not found")
-        
-        # Create the enhanced splitter
-        splitter = AudioSegmentSplitter(speaker_embedding_manager)
+
+        # The splitter only needs extract_embedding() / provide_correction_feedback();
+        # the adapter serves both from the pyannote model + v2 database.
+        splitter = AudioSegmentSplitter(SpeakerDatabaseAdapter())
         
         # Perform the split with audio analysis
         first_segment, second_segment, success = splitter.split_segment_with_audio_analysis(
@@ -1210,33 +1683,34 @@ async def split_segment_with_audio_analysis(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/segments/reprocess_embeddings") 
+@app.post("/segments/reprocess_embeddings")
 async def reprocess_segment_embeddings(
     audio_file: str,
     segments: List[dict],
     force_update: bool = False
 ):
     """
-    Reprocess embeddings for existing segments.
-    
-    This is useful when speaker names have been corrected and you want to 
-    re-extract embeddings with the updated speaker assignments.
-    
+    Re-extract voiceprints for already-labelled segments of an audio file.
+
+    Useful after speaker names have been corrected: it pushes the audio that
+    actually belongs to each corrected name back into that speaker's bank.
+
     Args:
         audio_file: Path to the audio file
-        segments: List of segments to reprocess
-        force_update: Whether to update even if embeddings already exist
-        
+        segments: List of segments carrying start / end / speaker
+        force_update: Accepted for compatibility; every supplied segment is
+            re-embedded regardless, since the caller asked for reprocessing.
+
     Returns:
         Results of the reprocessing operation
     """
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        if not audio_file or not Path(audio_file).exists():
-            raise HTTPException(status_code=400, detail="Audio file not found")
-        
+    database = require_speaker_db()
+    require_embedding_model()
+
+    if not audio_file or not Path(audio_file).exists():
+        raise HTTPException(status_code=400, detail="Audio file not found")
+
+    def _reprocess() -> Dict[str, Any]:
         results = {
             "total_segments": len(segments),
             "processed_segments": 0,
@@ -1244,80 +1718,76 @@ async def reprocess_segment_embeddings(
             "failed_extractions": 0,
             "improvements": []
         }
-        
-        # Load audio file
-        waveform, sr = torchaudio.load(audio_file)
-        
+
+        waveform, sample_rate = torchaudio.load(audio_file)
+        waveform, sample_rate = prepare_waveform(waveform, sample_rate)
+
+        # Group by corrected speaker name so each speaker is enrolled once with
+        # all of their crops, instead of re-saving the database per segment.
+        vectors_by_speaker: Dict[str, List[Any]] = {}
+
         for segment in segments:
             try:
-                start_time = segment.get('start', 0)
-                end_time = segment.get('end', start_time + 1)
-                speaker_name = segment.get('speaker', 'Unknown')
-                
-                # Skip if no meaningful speaker name
-                if not speaker_name or speaker_name in ['Unknown', '']:
+                start_time = float(segment.get('start', 0))
+                end_time = float(segment.get('end', start_time + 1))
+                speaker_name = (segment.get('speaker') or '').strip()
+
+                if not speaker_name or speaker_name in ('Unknown', 'Unknown Speaker'):
                     continue
-                
-                # Extract audio segment
-                start_sample = int(start_time * sr)
-                end_sample = int(end_time * sr)
-                
-                if start_sample >= waveform.shape[1] or end_sample > waveform.shape[1]:
-                    logger.warning(f"Segment bounds invalid: {start_sample}-{end_sample}")
-                    continue
-                
-                segment_waveform = waveform[:, start_sample:end_sample]
-                
-                # Check if segment is long enough
-                duration = (end_sample - start_sample) / sr
-                if duration < 0.5:  # Minimum 0.5 seconds
+
+                duration = end_time - start_time
+                if duration < 0.5:
                     logger.debug(f"Segment too short for embedding: {duration:.2f}s")
                     continue
-                
-                # Convert to numpy
-                if segment_waveform.dim() > 1:
-                    audio_numpy = segment_waveform.mean(dim=0).cpu().numpy()
-                else:
-                    audio_numpy = segment_waveform.cpu().numpy()
-                
-                # Extract and update embedding
-                success = speaker_embedding_manager.provide_correction_feedback(
-                    speaker_name, audio_numpy
-                )
-                
-                if success:
-                    results["processed_segments"] += 1
-                    if speaker_name not in results["updated_speakers"]:
-                        results["updated_speakers"].append(speaker_name)
-                    
-                    results["improvements"].append({
-                        "segment_start": start_time,
-                        "segment_end": end_time,
-                        "speaker": speaker_name,
-                        "duration": duration,
-                        "status": "embedding_updated"
-                    })
-                else:
+
+                crop = crop_waveform(waveform, sample_rate, start_time, end_time)
+                if crop is None:
+                    logger.warning(f"Segment bounds invalid: {start_time}-{end_time}")
+                    continue
+
+                vector = extract_embedding_from_audio(crop, sample_rate)
+                if vector is None:
                     results["failed_extractions"] += 1
-                    
+                    continue
+
+                vectors_by_speaker.setdefault(speaker_name, []).append(vector)
+                results["processed_segments"] += 1
+                if speaker_name not in results["updated_speakers"]:
+                    results["updated_speakers"].append(speaker_name)
+                results["improvements"].append({
+                    "segment_start": start_time,
+                    "segment_end": end_time,
+                    "speaker": speaker_name,
+                    "duration": duration,
+                    "status": "embedding_updated"
+                })
+
             except Exception as e:
                 logger.warning(f"Failed to process segment {segment.get('start', 0)}: {e}")
                 results["failed_extractions"] += 1
                 continue
-        
-        # Save the updated speaker database
-        if results["processed_segments"] > 0:
-            speaker_embedding_manager._save_speaker_database()
-        
-        response = {
+
+        with _speaker_db_lock:
+            for speaker_name, vectors in vectors_by_speaker.items():
+                database.enroll_speaker(
+                    speaker_name, vectors, confidence=0.9, source_type="corrected"
+                )
+
+        return results
+
+    try:
+        results = await asyncio.to_thread(_reprocess)
+
+        logger.info(f"Reprocessed embeddings for {results['processed_segments']} segments")
+        return {
             "status": "reprocessing_complete",
             "results": results,
-            "message": f"Reprocessed {results['processed_segments']} segments for {len(results['updated_speakers'])} speakers"
+            "message": (
+                f"Reprocessed {results['processed_segments']} segments for "
+                f"{len(results['updated_speakers'])} speakers"
+            )
         }
-        
-        logger.info(f"Reprocessed embeddings for {results['processed_segments']} segments")
-        return response
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1341,597 +1811,576 @@ def load_audio_from_bytes(audio_data: bytes) -> tuple[torch.Tensor, int]:
         raise ValueError(f"Invalid audio format: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Transcription pipeline (faster-whisper)
+#
+# faster-whisper streams arbitrary-length audio internally and runs Silero VAD on
+# it, so there is no manual chunking, no overlap stitching and no whole-clip
+# energy gate here. Segment quality is controlled by faster-whisper's own decoder
+# statistics (no_speech_prob / avg_logprob / compression_ratio).
+# ---------------------------------------------------------------------------
+
+# Characters that Whisper commonly emits when fed key clicks, fan noise, etc.
+_KEYBOARD_ARTIFACT_CHARS = frozenset(
+    "あいうえお"      # Japanese kana from key press transients
+    "なにぬねの"
+    "かきくけこ"
+    "。、んして"
+    "ㅏㅓㅗㅜㅡ"      # Korean jamo
+    "ăâêôơ"          # Vietnamese
+    "ตากนม"          # Thai
+)
+
+
+def _artifact_reason(text: str, confident: bool = False) -> Optional[str]:
+    """
+    Cheap textual artifact checks preserved from the previous implementation.
+
+    Returns a reason string when the text looks like a decoder artifact rather
+    than speech, otherwise None.
+
+    `confident` is set when the decoder itself reported a high-probability decode;
+    in that case a very short output ("Hi.", "OK.") is taken at face value instead
+    of being discarded as a hallucination.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return "empty_text"
+
+    alnum = "".join(ch for ch in clean if ch.isalnum())
+
+    # Very short outputs are usually hallucinations on noise - unless the decoder
+    # was confident, in which case they are real short utterances.
+    if len(alnum) <= 2 and not confident:
+        return "too_short"
+
+    artifact_count = sum(1 for ch in clean if ch in _KEYBOARD_ARTIFACT_CHARS)
+    scored_chars = sum(
+        1 for ch in clean if ch.isalnum() or ch in _KEYBOARD_ARTIFACT_CHARS
+    )
+    if scored_chars > 0 and artifact_count / scored_chars > 0.7:
+        return "keyboard_artifacts"
+
+    # The same one or two characters repeated is noise, not speech.
+    if len(alnum) > 3 and len(set(alnum)) <= 2:
+        return "character_repetition"
+
+    return None
+
+
+def _hallucination_reason(segment: Any) -> Optional[str]:
+    """
+    Uniform hallucination gate applied to EVERY faster-whisper segment.
+
+    Drops a segment when:
+      * the model is confident there is no speech AND the decode was low
+        probability (no_speech_prob > 0.6 and avg_logprob < -1.0), or
+      * the output is pathologically repetitive (compression_ratio > 2.4).
+    """
+    no_speech_prob = getattr(segment, "no_speech_prob", None)
+    avg_logprob = getattr(segment, "avg_logprob", None)
+    compression_ratio = getattr(segment, "compression_ratio", None)
+
+    if (
+        no_speech_prob is not None
+        and avg_logprob is not None
+        and no_speech_prob > NO_SPEECH_PROB_THRESHOLD
+        and avg_logprob < AVG_LOGPROB_THRESHOLD
+    ):
+        return "no_speech"
+
+    if compression_ratio is not None and compression_ratio > COMPRESSION_RATIO_THRESHOLD:
+        return "repetitive_output"
+
+    return None
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    """Coerce to float, preserving a legitimate 0.0 and mapping bad input to None."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_words(segment: Any) -> List[Dict[str, Any]]:
+    """Convert faster-whisper word objects into plain dicts with valid timings."""
+    words: List[Dict[str, Any]] = []
+    for word in getattr(segment, "words", None) or []:
+        start = _float_or_none(getattr(word, "start", None))
+        end = _float_or_none(getattr(word, "end", None))
+        text = getattr(word, "word", None)
+        if start is None or end is None or not text:
+            continue
+        if end < start:
+            end = start
+        words.append({
+            "start": start,
+            "end": end,
+            "word": text,
+            "probability": _float_or_none(getattr(word, "probability", None)) or 0.0,
+        })
+    return words
+
+
+def _transcribe_sync(audio_array: "np.ndarray") -> Dict[str, Any]:
+    """
+    Blocking faster-whisper call. Runs on a worker thread and holds the ASR lock
+    for its whole duration so concurrent requests queue rather than interleave.
+    """
+    if whisper_model is None:
+        raise ValueError("Whisper model not loaded")
+
+    with _whisper_lock:
+        with torch.inference_mode():
+            segment_iter, info = whisper_model.transcribe(
+                audio_array,
+                language=WHISPER_LANGUAGE,          # None => auto-detect, for ALL lengths
+                task="transcribe",
+                beam_size=WHISPER_BEAM_SIZE,
+                word_timestamps=True,               # required for speaker attribution
+                condition_on_previous_text=False,   # stops cross-segment hallucination loops
+                vad_filter=True,                    # Silero VAD, built into faster-whisper
+                vad_parameters={"min_silence_duration_ms": VAD_MIN_SILENCE_MS},
+            )
+
+            chunks: List[Dict[str, Any]] = []
+            dropped: Dict[str, int] = {}
+
+            # segment_iter is a generator: consumption is what actually decodes.
+            for segment in segment_iter:
+                text = (getattr(segment, "text", "") or "").strip()
+
+                seg_logprob = _float_or_none(getattr(segment, "avg_logprob", None))
+                confident = seg_logprob is not None and seg_logprob >= CONFIDENT_LOGPROB
+
+                reason = _hallucination_reason(segment) or _artifact_reason(text, confident)
+                if reason:
+                    dropped[reason] = dropped.get(reason, 0) + 1
+                    logger.debug(f"Dropped segment ({reason}): '{text[:60]}'")
+                    continue
+
+                words = _extract_words(segment)
+
+                start = _float_or_none(getattr(segment, "start", None))
+                end = _float_or_none(getattr(segment, "end", None))
+                if start is None:
+                    start = words[0]["start"] if words else 0.0
+                if end is None:
+                    end = words[-1]["end"] if words else start
+
+                chunks.append({
+                    # "timestamp" keeps the legacy (transformers-style) shape that
+                    # merge_transcription_and_diarization and batch_transcription.py read.
+                    "timestamp": [start, end],
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "words": words,
+                    "avg_logprob": _float_or_none(getattr(segment, "avg_logprob", None)),
+                    "no_speech_prob": _float_or_none(getattr(segment, "no_speech_prob", None)),
+                    "compression_ratio": _float_or_none(
+                        getattr(segment, "compression_ratio", None)
+                    ),
+                })
+
+    full_text = " ".join(chunk["text"] for chunk in chunks if chunk["text"]).strip()
+
+    if dropped:
+        logger.info(f"Hallucination gate dropped segments: {dropped}")
+
+    return {
+        "chunks": chunks,
+        "text": full_text,
+        "language": getattr(info, "language", None),
+        "language_probability": _float_or_none(
+            getattr(info, "language_probability", None)
+        ),
+        "dropped_segments": dropped,
+    }
+
+
 async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
-    """Run Whisper transcription on audio waveform with enhanced voice activity detection and automatic chunking."""
+    """
+    Transcribe a waveform with faster-whisper.
+
+    Audio of any length is handed to the model as-is: faster-whisper does its own
+    windowing and VAD. The only pre-check is a cheap RMS silence fast-path.
+
+    Returns a dict with 'chunks' (each carrying 'timestamp', 'text' and word-level
+    timings) and 'text'. When nothing survives, 'skipped_reason' is present.
+    """
     try:
         if whisper_model is None:
             raise ValueError("Whisper model not loaded")
-        
-        # Calculate duration
-        duration = waveform.shape[1] / sample_rate
-        
-        # If audio is longer than 30 seconds, chunk it for processing
-        if duration > 30.0:
-            logger.info(f"Audio is {duration:.2f}s long, chunking for optimal processing...")
-            return await run_chunked_transcription(waveform, sample_rate)
-        
-        # Convert to numpy for analysis
-        audio_array = waveform.numpy().flatten()
-        
-        # Enhanced Voice Activity Detection
-        # Calculate RMS (Root Mean Square) energy
-        rms_energy = np.sqrt(np.mean(audio_array ** 2))
-        
-        # Calculate zero crossing rate
-        zero_crossings = np.sum(np.abs(np.diff(np.sign(audio_array)))) / len(audio_array)
-        
-        # Calculate spectral centroid (frequency content analysis)
-        # Higher frequencies often indicate non-speech sounds like keyboard clicks
-        fft = np.fft.fft(audio_array)
-        freqs = np.fft.fftfreq(len(fft), 1/sample_rate)
-        magnitudes = np.abs(fft)
-        
-        # Only consider positive frequencies and avoid division by zero
-        positive_freqs = freqs[:len(freqs)//2]
-        positive_magnitudes = magnitudes[:len(magnitudes)//2]
-        
-        if np.sum(positive_magnitudes) > 0:
-            spectral_centroid = np.sum(positive_freqs * positive_magnitudes) / np.sum(positive_magnitudes)
+
+        # faster-whisper expects 16 kHz mono float32.
+        if sample_rate and sample_rate != SAMPLE_RATE:
+            waveform = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)(waveform)
+            sample_rate = SAMPLE_RATE
+        if waveform.dim() > 1 and waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        audio_array = waveform.detach().cpu().to(torch.float32).numpy().flatten()
+
+        duration = len(audio_array) / sample_rate if sample_rate else 0.0
+        rms_energy = (
+            float(np.sqrt(np.mean(np.square(audio_array)))) if audio_array.size else 0.0
+        )
+
+        # Fast path only: digital silence / near-silence. The threshold is far below
+        # speech level on purpose - the old 0.015 whole-clip gate discarded real speech.
+        if rms_energy < SILENCE_RMS_THRESHOLD:
+            logger.info(
+                f"Clip is silent (RMS {rms_energy:.6f} < {SILENCE_RMS_THRESHOLD}), skipping ASR"
+            )
+            return {
+                "chunks": [],
+                "text": "",
+                "processing_time": 0.0,
+                "skipped_reason": "silence",
+            }
+
+        logger.info(
+            f"Transcribing {duration:.2f}s of audio with faster-whisper (RMS {rms_energy:.4f})"
+        )
+
+        # Off the event loop; the ASR lock inside serializes concurrent requests.
+        result = await asyncio.to_thread(_transcribe_sync, audio_array)
+
+        if not result["chunks"]:
+            logger.info("No speech survived VAD / hallucination gating")
+            result["skipped_reason"] = "no_speech_detected"
         else:
-            spectral_centroid = 0
-            
-        # Calculate high frequency ratio (ratio of energy above 4kHz vs total energy)
-        # Keyboard clicks and similar noises have more high-frequency content
-        high_freq_mask = positive_freqs > 4000
-        high_freq_energy = np.sum(positive_magnitudes[high_freq_mask] ** 2) if np.any(high_freq_mask) else 0
-        total_energy = np.sum(positive_magnitudes ** 2)
-        high_freq_ratio = high_freq_energy / total_energy if total_energy > 0 else 0
-        
-        # Calculate temporal stability (variance in audio levels over time)
-        # Speech has more temporal variation than constant noises
-        frame_size = sample_rate // 10  # 100ms frames
-        frame_energies = []
-        for i in range(0, len(audio_array) - frame_size, frame_size):
-            frame = audio_array[i:i + frame_size]
-            frame_energy = np.sqrt(np.mean(frame ** 2))
-            frame_energies.append(frame_energy)
-        
-        temporal_variance = np.var(frame_energies) if len(frame_energies) > 1 else 0
-        
-        # Enhanced thresholds for better noise filtering
-        min_energy_threshold = 0.015  # Slightly higher to filter quiet keyboard clicks
-        min_zero_crossing_rate = 0.015  # Minimum variation in signal
-        max_spectral_centroid = 3000  # Hz - speech typically centers below 3kHz
-        max_high_freq_ratio = 0.6  # Maximum ratio of high frequency content
-        min_temporal_variance = 0.0001  # Minimum variation over time
-        min_duration = 0.3  # Minimum duration in seconds for valid speech
-        
-        # Calculate actual duration
-        duration = len(audio_array) / sample_rate
-        
-        logger.info(f"Enhanced audio analysis - RMS: {rms_energy:.4f}, ZCR: {zero_crossings:.4f}, "
-                   f"Spectral Centroid: {spectral_centroid:.0f}Hz, High Freq Ratio: {high_freq_ratio:.3f}, "
-                   f"Temporal Variance: {temporal_variance:.6f}, Duration: {duration:.2f}s")
-        
-        # Check multiple criteria for speech detection
-        if rms_energy < min_energy_threshold:
-            logger.info("Audio energy too low - likely silence or very quiet noise, skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "low_energy"
-            }
-        
-        if zero_crossings < min_zero_crossing_rate:
-            logger.info("Audio variation too low - likely constant noise, skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "low_variation"
-            }
-            
-        if spectral_centroid > max_spectral_centroid:
-            logger.info(f"Spectral centroid too high ({spectral_centroid:.0f}Hz) - likely non-speech noise (keyboard, etc.), skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "high_frequency_noise"
-            }
-            
-        if high_freq_ratio > max_high_freq_ratio:
-            logger.info(f"High frequency content too high ({high_freq_ratio:.3f}) - likely mechanical noise, skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "mechanical_noise"
-            }
-            
-        if temporal_variance < min_temporal_variance:
-            logger.info(f"Temporal variance too low ({temporal_variance:.6f}) - likely constant tone or noise, skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "constant_signal"
-            }
-            
-        if duration < min_duration:
-            logger.info(f"Audio too short ({duration:.2f}s) - likely noise burst, skipping transcription")
-            return {
-                "segments": [],
-                "full_text": "",
-                "processing_time": 0.0,
-                "skipped_reason": "too_short"
-            }
-        
-        # Proceed with transcription only if audio likely contains speech
-        logger.info("Audio passed voice activity detection - proceeding with transcription")
-        result = whisper_model(audio_array, return_timestamps=True)
-        
-        # Additional post-transcription checks to catch Whisper hallucinations
-        if result and 'text' in result:
-            clean_text = result['text'].strip().replace('.', '').replace(',', '').replace('?', '').replace('!', '').replace(' ', '')
-            
-            # Check for very short transcriptions (likely hallucinations)
-            if len(clean_text) <= 2:
-                logger.info(f"Transcription too short/empty: '{result['text']}' - likely hallucination, skipping")
-                return {
-                    "segments": [],
-                    "full_text": "",
-                    "processing_time": 0.0,
-                    "skipped_reason": "likely_hallucination"
-                }
-            
-            # Check for common keyboard-related transcription artifacts
-            keyboard_artifacts = [
-                'あ', 'い', 'う', 'え', 'お',  # Common Japanese characters from key press sounds
-                'な', 'に', 'ぬ', 'ね', 'の',
-                'か', 'き', 'く', 'け', 'こ',
-                '。', '、', 'ん', 'し', 'て',
-                'ㅏ', 'ㅓ', 'ㅗ', 'ㅜ', 'ㅡ',  # Korean characters
-                'ă', 'â', 'ê', 'ô', 'ơ',     # Vietnamese characters
-                'ต', 'า', 'ก', 'น', 'ม',      # Thai characters
-            ]
-            
-            # Check if transcription consists mainly of keyboard artifacts
-            artifact_count = sum(1 for char in result['text'] if char in keyboard_artifacts)
-            total_chars = len([c for c in result['text'] if c.isalnum() or c in keyboard_artifacts])
-            
-            if total_chars > 0 and artifact_count / total_chars > 0.7:  # More than 70% artifacts
-                logger.info(f"Transcription contains mostly keyboard artifacts: '{result['text']}' - likely false detection, skipping")
-                return {
-                    "segments": [],
-                    "full_text": "",
-                    "processing_time": 0.0,
-                    "skipped_reason": "keyboard_artifacts"
-                }
-            
-            # Check for suspiciously uniform character repetition (often from noise)
-            if len(set(clean_text)) <= 2 and len(clean_text) > 3:  # Same 1-2 characters repeated
-                logger.info(f"Transcription shows character repetition: '{result['text']}' - likely noise, skipping")
-                return {
-                    "segments": [],
-                    "full_text": "",
-                    "processing_time": 0.0,
-                    "skipped_reason": "character_repetition"
-                }
-        
-        logger.info(f"Transcription successful: '{result.get('text', '')[:50]}{'...' if len(result.get('text', '')) > 50 else ''}'")
+            preview = result["text"][:60]
+            logger.info(
+                f"Transcription produced {len(result['chunks'])} segments "
+                f"(language={result.get('language')}): '{preview}"
+                f"{'...' if len(result['text']) > 60 else ''}'"
+            )
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         raise
 
 
-def find_natural_pause_point(waveform: torch.Tensor, search_start: int, search_end: int, sample_rate: int) -> int:
-    """
-    Find the best natural pause point for splitting audio chunks.
-    Returns sample index of the best pause, or None if no good pause found.
-    """
-    try:
-        if search_start >= search_end or search_start >= waveform.shape[1]:
-            return None
-        
-        # Extract the search region
-        search_region = waveform[:, search_start:min(search_end, waveform.shape[1])].squeeze().numpy()
-        
-        # Calculate energy in sliding windows
-        window_size = int(0.1 * sample_rate)  # 100ms windows
-        step_size = int(0.05 * sample_rate)   # 50ms step
-        
-        energy_scores = []
-        window_positions = []
-        
-        for i in range(0, len(search_region) - window_size, step_size):
-            window = search_region[i:i + window_size]
-            
-            # Calculate RMS energy
-            rms_energy = np.sqrt(np.mean(window ** 2))
-            
-            # Calculate zero crossing rate (indicates speech activity)
-            zero_crossings = np.sum(np.diff(np.sign(window)) != 0) / len(window)
-            
-            # Combine metrics (lower is better for pause detection)
-            pause_score = rms_energy + zero_crossings * 0.1
-            
-            energy_scores.append(pause_score)
-            window_positions.append(search_start + i + window_size // 2)
-        
-        if not energy_scores:
-            return None
-        
-        # Find windows with lowest energy (best pause candidates)
-        min_energy_threshold = min(energy_scores) * 1.5  # Allow some tolerance
-        
-        # Find the best pause point closest to the middle of the search region
-        target_position = (search_start + search_end) / 2
-        best_pause = None
-        best_distance = float('inf')
-        
-        for i, (score, position) in enumerate(zip(energy_scores, window_positions)):
-            if score <= min_energy_threshold:
-                distance = abs(position - target_position)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_pause = position
-        
-        return best_pause
-        
-    except Exception as e:
-        logger.debug(f"Error finding natural pause point: {e}")
-        return None
+def _diarize_sync(waveform: torch.Tensor, sample_rate: int) -> Any:
+    """Blocking pyannote call, serialized by the diarization lock."""
+    if diarization_pipeline is None:
+        raise ValueError("Diarization pipeline not loaded")
 
-
-async def run_chunked_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
-    """
-    Run transcription on long audio files by splitting into chunks at natural speech pauses.
-    This prevents memory issues, attention mask warnings, and improves timestamp accuracy.
-    """
-    try:
-        # Configuration
-        target_chunk_duration = 25.0  # Target seconds per chunk (slightly less than 30s to be safe)
-        min_chunk_duration = 15.0     # Minimum chunk duration (don't split if chunk would be too small)
-        max_chunk_duration = 30.0     # Maximum chunk duration (hard limit)
-        overlap_duration = 3.0        # Increased overlap for better stitching
-        
-        total_samples = waveform.shape[1]
-        total_duration = total_samples / sample_rate
-        
-        logger.info(f"Processing {total_duration:.2f}s audio with intelligent chunking at natural speech pauses")
-        
-        # Find natural speech pause points for chunking
-        chunks = []
-        chunk_timestamps = []
-        
-        start_sample = 0
-        chunk_number = 0
-        
-        while start_sample < total_samples:
-            # Calculate target end sample
-            target_end_sample = min(start_sample + int(target_chunk_duration * sample_rate), total_samples)
-            
-            # Look for natural pause points within a reasonable range
-            search_start = max(target_end_sample - int(5.0 * sample_rate), start_sample + int(min_chunk_duration * sample_rate))
-            search_end = min(target_end_sample + int(5.0 * sample_rate), total_samples, start_sample + int(max_chunk_duration * sample_rate))
-            
-            # Find the best pause point in the search range
-            best_pause_sample = find_natural_pause_point(waveform, search_start, search_end, sample_rate)
-            
-            # If no good pause found, use target end
-            end_sample = best_pause_sample if best_pause_sample else target_end_sample
-            
-            # Extract chunk
-            chunk_waveform = waveform[:, start_sample:end_sample]
-            
-            # Calculate timestamps for this chunk
-            start_time = start_sample / sample_rate
-            end_time = end_sample / sample_rate
-            
-            chunks.append(chunk_waveform)
-            chunk_timestamps.append((start_time, end_time))
-            
-            chunk_number += 1
-            pause_indicator = "📍 (natural pause)" if best_pause_sample else "✂️ (forced split)"
-            logger.info(f"Chunk {chunk_number}: {start_time:.2f}s - {end_time:.2f}s ({chunk_waveform.shape[1]/sample_rate:.2f}s) {pause_indicator}")
-            
-            # Move to next chunk with overlap
-            if end_sample == total_samples:
-                break  # We've reached the end
-            start_sample = max(0, end_sample - int(overlap_duration * sample_rate))
-        
-        # Process each chunk
-        all_segments = []
-        
-        for i, (chunk_waveform, (start_time, end_time)) in enumerate(zip(chunks, chunk_timestamps)):
-            logger.info(f"Transcribing chunk {i+1}/{len(chunks)} ({start_time:.2f}s - {end_time:.2f}s)")
-            
-            try:
-                # Convert chunk to numpy
-                chunk_array = chunk_waveform.numpy().flatten()
-                
-                # Skip very quiet chunks
-                rms_energy = np.sqrt(np.mean(chunk_array ** 2))
-                if rms_energy < 0.01:
-                    logger.info(f"Chunk {i+1} is too quiet (RMS: {rms_energy:.4f}), skipping")
-                    continue
-                
-                # Transcribe chunk with enhanced settings for better timestamps
-                chunk_result = whisper_model(
-                    chunk_array, 
-                    return_timestamps=True,
-                    chunk_length_s=None,  # Let Whisper handle its own chunking for short segments
-                    stride_length_s=None, # Disable stride for individual chunks
-                    generate_kwargs={
-                        "language": "en",           # Set language to avoid language detection warnings
-                        "task": "transcribe",       # Explicit task to avoid translation warnings
-                        "return_timestamps": True,  # Ensure timestamps are generated
-                        "word_timestamps": True     # Enable word-level timestamps for better accuracy
-                    }
-                )
-                
-                # Process chunk results
-                if chunk_result and 'chunks' in chunk_result:
-                    for segment in chunk_result['chunks']:
-                        # Adjust timestamps to global time
-                        if 'timestamp' in segment and segment['timestamp']:
-                            segment_start = segment['timestamp'][0] + start_time if segment['timestamp'][0] else start_time
-                            segment_end = segment['timestamp'][1] + start_time if segment['timestamp'][1] else end_time
-                        else:
-                            segment_start = start_time
-                            segment_end = end_time
-                        
-                        # Add segment with adjusted timestamps
-                        all_segments.append({
-                            'timestamp': [segment_start, segment_end],
-                            'text': segment.get('text', '').strip()
-                        })
-                
-                elif chunk_result and 'text' in chunk_result and chunk_result['text'].strip():
-                    # Single text result
-                    all_segments.append({
-                        'timestamp': [start_time, end_time],
-                        'text': chunk_result['text'].strip()
-                    })
-                
-            except Exception as e:
-                logger.warning(f"Error processing chunk {i+1}: {e}")
-                continue
-        
-        # Merge overlapping segments and deduplicate
-        merged_segments = merge_overlapping_segments(all_segments)
-        
-        # Create final result
-        full_text = " ".join([seg.get('text', '') for seg in merged_segments if seg.get('text', '').strip()])
-        
-        logger.info(f"Chunked transcription complete: {len(merged_segments)} segments, {len(full_text)} characters")
-        
-        return {
-            'chunks': merged_segments,
-            'text': full_text
-        }
-        
-    except Exception as e:
-        logger.error(f"Chunked transcription error: {e}")
-        raise
-
-
-def merge_overlapping_segments(segments):
-    """
-    Enhanced merging of overlapping segments from chunked transcription with intelligent boundary detection.
-    """
-    if not segments:
-        return []
-    
-    # Sort segments by start time
-    sorted_segments = sorted(segments, key=lambda x: x['timestamp'][0])
-    
-    merged = []
-    
-    for segment in sorted_segments:
-        text = segment.get('text', '').strip()
-        if not text:
-            continue
-            
-        # Check if this segment overlaps with the last merged segment
-        if merged:
-            last_segment = merged[-1]
-            last_end = last_segment['timestamp'][1]
-            current_start = segment['timestamp'][0]
-            
-            # Calculate overlap
-            overlap_duration = max(0, last_end - current_start)
-            
-            if overlap_duration > 0:
-                # Analyze text overlap to determine best merge strategy
-                last_text = last_segment.get('text', '').strip()
-                current_text = text
-                
-                # Check for exact duplicates or near duplicates
-                if current_text == last_text:
-                    # Exact duplicate, skip
-                    continue
-                
-                # Check for partial overlaps
-                last_words = last_text.lower().split()
-                current_words = current_text.lower().split()
-                
-                # Find overlapping words at boundaries
-                overlap_words = find_word_overlap(last_words, current_words)
-                
-                if overlap_words > len(current_words) * 0.3:  # Significant word overlap
-                    # Try to merge intelligently
-                    merged_text = smart_text_merge(last_text, current_text, overlap_words)
-                    
-                    if merged_text:
-                        # Update the last segment with merged text and extended end time
-                        last_segment['text'] = merged_text
-                        last_segment['timestamp'][1] = segment['timestamp'][1]
-                        continue
-                
-                # If overlap is small, adjust boundary to minimize cutoff
-                if overlap_duration < 1.0:  # Less than 1 second overlap
-                    # Adjust the boundary to the midpoint
-                    midpoint = (last_end + current_start) / 2
-                    last_segment['timestamp'][1] = midpoint
-                    segment['timestamp'][0] = midpoint
-        
-        merged.append(segment)
-    
-    return merged
-
-
-def find_word_overlap(words1, words2):
-    """Find overlapping words between two word lists."""
-    # Check for overlap at the end of words1 and beginning of words2
-    max_overlap = min(len(words1), len(words2))
-    
-    for i in range(max_overlap, 0, -1):
-        if words1[-i:] == words2[:i]:
-            return i
-    
-    return 0
-
-
-def smart_text_merge(text1, text2, overlap_words):
-    """Intelligently merge two texts with overlapping words."""
-    words1 = text1.split()
-    words2 = text2.split()
-    
-    if overlap_words > 0 and overlap_words <= len(words1) and overlap_words <= len(words2):
-        # Remove overlapping words from the second text
-        merged_words = words1 + words2[overlap_words:]
-        return ' '.join(merged_words)
-    
-    # Fallback: simple concatenation
-    return f"{text1} {text2}"
+    audio_data = {"waveform": waveform, "sample_rate": sample_rate}
+    with _diarization_lock:
+        with torch.inference_mode():
+            return diarization_pipeline(audio_data)
 
 
 async def run_diarization(waveform: torch.Tensor, sample_rate: int) -> Any:
-    """Run speaker diarization on audio waveform."""
+    """Run speaker diarization on the full waveform, off the event loop."""
     try:
         if diarization_pipeline is None:
             raise ValueError("Diarization pipeline not loaded")
-        
-        # Prepare audio for pyannote (needs specific format)
-        audio_data = {
-            "waveform": waveform,
-            "sample_rate": sample_rate
-        }
-        
-        # Run diarization
-        diarization = diarization_pipeline(audio_data)
-        
-        return diarization
-        
+
+        return await asyncio.to_thread(_diarize_sync, waveform, sample_rate)
+
     except Exception as e:
         logger.error(f"Diarization error: {e}")
         raise
 
 
+# ---------------------------------------------------------------------------
+# Speaker attribution
+# ---------------------------------------------------------------------------
+
+def extract_diarization_turns(diarization: Any) -> List[Dict[str, Any]]:
+    """
+    Flatten a pyannote annotation into a time-sorted list of
+    {'start', 'end', 'speaker'} turns. Speaker labels use the legacy
+    "Speaker SPEAKER_00" presentation form.
+    """
+    turns: List[Dict[str, Any]] = []
+    if diarization is None:
+        return turns
+
+    try:
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            start = _float_or_none(getattr(turn, "start", None))
+            end = _float_or_none(getattr(turn, "end", None))
+            if start is None or end is None or end <= start:
+                continue
+            turns.append({"start": start, "end": end, "speaker": f"Speaker {speaker}"})
+    except Exception as e:
+        logger.warning(f"Could not read diarization turns: {e}")
+        return []
+
+    turns.sort(key=lambda t: t["start"])
+    return turns
+
+
+def speaker_at_time(turns: List[Dict[str, Any]], moment: float, default: str) -> str:
+    """
+    Speaker of the turn covering `moment`; if no turn covers it, the nearest turn.
+
+    Nearest-turn fallback matters because Whisper word timings drift by tens of
+    milliseconds against diarization boundaries, which would otherwise leave
+    boundary words unattributed.
+    """
+    if not turns:
+        return default
+
+    best_speaker = None
+    best_distance = None
+
+    for turn in turns:
+        if turn["start"] <= moment <= turn["end"]:
+            return turn["speaker"]
+        if moment < turn["start"]:
+            distance = turn["start"] - moment
+        else:
+            distance = moment - turn["end"]
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_speaker = turn["speaker"]
+
+    return best_speaker if best_speaker is not None else default
+
+
+def _chunk_bounds(chunk: Dict[str, Any]) -> tuple:
+    """
+    Read (start, end) from a transcription chunk.
+
+    Uses explicit None checks so a legitimate 0.0 timestamp is never treated as
+    "missing" - the classic falsy-zero bug this pipeline used to have.
+    """
+    start = None
+    end = None
+
+    timestamp = chunk.get("timestamp")
+    if isinstance(timestamp, (list, tuple)):
+        if len(timestamp) > 0 and timestamp[0] is not None:
+            start = _float_or_none(timestamp[0])
+        if len(timestamp) > 1 and timestamp[1] is not None:
+            end = _float_or_none(timestamp[1])
+
+    if start is None and chunk.get("start") is not None:
+        start = _float_or_none(chunk.get("start"))
+    if end is None and chunk.get("end") is not None:
+        end = _float_or_none(chunk.get("end"))
+
+    return start, end
+
+
+def _coalesce_speaker_groups(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge adjacent groups that ended up with the same speaker."""
+    coalesced: List[Dict[str, Any]] = []
+    for group in groups:
+        if coalesced and coalesced[-1]["speaker"] == group["speaker"]:
+            coalesced[-1]["words"].extend(group["words"])
+        else:
+            coalesced.append(group)
+    return coalesced
+
+
+def _smooth_speaker_groups(
+    groups: List[Dict[str, Any]], min_words: int = 1, min_duration: float = 0.4
+) -> List[Dict[str, Any]]:
+    """
+    Absorb tiny single-word speaker flips back into their neighbours.
+
+    A one-word 200 ms "speaker change" between two runs of the same speaker is
+    almost always diarization jitter, not a real turn.
+    """
+    if len(groups) < 3:
+        return groups
+
+    smoothed = [groups[0]]
+    for index in range(1, len(groups) - 1):
+        current = groups[index]
+        following = groups[index + 1]
+
+        duration = current["words"][-1]["end"] - current["words"][0]["start"]
+        is_tiny = len(current["words"]) <= min_words and duration < min_duration
+
+        if is_tiny and smoothed[-1]["speaker"] == following["speaker"]:
+            # Reassign the stray word to the surrounding speaker.
+            current = {"speaker": smoothed[-1]["speaker"], "words": current["words"]}
+
+        smoothed.append(current)
+
+    smoothed.append(groups[-1])
+    return _coalesce_speaker_groups(smoothed)
+
+
+def split_chunk_by_speaker(
+    chunk: Dict[str, Any],
+    turns: List[Dict[str, Any]],
+    diarization: Any = None,
+) -> List[Dict[str, Any]]:
+    """
+    Turn one ASR chunk into one or more per-speaker segments.
+
+    Each word is assigned to the diarization turn covering its midpoint, then the
+    chunk is split wherever the word-level speaker changes. Segment start/end come
+    from the first/last word of each run, so a segment that spans a speaker change
+    no longer gets mis-attributed wholesale to whoever owned its midpoint.
+    """
+    text = (chunk.get("text") or "").strip()
+    start, end = _chunk_bounds(chunk)
+    words = chunk.get("words") or []
+
+    has_diarization = diarization is not None
+    default_speaker = "SPEAKER_00"
+
+    # No word timings (legacy transcription payloads): fall back to segment-level
+    # attribution over the whole chunk.
+    if not words:
+        if not text:
+            return []
+        if turns:
+            midpoint_start = start if start is not None else 0.0
+            midpoint_end = end if end is not None else midpoint_start
+            speaker = speaker_at_time(
+                turns, (midpoint_start + midpoint_end) / 2.0, default_speaker
+            )
+        elif has_diarization:
+            speaker = find_speaker_for_segment(
+                diarization,
+                start if start is not None else 0.0,
+                end if end is not None else 0.0,
+            )
+        else:
+            speaker = default_speaker
+
+        return [{
+            "start": start if start is not None else 0.0,
+            "end": end if end is not None else (start if start is not None else 0.0),
+            "text": text,
+            "speaker": speaker,
+            "embedding_confidence": 0.0,
+            "embedding_speaker": None,
+            "diarization_speaker": speaker,
+        }]
+
+    # Word-level attribution.
+    if turns:
+        groups: List[Dict[str, Any]] = []
+        for word in words:
+            midpoint = (word["start"] + word["end"]) / 2.0
+            speaker = speaker_at_time(turns, midpoint, default_speaker)
+            if groups and groups[-1]["speaker"] == speaker:
+                groups[-1]["words"].append(word)
+            else:
+                groups.append({"speaker": speaker, "words": [word]})
+        groups = _smooth_speaker_groups(groups)
+    else:
+        single_speaker = (
+            find_speaker_for_segment(
+                diarization,
+                start if start is not None else words[0]["start"],
+                end if end is not None else words[-1]["end"],
+            )
+            if has_diarization
+            else default_speaker
+        )
+        groups = [{"speaker": single_speaker, "words": list(words)}]
+
+    segments: List[Dict[str, Any]] = []
+    for group in groups:
+        group_text = "".join(word["word"] for word in group["words"]).strip()
+        if not group_text:
+            continue
+        segments.append({
+            "start": group["words"][0]["start"],
+            "end": group["words"][-1]["end"],
+            "text": group_text,
+            "speaker": group["speaker"],
+            "embedding_confidence": 0.0,
+            "embedding_speaker": None,
+            "diarization_speaker": group["speaker"],
+            "words": group["words"],
+        })
+
+    # If word text was somehow empty but the chunk had text, keep the chunk.
+    if not segments and text:
+        speaker = groups[0]["speaker"] if groups else default_speaker
+        segments.append({
+            "start": start if start is not None else words[0]["start"],
+            "end": end if end is not None else words[-1]["end"],
+            "text": text,
+            "speaker": speaker,
+            "embedding_confidence": 0.0,
+            "embedding_speaker": None,
+            "diarization_speaker": speaker,
+        })
+
+    return segments
+
+
 def merge_transcription_and_diarization(
-    transcription: Dict[str, Any], 
+    transcription: Dict[str, Any],
     diarization: Any,
     waveform: torch.Tensor = None,
     sample_rate: int = None
 ) -> List[Dict[str, Any]]:
-    """Merge Whisper transcription with pyannote diarization and speaker embedding identification."""
+    """
+    Merge Whisper transcription with pyannote diarization using word-level timings.
+
+    Every word is attributed to a diarization turn; ASR segments are split at
+    speaker changes. Labels are the anonymous per-session "Speaker SPEAKER_XX";
+    identify_speakers_hook() replaces them with persistent names afterwards.
+    """
     try:
-        segments = []
-        
-        if 'chunks' in transcription:
-            # Process chunks with timestamps
-            for chunk in transcription['chunks']:
-                start_time = chunk.get('timestamp', [0, 0])[0]
-                end_time = chunk.get('timestamp', [0, 0])[1]
-                text = chunk.get('text', '').strip()
-                
-                if not text:
+        if not transcription:
+            return []
+
+        turns = extract_diarization_turns(diarization)
+        chunks = transcription.get("chunks")
+
+        segments: List[Dict[str, Any]] = []
+
+        if chunks is not None:
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
                     continue
-                
-                # Get speaker from diarization
-                diarization_speaker = find_speaker_for_segment(diarization, start_time, end_time) if diarization else "SPEAKER_00"
-                
-                # Try to identify speaker using embeddings if available
-                embedding_speaker = None
-                embedding_confidence = 0.0
-                
-                if speaker_embedding_manager and waveform is not None and sample_rate is not None:
-                    try:
-                        # Extract audio segment for this text chunk
-                        start_sample = int(start_time * sample_rate)
-                        end_sample = int(end_time * sample_rate)
-                        
-                        if start_sample < waveform.shape[1] and end_sample <= waveform.shape[1]:
-                            segment_waveform = waveform[:, start_sample:end_sample]
-                            segment_audio = segment_waveform.squeeze().numpy()
-                            
-                            # Only try identification if segment is long enough
-                            if len(segment_audio) > sample_rate * 0.5:  # At least 0.5 seconds
-                                speaker_id, confidence, is_new = speaker_embedding_manager.identify_or_create_speaker(segment_audio)
-                                
-                                if speaker_id in speaker_embedding_manager.speaker_profiles:
-                                    embedding_speaker = speaker_embedding_manager.speaker_profiles[speaker_id].name
-                                    embedding_confidence = confidence
-                                    
-                                    logger.debug(f"Embedding identification: {embedding_speaker} (confidence: {confidence:.3f})")
-                    
-                    except Exception as e:
-                        logger.debug(f"Error in embedding identification for segment: {e}")
-                
-                # Choose the best speaker identification
-                final_speaker = embedding_speaker if embedding_speaker and embedding_confidence > 0.6 else diarization_speaker
-                
-                segments.append({
-                    "start": start_time,
-                    "end": end_time,
-                    "text": text,
-                    "speaker": final_speaker,
-                    "embedding_confidence": embedding_confidence,
-                    "embedding_speaker": embedding_speaker,
-                    "diarization_speaker": diarization_speaker
-                })
-        
+                try:
+                    segments.extend(split_chunk_by_speaker(chunk, turns, diarization))
+                except Exception as e:
+                    logger.warning(f"Skipping malformed transcription chunk: {e}")
+                    continue
         else:
-            # Fallback for transcription without chunks
-            text = transcription.get('text', '').strip()
+            # Fallback for transcription payloads with no per-segment structure.
+            text = (transcription.get("text") or "").strip()
             if text:
-                # Try speaker identification on the full audio if available
-                embedding_speaker = "SPEAKER_00"
-                embedding_confidence = 0.0
-                
-                if speaker_embedding_manager and waveform is not None:
-                    try:
-                        audio_numpy = waveform.squeeze().numpy()
-                        speaker_id, confidence, is_new = speaker_embedding_manager.identify_or_create_speaker(audio_numpy)
-                        
-                        if speaker_id in speaker_embedding_manager.speaker_profiles:
-                            embedding_speaker = speaker_embedding_manager.speaker_profiles[speaker_id].name
-                            embedding_confidence = confidence
-                    
-                    except Exception as e:
-                        logger.debug(f"Error in full-audio embedding identification: {e}")
-                
+                total_duration = 0.0
+                if waveform is not None and sample_rate:
+                    total_duration = waveform.shape[-1] / sample_rate
+                speaker = (
+                    speaker_at_time(turns, total_duration / 2.0, "SPEAKER_00")
+                    if turns
+                    else "SPEAKER_00"
+                )
                 segments.append({
                     "start": 0.0,
-                    "end": waveform.shape[1] / sample_rate if waveform is not None and sample_rate else 0.0,
+                    "end": total_duration,
                     "text": text,
-                    "speaker": embedding_speaker,
-                    "embedding_confidence": embedding_confidence,
-                    "embedding_speaker": embedding_speaker,
-                    "diarization_speaker": "SPEAKER_00"
+                    "speaker": speaker,
+                    "embedding_confidence": 0.0,
+                    "embedding_speaker": None,
+                    "diarization_speaker": speaker,
                 })
-        
+
+        # Voiceprint naming happens once per request in identify_speakers_hook(),
+        # not per segment here.
         return segments
-        
+
     except Exception as e:
         logger.error(f"Error merging transcription and diarization: {e}")
         # Fallback: return basic transcription without speaker info
-        text = transcription.get('text', '') if transcription else ''
+        text = transcription.get("text", "") if transcription else ""
         return [{
             "start": 0.0,
             "end": 0.0,
@@ -1943,87 +2392,203 @@ def merge_transcription_and_diarization(
         }] if text else []
 
 
+def _speaker_audio_groups(
+    segments: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Group segments by the per-session label diarization gave them.
+
+    Identification is done per *speaker*, not per segment: a 0.8s "yeah" gives a
+    useless voiceprint on its own, but pooled with the rest of that speaker's
+    turns in the same request it is part of a solid one.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for segment in segments:
+        label = segment.get("diarization_speaker") or segment.get("speaker")
+        if not label:
+            continue
+        groups.setdefault(label, []).append(segment)
+    return groups
+
+
+def _concatenate_speaker_audio(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    segments: List[Dict[str, Any]],
+    max_seconds: float = MAX_SPEAKER_AUDIO_SECONDS,
+) -> Optional[torch.Tensor]:
+    """Concatenate a speaker's crops, in order, up to `max_seconds`."""
+    budget = int(max_seconds * sample_rate)
+    crops = []
+    collected = 0
+
+    for segment in segments:
+        if collected >= budget:
+            break
+        start = _float_or_none(segment.get("start"))
+        end = _float_or_none(segment.get("end"))
+        if start is None or end is None or end <= start:
+            continue
+
+        crop = crop_waveform(waveform, sample_rate, start, end)
+        if crop is None:
+            continue
+
+        remaining = budget - collected
+        if crop.shape[-1] > remaining:
+            crop = crop[..., :remaining]
+        crops.append(crop.reshape(-1))
+        collected += crop.shape[-1]
+
+    if not crops:
+        return None
+    return torch.cat(crops)
+
+
+def identify_speakers_hook(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    segments: List[Dict[str, Any]],
+    diarization: Any = None,
+) -> List[Dict[str, Any]]:
+    """
+    Voiceprint-based speaker naming, run once per request after diarization.
+
+    For each diarization speaker in this request: concatenate that speaker's
+    audio (up to MAX_SPEAKER_AUDIO_SECONDS), extract ONE embedding, and match it
+    against the persistent v2 database. On a match the anonymous
+    "Speaker SPEAKER_00" label is replaced with the stored display name; below
+    threshold the database creates a new auto speaker so the same voice is
+    recognised next time.
+
+    Speakers with less than MIN_SPEAKER_AUDIO_SECONDS of audio in this request
+    are left with their diarization label - too little audio to identify, and
+    learning from it would poison the bank.
+
+    Degrades to a pass-through (diarization-only labels) when the embedding model
+    or the database is unavailable. It must never raise: the transcript is worth
+    more than the speaker names.
+
+    Segments are mutated in place and returned in the same order, with
+    "speaker_id" and "embedding_confidence" added, keeping the response schema
+    backward compatible with the WPF client.
+    """
+    if not segments:
+        return segments
+
+    if embedding_model is None or enhanced_speaker_database is None:
+        logger.debug(
+            "Speaker identification unavailable "
+            f"(embedding_model={embedding_model is not None}, "
+            f"database={enhanced_speaker_database is not None}) - keeping diarization labels"
+        )
+        return segments
+
+    if waveform is None or not sample_rate:
+        return segments
+
+    try:
+        database = enhanced_speaker_database
+        min_samples = int(MIN_SPEAKER_AUDIO_SECONDS * sample_rate)
+        identified = 0
+
+        for label, label_segments in _speaker_audio_groups(segments).items():
+            try:
+                audio = _concatenate_speaker_audio(waveform, sample_rate, label_segments)
+                if audio is None or audio.numel() < min_samples:
+                    logger.debug(
+                        f"Speaker '{label}': "
+                        f"{0 if audio is None else audio.numel() / sample_rate:.2f}s "
+                        f"< {MIN_SPEAKER_AUDIO_SECONDS}s - not identified"
+                    )
+                    continue
+
+                embedding = extract_embedding_from_audio(audio, sample_rate)
+                if embedding is None:
+                    continue
+
+                with _speaker_db_lock:
+                    speaker_id, display_name, confidence = database.identify_speaker(embedding)
+
+                if speaker_id is None:
+                    continue
+
+                for segment in label_segments:
+                    segment["speaker"] = display_name
+                    segment["speaker_id"] = speaker_id
+                    segment["embedding_speaker"] = display_name
+                    segment["embedding_confidence"] = float(confidence)
+
+                identified += 1
+                logger.info(
+                    f"Speaker '{label}' -> '{display_name}' ({speaker_id}) "
+                    f"confidence {confidence:.3f}"
+                )
+
+            except Exception as e:
+                # One bad speaker must not cost the whole request its labels.
+                logger.warning(f"Speaker identification failed for '{label}': {e}")
+                continue
+
+        if identified:
+            logger.debug(f"Identified {identified} speaker(s) against the v2 database")
+
+        return segments
+
+    except Exception as e:
+        logger.warning(f"Speaker identification hook failed, keeping diarization labels: {e}")
+        return segments
+
+
 def find_speaker_for_segment(diarization: Any, start_time: float, end_time: float) -> str:
-    """Find the dominant speaker for a given time segment."""
+    """
+    Segment-level speaker lookup (midpoint, then maximum overlap).
+
+    Retained as a fallback for transcription payloads that carry no word timings;
+    the primary path is word-level attribution in split_chunk_by_speaker().
+    """
     try:
         # Validate input parameters
         if start_time is None or end_time is None:
             logger.warning("Invalid segment timing: start_time or end_time is None")
             return "Unknown Speaker"
-        
+
         # Calculate the midpoint of the segment
         mid_time = (start_time + end_time) / 2
-        
+
         # Find which speaker is active at the midpoint
         for segment, _, speaker in diarization.itertracks(yield_label=True):
             # Check if segment has valid timing
             if segment.start is None or segment.end is None:
                 continue
-                
+
             if segment.start <= mid_time <= segment.end:
                 return f"Speaker {speaker}"
-        
+
         # If no speaker found, use overlap analysis
         speaker_durations = {}
         for segment, _, speaker in diarization.itertracks(yield_label=True):
             # Check if segment has valid timing
             if segment.start is None or segment.end is None:
                 continue
-                
+
             overlap_start = max(segment.start, start_time)
             overlap_end = min(segment.end, end_time)
-            
+
             if overlap_start < overlap_end:
                 overlap_duration = overlap_end - overlap_start
                 speaker_label = f"Speaker {speaker}"
                 speaker_durations[speaker_label] = speaker_durations.get(speaker_label, 0) + overlap_duration
-        
+
         if speaker_durations:
             # Return the speaker with the most overlap
             return max(speaker_durations, key=speaker_durations.get)
-        
+
         return "Unknown Speaker"
-        
+
     except Exception as e:
         logger.warning(f"Error finding speaker: {e}")
         return "Unknown Speaker"
-
-
-@app.post("/speakers/migrate_to_enhanced")
-async def migrate_to_enhanced_database(dry_run: bool = False):
-    """
-    Migrate from legacy speaker database to enhanced v2 architecture
-    
-    Args:
-        dry_run: If True, only analyze what would be migrated without making changes
-        
-    Returns:
-        Migration results and statistics
-    """
-    if enhanced_speaker_integration is None:
-        raise HTTPException(status_code=503, detail="Enhanced speaker integration not available")
-    
-    try:
-        results = await enhanced_speaker_integration.migrate_from_legacy_database(dry_run=dry_run)
-        
-        if dry_run:
-            return {
-                "status": "migration_analysis_complete",
-                "results": results,
-                "message": f"Analysis complete: {results['total_speakers_found']} speakers found, "
-                          f"{results['speakers_migrated']} would be migrated"
-            }
-        else:
-            return {
-                "status": "migration_complete",
-                "results": results,
-                "message": f"Migration complete: {results['speakers_migrated']} speakers migrated, "
-                          f"{results['speakers_merged']} duplicates merged"
-            }
-            
-    except Exception as e:
-        logger.error(f"Migration failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/speakers/enhanced_stats")
@@ -2062,36 +2627,34 @@ async def enhanced_speaker_feedback(corrections: Dict[str, str]):
     
     Args:
         corrections: Mapping of old speaker IDs/names to new display names
-        
+
     Returns:
         Enhanced feedback processing results
     """
-    if enhanced_speaker_integration is None:
-        # Fallback to legacy feedback processing
-        logger.warning("Enhanced integration not available, falling back to legacy processing")
-        return await provide_speaker_name_mapping_feedback(corrections)
-    
+    database = require_speaker_db()
+
+    if not corrections:
+        raise HTTPException(status_code=400, detail="No corrections supplied")
+
     try:
-        results = await enhanced_speaker_integration.enhanced_speaker_correction_feedback(corrections)
-        
+        if enhanced_speaker_integration is not None:
+            results = await enhanced_speaker_integration.enhanced_speaker_correction_feedback(corrections)
+        else:
+            # The integration layer is a thin wrapper; go straight to the database.
+            results = await asyncio.to_thread(database.send_feedback_for_learning, corrections)
+
         return {
             "status": "enhanced_feedback_complete",
             "results": results,
             "enhanced_processing": True,
-            "message": f"Processed {len(corrections)} corrections using enhanced database"
+            "message": f"Processed {len(corrections)} corrections using the v2 speaker database"
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Enhanced feedback failed: {e}")
-        # Fallback to legacy processing
-        logger.info("Falling back to legacy feedback processing")
-        try:
-            legacy_results = await provide_speaker_name_mapping_feedback(corrections)
-            legacy_results["fallback_used"] = True
-            return legacy_results
-        except Exception as fallback_error:
-            logger.error(f"Legacy fallback also failed: {fallback_error}")
-            raise HTTPException(status_code=500, detail=f"Both enhanced and legacy feedback failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/speakers/save_transcription_enhanced")
@@ -2142,105 +2705,66 @@ async def save_transcription_with_enhanced_corrections(
 @app.get("/speakers/system_status")
 async def get_speaker_system_status():
     """
-    Get comprehensive status of the speaker management system
-    
-    Returns:
-        Status of both legacy and enhanced systems, migration recommendations
+    Status of the speaker identification system.
+
+    There is one speaker system: the v2 database plus the pyannote embedding
+    model. The legacy SpeechBrain manager has been removed, so "legacy_system"
+    is reported as permanently unavailable for any old client still reading it.
     """
     try:
+        database = enhanced_speaker_database
+
+        speakers = database.get_all_speakers() if database is not None else []
+        total_embeddings = sum(int(s['embedding_count']) for s in speakers)
+
         status = {
             "legacy_system": {
-                "available": speaker_embedding_manager is not None,
+                "available": False,
                 "speaker_count": 0,
-                "total_embeddings": 0
+                "total_embeddings": 0,
+                "note": "Legacy SpeechBrain speaker manager removed - v2 database is the only store"
             },
             "enhanced_system": {
-                "available": enhanced_speaker_integration is not None,
-                "speaker_count": 0,
-                "migration_completed": False
+                "available": database is not None,
+                "speaker_count": len(speakers),
+                "total_embeddings": total_embeddings,
+                "enrolled_speakers": sum(1 for s in speakers if s['is_enrolled']),
+                "verified_speakers": sum(1 for s in speakers if s['is_verified']),
+                "auto_speakers": sum(1 for s in speakers if s['source_type'] == 'auto'),
+                "migration_completed": True,
+            },
+            "identification": {
+                "embedding_model": EMBEDDING_MODEL,
+                "embedding_model_loaded": embedding_model is not None,
+                "match_threshold": SPEAKER_MATCH_THRESHOLD,
+                "min_speaker_audio_seconds": MIN_SPEAKER_AUDIO_SECONDS,
+                "max_speaker_audio_seconds": MAX_SPEAKER_AUDIO_SECONDS,
+                "active": embedding_model is not None and database is not None,
             },
             "recommendations": []
         }
-        
-        # Check legacy system
-        if speaker_embedding_manager:
-            legacy_speakers = speaker_embedding_manager.speaker_profiles
-            status["legacy_system"]["speaker_count"] = len(legacy_speakers)
-            status["legacy_system"]["total_embeddings"] = sum(
-                len(profile.embeddings) for profile in legacy_speakers.values()
+
+        if database is None:
+            status["recommendations"].append("Speaker database failed to load - speaker naming is disabled")
+        if embedding_model is None:
+            status["recommendations"].append(
+                "Embedding model not loaded - transcripts will carry diarization labels only"
             )
-        
-        # Check enhanced system
-        if enhanced_speaker_integration:
-            enhanced_stats = await enhanced_speaker_integration.get_enhanced_speaker_stats()
-            status["enhanced_system"]["speaker_count"] = enhanced_stats["total_speakers"]
-            status["enhanced_system"]["migration_completed"] = enhanced_stats["migration_completed"]
-        
-        # Generate recommendations
-        if (status["legacy_system"]["speaker_count"] > 0 and 
-            status["enhanced_system"]["speaker_count"] == 0):
-            status["recommendations"].append("Migration to enhanced database recommended")
-        
-        if (status["legacy_system"]["speaker_count"] > 0 and 
-            status["enhanced_system"]["speaker_count"] > 0 and
-            not status["enhanced_system"]["migration_completed"]):
-            status["recommendations"].append("Complete migration to enhanced database")
-        
-        if status["enhanced_system"]["speaker_count"] > 0:
-            status["recommendations"].append("Enhanced speaker management active")
-        
+        if database is not None and embedding_model is not None:
+            status["recommendations"].append("Persistent speaker identification active")
+        if total_embeddings == 0 and len(speakers) > 0:
+            status["recommendations"].append(
+                "No voiceprints stored yet - enroll speakers or correct names on audio to start learning"
+            )
+
         return {
             "status": "system_status_retrieved",
             "system_status": status,
             "timestamp": datetime.now().isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Helper function for legacy fallback
-async def provide_speaker_name_mapping_feedback(corrections: Dict[str, str]):
-    """Legacy speaker name mapping feedback - for fallback use"""
-    if speaker_embedding_manager is None:
-        raise HTTPException(status_code=503, detail="Speaker embedding manager not available")
-    
-    try:
-        results = {
-            'processed_corrections': 0,
-            'speakers_created': 0,
-            'speakers_merged': 0,
-            'speakers_renamed': 0,
-            'errors': []
-        }
-        
-        for old_speaker_id, new_display_name in corrections.items():
-            try:
-                existing_speaker_id = speaker_embedding_manager.get_speaker_by_name(new_display_name)
-                
-                if existing_speaker_id and existing_speaker_id != old_speaker_id:
-                    # Merge speakers
-                    if speaker_embedding_manager.merge_speakers(old_speaker_id, existing_speaker_id):
-                        results['speakers_merged'] += 1
-                elif old_speaker_id in speaker_embedding_manager.speaker_profiles:
-                    # Rename existing speaker
-                    if speaker_embedding_manager.update_speaker_name(old_speaker_id, new_display_name):
-                        results['speakers_renamed'] += 1
-                
-                results['processed_corrections'] += 1
-                
-            except Exception as e:
-                results['errors'].append(f"Error processing {old_speaker_id}: {e}")
-        
-        return {
-            "status": "legacy_feedback_processed",
-            "results": results,
-            "enhanced_processing": False
-        }
-        
-    except Exception as e:
-        logger.error(f"Legacy feedback processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

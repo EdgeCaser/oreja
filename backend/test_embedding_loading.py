@@ -8,7 +8,9 @@ import json
 import numpy as np
 from pathlib import Path
 from speaker_database_v2 import EnhancedSpeakerDatabase
-from speaker_embeddings import OfflineSpeakerEmbeddingManager
+# NOTE: speaker_embeddings.OfflineSpeakerEmbeddingManager (the old SpeechBrain
+# "legacy system") has been removed. EnhancedSpeakerDatabase is now the only
+# speaker store, so the legacy-vs-enhanced comparison below is gone.
 
 def test_embedding_loading():
     """Test the embedding loading process"""
@@ -47,23 +49,11 @@ def test_embedding_loading():
     except Exception as e:
         print(f"❌ Enhanced database loading failed: {e}")
     
-    # Test 2: Legacy System Loading
-    print(f"\n2. Testing Legacy System Embedding Loading...")
-    try:
-        legacy_manager = OfflineSpeakerEmbeddingManager()
-        legacy_stats = legacy_manager.get_speaker_stats()
-        
-        print(f"✅ Legacy system loaded {legacy_stats['total_speakers']} speakers")
-        print(f"   Total embeddings: {legacy_stats['total_embeddings']}")
-        print(f"   Average confidence: {legacy_stats['average_confidence']:.3f}")
-        
-        # List speakers in legacy system
-        for speaker_id, profile in legacy_manager.speaker_profiles.items():
-            print(f"   - {profile.name}: {len(profile.embeddings)} embeddings")
-            
-    except Exception as e:
-        print(f"❌ Legacy system loading failed: {e}")
-    
+    # Test 2: Legacy System Loading - removed
+    print(f"\n2. Legacy System Embedding Loading... SKIPPED")
+    print("   The legacy OfflineSpeakerEmbeddingManager has been removed;")
+    print("   EnhancedSpeakerDatabase is the only speaker store.")
+
     # Test 3: Cross-System Comparison
     print(f"\n3. Cross-System Embedding Comparison...")
     
@@ -75,34 +65,28 @@ def test_embedding_loading():
         
         print(f"NPY files on disk: {len(npy_files)}")
         print(f"Enhanced DB speakers: {len(speakers) if 'speakers' in locals() else 'Failed to load'}")
-        print(f"Legacy system speakers: {len(legacy_manager.speaker_profiles) if 'legacy_manager' in locals() else 'Failed to load'}")
-        
-        # Check if there are discrepancies
-        if 'speakers' in locals() and 'legacy_manager' in locals():
+
+        # Check if there are discrepancies between the record store and disk
+        if 'speakers' in locals():
             enhanced_ids = {s['speaker_id'] for s in speakers}
-            legacy_ids = set(legacy_manager.speaker_profiles.keys())
             file_ids = {f.stem for f in npy_files}
-            
+
             print(f"\nSystem Coverage Analysis:")
             print(f"   Enhanced DB IDs: {len(enhanced_ids)}")
-            print(f"   Legacy system IDs: {len(legacy_ids)}")
             print(f"   NPY file IDs: {len(file_ids)}")
-            
+
             # Find mismatches
-            only_in_enhanced = enhanced_ids - legacy_ids - file_ids
-            only_in_legacy = legacy_ids - enhanced_ids - file_ids
-            only_in_files = file_ids - enhanced_ids - legacy_ids
-            
+            only_in_enhanced = enhanced_ids - file_ids
+            only_in_files = file_ids - enhanced_ids
+
             if only_in_enhanced:
-                print(f"   ⚠️  Only in Enhanced DB: {only_in_enhanced}")
-            if only_in_legacy:
-                print(f"   ⚠️  Only in Legacy system: {only_in_legacy}")
+                print(f"   ⚠️  Only in Enhanced DB (no embedding file): {only_in_enhanced}")
             if only_in_files:
-                print(f"   ⚠️  Only in NPY files: {only_in_files}")
-                
-            if not (only_in_enhanced or only_in_legacy or only_in_files):
-                print(f"   ✅ All systems have consistent speaker coverage")
-        
+                print(f"   ⚠️  Only in NPY files (orphaned): {only_in_files}")
+
+            if not (only_in_enhanced or only_in_files):
+                print(f"   ✅ Records and embedding files are consistent")
+
     except Exception as e:
         print(f"❌ Cross-system comparison failed: {e}")
     

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import Mock, patch, AsyncMock
 import numpy as np
 
-from server import app, load_models, load_audio_from_bytes, merge_transcription_and_diarization
+from server import app, initialize_models, load_audio_from_bytes, merge_transcription_and_diarization
 
 
 @pytest.fixture

@@ -123,19 +123,35 @@ def verify_batch_transcriber_setup():
     print("=" * 60)
     
     try:
-        from speaker_embeddings import OfflineSpeakerEmbeddingManager
-        
-        # This should load from speaker_data_v2_legacy_compatibility
-        speaker_manager = OfflineSpeakerEmbeddingManager()
-        
-        print(f"✅ Batch transcriber loaded {len(speaker_manager.speaker_profiles)} speakers")
-        
-        for speaker_id, profile in speaker_manager.speaker_profiles.items():
-            print(f"   - {profile.name}: {len(profile.embeddings)} embeddings")
-        
+        # speaker_embeddings.OfflineSpeakerEmbeddingManager (which used to load
+        # this legacy directory) no longer exists - verify the written files
+        # directly instead.
+        target_dir = Path("speaker_data_v2_legacy_compatibility")
+        target_profiles = target_dir / "speaker_profiles.json"
+        target_embeddings = target_dir / "embeddings"
+
+        if not target_profiles.exists():
+            print(f"❌ Missing {target_profiles}")
+            return False
+
+        with open(target_profiles, 'r', encoding='utf-8') as f:
+            profiles = json.load(f)
+
+        print(f"✅ Batch transcriber database holds {len(profiles)} speakers")
+
+        for speaker_id, profile in profiles.items():
+            embedding_file = target_embeddings / f"{speaker_id}.npy"
+            count = 0
+            if embedding_file.exists():
+                try:
+                    count = len(np.load(embedding_file, allow_pickle=True))
+                except Exception:
+                    count = 0
+            print(f"   - {profile.get('name', speaker_id)}: {count} embeddings")
+
         print(f"✅ Batch Transcriber database verification successful!")
         return True
-        
+
     except Exception as e:
         print(f"❌ Batch transcriber verification failed: {e}")
         return False

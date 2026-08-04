@@ -181,7 +181,9 @@ class TestEnhancedSpeakerDatabase:
         
         assert len(enhanced_db.speaker_embeddings[speaker_id]) == 2
         assert len(enhanced_db.confidence_scores[speaker_id]) == 2
-        assert np.array_equal(enhanced_db.speaker_embeddings[speaker_id][0], embedding1)
+        # add_embedding() stores vectors through as_vector(), which casts to
+        # float32 - compare with a tolerance rather than exact equality.
+        assert np.allclose(enhanced_db.speaker_embeddings[speaker_id][0], embedding1, atol=1e-6)
         assert enhanced_db.confidence_scores[speaker_id][0] == 0.85
         assert enhanced_db.confidence_scores[speaker_id][1] == 0.92
     
@@ -339,7 +341,8 @@ class TestEnhancedSpeakerDatabase:
         # Check embeddings loaded
         assert len(db2.speaker_embeddings[speaker_id]) == 1
         assert len(db2.confidence_scores[speaker_id]) == 1
-        assert np.array_equal(db2.speaker_embeddings[speaker_id][0], embedding)
+        # Stored (and round-tripped through .npy) as float32 - see test_add_embedding.
+        assert np.allclose(db2.speaker_embeddings[speaker_id][0], embedding, atol=1e-6)
         assert db2.confidence_scores[speaker_id][0] == 0.87
     
     @pytest.mark.unit

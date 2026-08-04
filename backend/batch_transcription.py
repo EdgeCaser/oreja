@@ -18,10 +18,17 @@ import torch
 import torchaudio
 from torchaudio.transforms import Resample
 import requests
-from scipy.spatial.distance import cosine
 
-from speaker_embeddings import OfflineSpeakerEmbeddingManager
-from server import load_audio_from_bytes, run_transcription
+# Speaker identity comes from the v2 database plus server.py's pyannote embedding
+# model - the same single embedding system the live server uses, so voiceprints
+# learned here are usable there and vice versa.
+from speaker_database_v2 import EnhancedSpeakerDatabase
+from server import (
+    extract_embedding_from_audio,
+    load_audio_from_bytes,
+    prepare_waveform,
+    run_transcription,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,17 +39,42 @@ class BatchTranscriptionProcessor:
     Batch processor for recorded calls that leverages existing speaker embeddings
     """
     
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, backend_url: str = "http://127.0.0.1:8000",
+                 speaker_data_dir: str = None):
         self.backend_url = backend_url
-        self.speaker_manager = OfflineSpeakerEmbeddingManager()
         self.results: List[Dict[str, Any]] = []
-        
+
         # Configuration
         self.SAMPLE_RATE = 16000
         self.MIN_SEGMENT_LENGTH = 0.5  # seconds
         self.CONFIDENCE_THRESHOLD = 0.7
         self.SIMILARITY_THRESHOLD = 0.75
-        
+
+        # The same on-disk speaker database the live server uses, so batch runs
+        # both benefit from and contribute to the user's enrolled speakers.
+        data_dir = speaker_data_dir or os.getenv("OREJA_SPEAKER_DATA_DIR", "speaker_data_v2")
+        try:
+            self.speaker_db = EnhancedSpeakerDatabase(data_dir)
+        except Exception as e:
+            logger.warning(f"Speaker database unavailable ({e}); speakers stay as diarized")
+            self.speaker_db = None
+
+    def _embed_segment(self, segment_waveform: torch.Tensor, sample_rate: int):
+        """
+        Extract one voiceprint from a segment crop.
+
+        Returns None whenever the embedding model is not loaded in this process
+        (server.initialize_models() has not run, or pyannote is unavailable), so
+        every caller degrades to diarization-only speakers instead of failing.
+        """
+        try:
+            waveform, sample_rate = prepare_waveform(segment_waveform, sample_rate)
+            return extract_embedding_from_audio(waveform, sample_rate)
+        except Exception as e:
+            logger.debug(f"Embedding extraction failed: {e}")
+            return None
+
+
     def process_recording_with_progress(self, 
                                       audio_path: Path,
                                       output_dir: Optional[Path] = None,
@@ -369,8 +401,15 @@ class BatchTranscriptionProcessor:
         enhanced_segments = []
         speaker_anonymization_map = {}  # For privacy mode
         anonymous_speaker_counter = 0
-        
-        for segment in transcription_result.get('segments', []):
+
+        # run_transcription() (server.py) returns per-chunk ASR output under
+        # "chunks" (timestamp/start/end/text/words) - there is no diarization
+        # pass in this batch pipeline, so "chunks" IS the segment list here.
+        # Fall back to "segments" too for callers that already pre-merged
+        # diarization (e.g. a transcript re-loaded from a saved JSON file).
+        raw_segments = transcription_result.get('segments') or transcription_result.get('chunks') or []
+
+        for segment in raw_segments:
             start_time = segment.get('start', 0)
             end_time = segment.get('end', 0)
             text = segment.get('text', '')
@@ -467,18 +506,30 @@ class BatchTranscriptionProcessor:
     
     def _identify_speaker_from_segment(self, segment_waveform: torch.Tensor, sample_rate: int) -> Tuple[str, float]:
         """
-        Identify speaker using existing embeddings
+        Identify the speaker of one segment against the persistent v2 database.
+
+        Returns ("Unknown", 0.0) when identification is not possible - no
+        database, no embedding model, or an unusable crop - so callers keep the
+        diarization label rather than inventing one. Nothing is written to the
+        database here: batch identification is read-only, and learning happens
+        explicitly in _improve_speaker_models().
         """
         try:
-            # Extract speaker embeddings from segment
-            segment_numpy = segment_waveform.squeeze().numpy()
-            
-            # Use the speaker embeddings system to identify
-            # This would interface with your existing speaker identification
-            
-            # For now, return a placeholder
-            return "Unknown", 0.0
-            
+            if self.speaker_db is None:
+                return "Unknown", 0.0
+
+            embedding = self._embed_segment(segment_waveform, sample_rate)
+            if embedding is None:
+                return "Unknown", 0.0
+
+            speaker_id, display_name, confidence = self.speaker_db.identify_speaker(
+                embedding, auto_create=False, learn=False, save=False
+            )
+            if speaker_id is None:
+                return "Unknown", float(confidence)
+
+            return display_name, float(confidence)
+
         except Exception as e:
             logger.error(f"Error identifying speaker: {e}")
             return "Unknown", 0.0
@@ -515,37 +566,49 @@ class BatchTranscriptionProcessor:
                                waveform: torch.Tensor,
                                sample_rate: int):
         """
-        Use the recording to improve existing speaker models
+        Feed high-confidence segments back into the persistent speaker database.
+
+        Only segments that were identified by voiceprint at >= 0.8 confidence are
+        used: anything weaker would teach the database its own guesses.
         """
-        improvement_count = 0
-        
+        if self.speaker_db is None:
+            return
+
+        vectors_by_speaker: Dict[str, List[Any]] = {}
+
         for segment in transcription_result.get('segments', []):
-            if segment.get('identification_method') == 'embedding_enhanced':
-                speaker_name = segment.get('enhanced_speaker')
-                confidence = segment.get('speaker_confidence', 0)
-                
-                # Only use high-confidence segments for improvement
-                if confidence >= 0.8 and speaker_name and speaker_name != 'Unknown':
-                    start_time = segment.get('start', 0)
-                    end_time = segment.get('end', 0)
-                    
-                    # Extract segment audio
-                    start_sample = int(start_time * sample_rate)
-                    end_sample = int(end_time * sample_rate)
-                    
-                    if end_sample > start_sample and end_sample <= waveform.shape[1]:
-                        segment_waveform = waveform[:, start_sample:end_sample]
-                        audio_numpy = segment_waveform.squeeze().numpy()
-                        
-                        # Provide feedback to improve the model
-                        success = self.speaker_manager.provide_correction_feedback(
-                            speaker_name, audio_numpy
-                        )
-                        
-                        if success:
-                            improvement_count += 1
-                            logger.debug(f"Improved model for {speaker_name}")
-        
+            if segment.get('identification_method') != 'embedding_enhanced':
+                continue
+
+            speaker_name = segment.get('enhanced_speaker')
+            confidence = segment.get('speaker_confidence', 0)
+
+            if confidence < 0.8 or not speaker_name or speaker_name == 'Unknown':
+                continue
+
+            start_time = segment.get('start', 0)
+            end_time = segment.get('end', 0)
+            start_sample = int(start_time * sample_rate)
+            end_sample = int(end_time * sample_rate)
+
+            if not (end_sample > start_sample and end_sample <= waveform.shape[-1]):
+                continue
+
+            embedding = self._embed_segment(waveform[:, start_sample:end_sample], sample_rate)
+            if embedding is not None:
+                vectors_by_speaker.setdefault(speaker_name, []).append(embedding)
+
+        improvement_count = 0
+        for speaker_name, vectors in vectors_by_speaker.items():
+            try:
+                self.speaker_db.enroll_speaker(
+                    speaker_name, vectors, confidence=0.9, source_type="corrected"
+                )
+                improvement_count += len(vectors)
+                logger.debug(f"Improved model for {speaker_name} with {len(vectors)} sample(s)")
+            except Exception as e:
+                logger.warning(f"Could not update speaker '{speaker_name}': {e}")
+
         if improvement_count > 0:
             logger.info(f"Improved speaker models with {improvement_count} segments")
     
