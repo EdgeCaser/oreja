@@ -1,0 +1,18 @@
+# Oreja custom vocabulary
+#
+# One term per line. Lines starting with '#' are ignored.
+# Put here the words Whisper keeps getting wrong: product names, company names,
+# technical jargon, unusual personal names, acronyms as you want them spelled.
+#
+# These terms are fed to the ASR decoder as a glossary prompt on every chunk,
+# which strongly biases it toward these exact spellings. Names of known speakers
+# from the speaker database are appended automatically (most recently heard
+# first), so you do not need to repeat those here.
+#
+# Changes take effect immediately - the file is re-read when it changes, no
+# backend restart needed. Set OREJA_VOCAB_FILE="" in backend/.env to disable.
+#
+# Examples (delete these and add your own):
+# Oreja
+# pyannote
+# faster-whisper

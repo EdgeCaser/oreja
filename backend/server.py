@@ -23,6 +23,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -100,8 +101,41 @@ WHISPER_DEVICE_SETTING = os.getenv("OREJA_DEVICE", "auto")
 # Empty/unset -> float16 on cuda, int8 on cpu.
 WHISPER_COMPUTE_TYPE_SETTING = os.getenv("OREJA_COMPUTE_TYPE", "")
 # Empty/unset -> auto-detect the language (applies to ALL audio lengths).
+# Per-request `language` query parameters on /transcribe override this.
 WHISPER_LANGUAGE = os.getenv("OREJA_LANGUAGE") or None
 WHISPER_BEAM_SIZE = int(os.getenv("OREJA_BEAM_SIZE", "5"))
+
+# Sentinel distinguishing "caller said nothing about language" (use the server-wide
+# WHISPER_LANGUAGE default) from an explicit None (force auto-detection).
+_LANGUAGE_DEFAULT = object()
+
+# --- Decode-biasing initial prompt ------------------------------------------
+# Whisper's initial_prompt is the strongest lever for proper nouns and jargon:
+# terms present in the prompt are far more likely to be spelled correctly. The
+# prompt is assembled from (a) a user-editable vocabulary file, one term per
+# line ('#' comments allowed), and (b) the display names of known speakers from
+# the voiceprint database. OREJA_INITIAL_PROMPT overrides both with a fully
+# custom static prompt. Set OREJA_VOCAB_FILE="" to disable the file part and
+# OREJA_PROMPT_SPEAKER_NAMES=0 to disable the names part.
+INITIAL_PROMPT_OVERRIDE = os.getenv("OREJA_INITIAL_PROMPT") or None
+VOCAB_FILE = os.getenv("OREJA_VOCAB_FILE", "vocabulary.txt")
+PROMPT_SPEAKER_NAMES = os.getenv("OREJA_PROMPT_SPEAKER_NAMES", "1").lower() in ("1", "true", "yes")
+# Whisper truncates the prompt to 224 tokens itself; cap characters conservatively
+# below that so truncation never lands mid-name.
+_PROMPT_MAX_CHARS = 700
+_PROMPT_MAX_NAMES = 20
+_PROMPT_NAMES_TTL_SECONDS = 60.0
+
+# --- Accuracy mode (offline file transcription) ------------------------------
+# The Transcribe File path has no latency pressure, so it can spend more compute
+# per second of audio than the live 3-15s chunk path. accuracy=true on /transcribe
+# raises the beam size, and - only when OREJA_FILE_MODEL is set - decodes with a
+# separate, stronger model (e.g. "large-v3" while live chunks stay on
+# "large-v3-turbo"). The file model is lazy-loaded on the first accuracy request
+# and kept resident; loading failure falls back to the main model with a warning
+# rather than failing the request.
+WHISPER_FILE_MODEL = os.getenv("OREJA_FILE_MODEL", "")
+WHISPER_FILE_BEAM_SIZE = int(os.getenv("OREJA_FILE_BEAM_SIZE", "10"))
 VAD_MIN_SILENCE_MS = int(os.getenv("OREJA_VAD_MIN_SILENCE_MS", "500"))
 
 # Hallucination gating thresholds, applied uniformly to every segment.
@@ -236,6 +270,42 @@ def _load_faster_whisper(model_name: str, asr_device: str, compute_type: str):
         compute_type=compute_type,
         download_root=os.getenv("OREJA_MODEL_CACHE") or None,
     )
+
+
+# Separate ASR model for accuracy-mode (file) requests. None until the first
+# accuracy request lazy-loads it; False after a failed load so we do not retry
+# (and re-log) on every request.
+_file_whisper_model = None
+
+
+def _get_file_whisper_model():
+    """
+    The model accuracy-mode requests decode with: the OREJA_FILE_MODEL instance
+    when configured and loadable, else the main model. Called with _whisper_lock
+    held, which is what makes the lazy load race-free.
+    """
+    global _file_whisper_model
+    if not WHISPER_FILE_MODEL or WHISPER_FILE_MODEL == WHISPER_MODEL:
+        return whisper_model
+    if _file_whisper_model is None:
+        asr_device = resolve_asr_device()
+        compute_type = resolve_compute_type(asr_device)
+        try:
+            logger.info(
+                f"Loading accuracy-mode model: {WHISPER_FILE_MODEL} "
+                f"(device={asr_device}, compute_type={compute_type})"
+            )
+            _file_whisper_model = _load_faster_whisper(
+                WHISPER_FILE_MODEL, asr_device, compute_type
+            )
+            logger.info("✓ accuracy-mode model loaded successfully")
+        except Exception as e:
+            logger.warning(
+                f"Failed to load accuracy-mode model '{WHISPER_FILE_MODEL}': {e}; "
+                f"falling back to the main model for file transcription"
+            )
+            _file_whisper_model = False
+    return _file_whisper_model or whisper_model
 
 
 def initialize_models():
@@ -1241,11 +1311,38 @@ async def delete_speaker(speaker_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _resolve_request_language(language: Optional[str]):
+    """
+    Map a /transcribe `language` query parameter onto what faster-whisper's
+    transcribe() takes. Absent/empty defers to the server-wide OREJA_LANGUAGE
+    default (returns the _LANGUAGE_DEFAULT sentinel); "auto" forces per-request
+    auto-detection (returns None) even when a server default is configured;
+    anything else must be a language code faster-whisper knows.
+    """
+    if language is None or not language.strip():
+        return _LANGUAGE_DEFAULT
+    code = language.strip().lower()
+    if code == "auto":
+        return None
+    try:
+        from faster_whisper.tokenizer import _LANGUAGE_CODES  # noqa: PLC0415 - lazy, like the model import
+        valid = code in _LANGUAGE_CODES
+    except ImportError:
+        # Version without the constant: accept anything code-shaped and let the
+        # decoder be the authority.
+        valid = code.isalpha() and 2 <= len(code) <= 3
+    if not valid:
+        raise HTTPException(status_code=400, detail=f"Unsupported language code: {code}")
+    return code
+
+
 @app.post("/transcribe")
 async def transcribe_audio(
     audio: UploadFile = File(...),
     include_analysis: bool = False,
     source: Optional[str] = None,
+    language: Optional[str] = None,
+    accuracy: bool = False,
 ) -> Dict[str, Any]:
     """
     Transcribe and diarize audio file, optionally with sentiment analysis and audio features.
@@ -1257,6 +1354,16 @@ async def transcribe_audio(
             source never auto-match or reinforce profiles first heard on the
             other, so a far-end conference voice cannot contaminate the local
             user's voiceprint. Omitted/unknown values match all profiles.
+        language: QUERY PARAMETER (same FastAPI caveat as include_analysis).
+            A Whisper language code ("en", "es", ...) pins the decode to that
+            language for this request; "auto" forces per-request auto-detection;
+            omitted/empty defers to the server-wide OREJA_LANGUAGE default.
+            Unknown codes are rejected with a 400.
+        accuracy: QUERY PARAMETER. Spend more compute for a better transcript:
+            beam size OREJA_FILE_BEAM_SIZE (default 10) instead of the live
+            beam, decoded with OREJA_FILE_MODEL when configured. Meant for the
+            offline file path - a live 5-second chunk gains little and pays
+            real latency.
         include_analysis: Run the sentiment/conversation-analysis enhancement
             inline. QUERY PARAMETER ONLY (POST /transcribe?include_analysis=true):
             FastAPI treats a bare `bool` alongside `File(...)` as a query
@@ -1306,11 +1413,15 @@ async def transcribe_audio(
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
+        resolved_language = _resolve_request_language(language)
+
         # Run transcription and diarization concurrently. Both helpers dispatch the
         # blocking model call onto a worker thread (asyncio.to_thread), so the event
         # loop stays responsive and the two models genuinely overlap.
         transcription_task = asyncio.create_task(
-            run_transcription(waveform, sample_rate)
+            run_transcription(
+                waveform, sample_rate, language=resolved_language, accuracy=accuracy
+            )
         )
 
         if diarization_pipeline is not None:
@@ -1988,23 +2099,128 @@ def _extract_words(segment: Any) -> List[Dict[str, Any]]:
     return words
 
 
-def _transcribe_sync(audio_array: "np.ndarray") -> Dict[str, Any]:
+# Vocabulary file cache: (mtime, terms). Re-read only when the file changes.
+_vocab_cache: tuple = (None, [])
+# Speaker-name cache: (fetched_at_monotonic, names). get_all_speakers() walks every
+# record, so refresh at most once per _PROMPT_NAMES_TTL_SECONDS rather than per chunk.
+_prompt_names_cache: tuple = (0.0, [])
+
+
+def _load_vocab_terms() -> List[str]:
+    """Read the vocabulary file (one term per line, '#' comments), mtime-cached."""
+    global _vocab_cache
+    if not VOCAB_FILE:
+        return []
+    try:
+        mtime = os.path.getmtime(VOCAB_FILE)
+    except OSError:
+        return []  # absent file simply means no custom vocabulary
+    if _vocab_cache[0] == mtime:
+        return _vocab_cache[1]
+    try:
+        with open(VOCAB_FILE, "r", encoding="utf-8") as handle:
+            terms = [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.strip().startswith("#")
+            ]
+    except OSError as e:
+        logger.warning(f"Could not read vocabulary file {VOCAB_FILE}: {e}")
+        return _vocab_cache[1]
+    _vocab_cache = (mtime, terms)
+    logger.info(f"Loaded {len(terms)} vocabulary terms from {VOCAB_FILE}")
+    return terms
+
+
+_AUTO_SPEAKER_NAME = re.compile(r"^(speaker[\s_]|speaker$|auto_speaker)", re.IGNORECASE)
+
+
+def _speaker_prompt_names() -> List[str]:
+    """
+    Display names of known speakers, most recently heard first, capped at
+    _PROMPT_MAX_NAMES. Auto-generated placeholders ("Speaker 3", "Speaker
+    SPEAKER_00") are skipped - they carry no spelling information. TTL-cached.
+    """
+    global _prompt_names_cache
+    if not PROMPT_SPEAKER_NAMES or enhanced_speaker_database is None:
+        return []
+    now = time.monotonic()
+    if now - _prompt_names_cache[0] < _PROMPT_NAMES_TTL_SECONDS:
+        return _prompt_names_cache[1]
+    try:
+        speakers = enhanced_speaker_database.get_all_speakers()
+    except Exception as e:
+        logger.warning(f"Could not list speakers for prompt: {e}")
+        return _prompt_names_cache[1]
+    named = [
+        s for s in speakers
+        if s.get("display_name") and not _AUTO_SPEAKER_NAME.match(s["display_name"].strip())
+    ]
+    named.sort(key=lambda s: s.get("last_seen") or "", reverse=True)
+    names = [s["display_name"].strip() for s in named[:_PROMPT_MAX_NAMES]]
+    _prompt_names_cache = (now, names)
+    return names
+
+
+def _build_initial_prompt() -> Optional[str]:
+    """
+    Assemble the decode-biasing prompt, or None when there is nothing to bias
+    with. Kept under _PROMPT_MAX_CHARS so Whisper's own 224-token truncation
+    never cuts a term in half.
+    """
+    if INITIAL_PROMPT_OVERRIDE:
+        return INITIAL_PROMPT_OVERRIDE[:_PROMPT_MAX_CHARS]
+
+    terms = list(dict.fromkeys(_load_vocab_terms() + _speaker_prompt_names()))
+    if not terms:
+        return None
+
+    prompt = "Glossary: " + ", ".join(terms) + "."
+    while len(prompt) > _PROMPT_MAX_CHARS and terms:
+        terms.pop()  # drop least-recent names / last vocab lines first
+        prompt = "Glossary: " + ", ".join(terms) + "."
+    return prompt if terms else None
+
+
+def _transcribe_sync(
+    audio_array: "np.ndarray", language=_LANGUAGE_DEFAULT, accuracy: bool = False
+) -> Dict[str, Any]:
     """
     Blocking faster-whisper call. Runs on a worker thread and holds the ASR lock
     for its whole duration so concurrent requests queue rather than interleave.
+
+    language: a Whisper language code pins the decode; None forces auto-detection;
+    the _LANGUAGE_DEFAULT sentinel (i.e. caller said nothing) uses the server-wide
+    WHISPER_LANGUAGE default.
+
+    accuracy: spend more compute for a better transcript (offline file path):
+    higher beam size, and the OREJA_FILE_MODEL model when configured.
     """
     if whisper_model is None:
         raise ValueError("Whisper model not loaded")
 
+    effective_language = WHISPER_LANGUAGE if language is _LANGUAGE_DEFAULT else language
+    beam_size = WHISPER_FILE_BEAM_SIZE if accuracy else WHISPER_BEAM_SIZE
+
+    # Bias the decoder toward known names and domain vocabulary. Live 3-15s chunks
+    # fit one 30s decode window, so the prompt covers the whole chunk; on long files
+    # it applies to the first window (condition_on_previous_text=False drops it for
+    # later windows, which is the accepted trade for hallucination-loop safety).
+    initial_prompt = _build_initial_prompt()
+
     with _whisper_lock:
+        # Model choice must happen under the lock: the accuracy model lazy-loads on
+        # first use, and the lock is what makes that load race-free.
+        model = _get_file_whisper_model() if accuracy else whisper_model
         with torch.inference_mode():
-            segment_iter, info = whisper_model.transcribe(
+            segment_iter, info = model.transcribe(
                 audio_array,
-                language=WHISPER_LANGUAGE,          # None => auto-detect, for ALL lengths
+                language=effective_language,        # None => auto-detect, for ALL lengths
                 task="transcribe",
-                beam_size=WHISPER_BEAM_SIZE,
+                beam_size=beam_size,
                 word_timestamps=True,               # required for speaker attribution
                 condition_on_previous_text=False,   # stops cross-segment hallucination loops
+                initial_prompt=initial_prompt,      # None when there is nothing to bias with
                 vad_filter=True,                    # Silero VAD, built into faster-whisper
                 vad_parameters={"min_silence_duration_ms": VAD_MIN_SILENCE_MS},
             )
@@ -2065,12 +2281,19 @@ def _transcribe_sync(audio_array: "np.ndarray") -> Dict[str, Any]:
     }
 
 
-async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[str, Any]:
+async def run_transcription(
+    waveform: torch.Tensor, sample_rate: int, language=_LANGUAGE_DEFAULT,
+    accuracy: bool = False,
+) -> Dict[str, Any]:
     """
     Transcribe a waveform with faster-whisper.
 
     Audio of any length is handed to the model as-is: faster-whisper does its own
     windowing and VAD. The only pre-check is a cheap RMS silence fast-path.
+
+    language: a Whisper language code pins the decode; None forces auto-detection;
+    omitted (the _LANGUAGE_DEFAULT sentinel) uses the server-wide default, which
+    keeps existing callers (batch_transcription.py, enhanced integrations) unchanged.
 
     Returns a dict with 'chunks' (each carrying 'timestamp', 'text' and word-level
     timings) and 'text'. When nothing survives, 'skipped_reason' is present.
@@ -2111,7 +2334,7 @@ async def run_transcription(waveform: torch.Tensor, sample_rate: int) -> Dict[st
         )
 
         # Off the event loop; the ASR lock inside serializes concurrent requests.
-        result = await asyncio.to_thread(_transcribe_sync, audio_array)
+        result = await asyncio.to_thread(_transcribe_sync, audio_array, language, accuracy)
 
         if not result["chunks"]:
             logger.info("No speech survived VAD / hallucination gating")

@@ -54,6 +54,13 @@ public class AppSettings
     // --- Audio ---
     public float MicGain { get; set; } = 1.0f;
 
+    // --- Transcription language: a Whisper language code ("en", "es", ...) pins the decode
+    // to that language for every chunk; "auto" lets the backend detect per chunk, which is
+    // the better mode for sessions that mix languages. Defaults to English - per-chunk
+    // auto-detection occasionally misfires on short/noisy chunks and produces garbage in
+    // the wrong language, so pinning is the accuracy-preserving default. ---
+    public string Language { get; set; } = "en";
+
     // --- Keyword alerts: any transcript segment whose speaker or text contains one of these
     // (case-insensitive) is highlighted and flashes the status text. Edited via the inline
     // "🔔 Keyword Alerts" expander above the transcript. ---
@@ -71,6 +78,31 @@ public partial class App : Application
     
     private ComboBox? _microphoneComboBox;
     private ComboBox? _systemAudioComboBox;
+    private ComboBox? _languageComboBox;
+
+    // Current transcription language selection, mirrored from the combo box so the
+    // capture threads never have to touch UI elements. "auto" = per-chunk detection.
+    private volatile string _selectedLanguageCode = "en";
+
+    // (Display, Whisper language code) pairs offered in the language combo. "auto" maps to
+    // per-chunk detection on the backend; every other code must be one faster-whisper accepts.
+    private static readonly (string Display, string Code)[] LANGUAGE_OPTIONS = new[]
+    {
+        ("English", "en"),
+        ("Auto-detect (multilingual)", "auto"),
+        ("Spanish", "es"),
+        ("French", "fr"),
+        ("German", "de"),
+        ("Italian", "it"),
+        ("Portuguese", "pt"),
+        ("Dutch", "nl"),
+        ("Russian", "ru"),
+        ("Japanese", "ja"),
+        ("Korean", "ko"),
+        ("Chinese", "zh"),
+        ("Hindi", "hi"),
+        ("Arabic", "ar"),
+    };
     private Button? _startRecordingButton;
     private Button? _stopRecordingButton;
     private Button? _monitoringToggleButton;
@@ -534,17 +566,18 @@ public partial class App : Application
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 0: Title
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 1: Microphone section
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 2: System audio section
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 3: Volume meters
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 4: Control buttons
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 5: Backend status indicator
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 6: Privacy mode row
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 7: Status text
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 8: Transcription label
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 9: Instructions
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 10: Keyword alerts expander
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 11: Transcript search row
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 12: Multi-select toolbar
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 13: Transcription area (takes remaining space)
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 3: Language section
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 4: Volume meters
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 5: Control buttons
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 6: Backend status indicator
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 7: Privacy mode row
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 8: Status text
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 9: Transcription label
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 10: Instructions
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 11: Keyword alerts expander
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 12: Transcript search row
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 13: Multi-select toolbar
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 14: Transcription area (takes remaining space)
             
             int currentRow = 0;
             
@@ -598,6 +631,36 @@ public partial class App : Application
             systemAudioSection.Children.Add(systemAudioLabel);
             systemAudioSection.Children.Add(_systemAudioComboBox);
             Grid.SetRow(systemAudioSection, currentRow++);
+
+            // Transcription language section
+            var languageSection = new StackPanel { Margin = new Thickness(0, 0, 0, 15) };
+            var languageLabel = new TextBlock
+            {
+                Text = "Transcription Language:",
+                FontSize = 14,
+                Margin = new Thickness(0, 0, 0, 5)
+            };
+
+            _languageComboBox = new ComboBox
+            {
+                Width = 250,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            foreach (var (display, code) in LANGUAGE_OPTIONS)
+            {
+                _languageComboBox.Items.Add(new ComboBoxItem { Content = display, Tag = code });
+            }
+            // Restore the saved selection (LoadAppSettings has already run). An unknown saved
+            // code (hand-edited file, future option removed) falls back to English at index 0.
+            var savedLanguage = _appSettings.Language;
+            var savedIndex = Array.FindIndex(LANGUAGE_OPTIONS, o => o.Code == savedLanguage);
+            _languageComboBox.SelectedIndex = savedIndex >= 0 ? savedIndex : 0;
+            _selectedLanguageCode = LANGUAGE_OPTIONS[_languageComboBox.SelectedIndex].Code;
+            _languageComboBox.SelectionChanged += LanguageComboBox_SelectionChanged;
+
+            languageSection.Children.Add(languageLabel);
+            languageSection.Children.Add(_languageComboBox);
+            Grid.SetRow(languageSection, currentRow++);
             
             // Volume meters section
             var volumeSection = new StackPanel { Margin = new Thickness(0, 0, 0, 20) };
@@ -959,6 +1022,7 @@ public partial class App : Application
             mainGrid.Children.Add(titleText);
             mainGrid.Children.Add(microphoneSection);
             mainGrid.Children.Add(systemAudioSection);
+            mainGrid.Children.Add(languageSection);
             mainGrid.Children.Add(volumeSection);
             mainGrid.Children.Add(buttonPanel);
             mainGrid.Children.Add(backendStatusPanel);
@@ -1516,6 +1580,18 @@ public partial class App : Application
         }
     }
 
+    private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_languageComboBox?.SelectedItem is ComboBoxItem item && item.Tag is string code)
+        {
+            _selectedLanguageCode = code;
+            _appSettings.Language = code;
+            // Language changes are rare and cheap to persist; save immediately so a crash
+            // before clean shutdown does not lose the choice.
+            SaveAppSettings();
+        }
+    }
+
     private void SystemAudioComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_systemAudioComboBox != null && _availableSystemAudioDevices != null)
@@ -1949,12 +2025,34 @@ public partial class App : Application
                 }
             }
 
-            chunk = state.Buffer.ToArray();
-            state.Buffer.Clear();
+            // How much of the buffer leaves in this chunk. Normally all of it (the
+            // tail-silence gate above means the buffer already ends on a pause), but a
+            // cap flush lands here mid-speech: then prefer the most recent pause WITHIN
+            // the buffer as the cut point and carry the tail into the next chunk, so the
+            // boundary does not split a word. No pause anywhere => send everything,
+            // exactly as before.
+            int cutBytes = state.Buffer.Count;
+            if (bufferedSeconds >= MAX_CHUNK_SECONDS)
+            {
+                cutBytes = FindPauseCutOffset(state.Buffer);
+            }
+
+            if (cutBytes >= state.Buffer.Count)
+            {
+                chunk = state.Buffer.ToArray();
+                state.Buffer.Clear();
+            }
+            else
+            {
+                chunk = new byte[cutBytes];
+                state.Buffer.CopyTo(0, chunk, 0, cutBytes);
+                state.Buffer.RemoveRange(0, cutBytes);
+            }
 
             // Everything consumed before this chunk IS this chunk's start on the recording
             // timeline. Captured under the same lock that drains the buffer so two dispatches
-            // can never be handed the same offset.
+            // can never be handed the same offset. Adding only chunk.Length (not the whole
+            // pre-cut buffer) keeps the carried-forward tail's timeline accounting intact.
             chunkStartSeconds = state.ConsumedBytes / (double)TRANSCRIPTION_BYTES_PER_SECOND;
             state.ConsumedBytes += chunk.Length;
 
@@ -2054,7 +2152,9 @@ public partial class App : Application
 
             // Tag the chunk's origin so the backend can tell the near end from the far end.
             // Unknown query parameters are tolerated by the backend, so this stays compatible.
-            var requestUrl = $"{_backendUrl}/transcribe?source={Uri.EscapeDataString(state.SourceTag)}";
+            // "language" pins the decode language ("auto" = per-chunk detection for mixed-
+            // language sessions); read from the volatile mirror, never the ComboBox itself.
+            var requestUrl = $"{_backendUrl}/transcribe?source={Uri.EscapeDataString(state.SourceTag)}&language={Uri.EscapeDataString(_selectedLanguageCode)}";
 
             Console.WriteLine("Sending request to backend...");
             var response = await _httpClient!.PostAsync(requestUrl, content);
@@ -2191,8 +2291,10 @@ public partial class App : Application
 
             // "file" is normalized to an unscoped probe by the backend: file audio is
             // neither the near end nor the far end, so voices enrolled from either
-            // source may match.
-            var requestUrl = $"{_backendUrl}/transcribe?source=file";
+            // source may match. The language selection applies to files the same as
+            // to live chunks. accuracy=true buys a better decode (higher beam size,
+            // optionally a stronger model) - offline files have no latency pressure.
+            var requestUrl = $"{_backendUrl}/transcribe?source=file&language={Uri.EscapeDataString(_selectedLanguageCode)}&accuracy=true";
 
             // The shared client's 60s timeout is tuned for short live chunks; a long
             // file legitimately transcribes for minutes.
@@ -5200,6 +5302,34 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Byte offset to cut a cap-flushed chunk at: the end of the most recent
+    /// SILENCE_WINDOW_MS-long quiet stretch, so the cut lands in a pause instead of
+    /// mid-word. Scans backwards at 100 ms strides (a real inter-sentence pause is
+    /// several hundred ms, so the stride cannot step over one). Never cuts closer to
+    /// the buffer start than MIN_CHUNK_SECONDS - the outgoing chunk stays worth a
+    /// request - and returns buffer.Count (send everything, the pre-existing
+    /// behavior) when the range holds no pause at all.
+    /// Callers must hold the owning source's Sync lock.
+    /// </summary>
+    private static int FindPauseCutOffset(List<byte> buffer)
+    {
+        int windowBytes = TRANSCRIPTION_BYTES_PER_SECOND * SILENCE_WINDOW_MS / 1000;
+        int strideBytes = TRANSCRIPTION_BYTES_PER_SECOND / 10;
+        int minChunkBytes = (int)(TRANSCRIPTION_BYTES_PER_SECOND * MIN_CHUNK_SECONDS);
+
+        // buffer.Count and both constants are whole-sample (even) sizes, so every
+        // candidate cut below stays sample-aligned without explicit rounding.
+        for (int cut = buffer.Count; cut - windowBytes >= minChunkBytes; cut -= strideBytes)
+        {
+            if (PcmRms(buffer, cut - windowBytes, cut) < SILENCE_RMS_THRESHOLD)
+            {
+                return cut;
+            }
+        }
+        return buffer.Count;
+    }
+
+    /// <summary>
     /// Appends already-converted 16 kHz mono 16-bit PCM to a source's buffer, dropping the
     /// oldest audio once the buffer exceeds MAX_BUFFERED_AUDIO_SECONDS seconds of audio.
     /// </summary>
@@ -5311,6 +5441,20 @@ public partial class App : Application
         private int _configuredChannels = -1;
         private float[] _monoScratch = Array.Empty<float>();
 
+        // Anti-aliasing low-pass applied BEFORE the 16 kHz downsample. Linear
+        // interpolation alone does not band-limit: at a 44.1/48 kHz source rate,
+        // everything above 8 kHz (music, hiss, notification chimes in system audio)
+        // folds back into the 0-8 kHz speech band as non-harmonic noise the ASR
+        // model then has to fight. A symmetric windowed-sinc FIR with cutoff below
+        // the 16 kHz Nyquist removes that energy first. Null when the source rate
+        // needs no filtering (already at/below 16 kHz).
+        private const int FIR_TAPS = 95;               // odd => symmetric, linear phase
+        private const double FIR_CUTOFF_HZ = 7000.0;   // below 8 kHz Nyquist; speech content above this is negligible
+        private float[]? _firCoefficients;
+        private readonly float[] _firHistory = new float[FIR_TAPS - 1]; // last inputs of the previous callback
+        private float[] _firExtScratch = Array.Empty<float>();   // history + current buffer
+        private float[] _firOutScratch = Array.Empty<float>();   // filtered output
+
         /// <summary>Clears the interpolation carry; call when (re)starting a capture.</summary>
         public void Reset()
         {
@@ -5318,6 +5462,35 @@ public partial class App : Application
             _sourcePosition = 1.0;
             _configuredSampleRate = -1;
             _configuredChannels = -1;
+            Array.Clear(_firHistory, 0, _firHistory.Length);
+        }
+
+        /// <summary>
+        /// Windowed-sinc (Hamming) low-pass coefficients for the given source rate,
+        /// normalized to unity DC gain. Symmetric, so convolution can read taps in
+        /// either direction.
+        /// </summary>
+        private static float[] BuildLowPassCoefficients(int sampleRate)
+        {
+            var coefficients = new float[FIR_TAPS];
+            int m = FIR_TAPS - 1;
+            double normalizedCutoff = FIR_CUTOFF_HZ / sampleRate; // cycles per sample
+            double sum = 0.0;
+            for (int n = 0; n <= m; n++)
+            {
+                double x = n - (m / 2.0);
+                double sinc = x == 0.0
+                    ? 2.0 * Math.PI * normalizedCutoff
+                    : Math.Sin(2.0 * Math.PI * normalizedCutoff * x) / x;
+                double window = 0.54 - (0.46 * Math.Cos(2.0 * Math.PI * n / m));
+                coefficients[n] = (float)(sinc * window);
+                sum += coefficients[n];
+            }
+            for (int n = 0; n <= m; n++)
+            {
+                coefficients[n] = (float)(coefficients[n] / sum);
+            }
+            return coefficients;
         }
 
         /// <summary>
@@ -5398,13 +5571,18 @@ public partial class App : Application
                 return Array.Empty<byte>();
             }
 
-            // A mid-stream format change would invalidate the carried interpolation state.
+            // A mid-stream format change would invalidate the carried interpolation state
+            // and the FIR history, and the FIR coefficients are a function of the rate.
             if (sampleRate != _configuredSampleRate || channels != _configuredChannels)
             {
                 _configuredSampleRate = sampleRate;
                 _configuredChannels = channels;
                 _previousSample = 0f;
                 _sourcePosition = 1.0;
+                _firCoefficients = sampleRate > App.TRANSCRIPTION_SAMPLE_RATE
+                    ? BuildLowPassCoefficients(sampleRate)
+                    : null; // at/below 16 kHz nothing can alias into the target band
+                Array.Clear(_firHistory, 0, _firHistory.Length);
             }
 
             if (_monoScratch.Length < frameCount)
@@ -5442,7 +5620,47 @@ public partial class App : Application
                 }
             }
 
-            // Step 3: linear-interpolation resample to 16 kHz.
+            // Step 3: anti-aliasing low-pass (see the FIR field comments). Runs at the
+            // source rate, on the mono signal, BEFORE the rate change - filtering after
+            // decimation would be too late, the folding has already happened. The history
+            // buffer supplies the FIR's look-back across callback boundaries, so the
+            // filtered stream is seamless; the interpolation state below then sees one
+            // continuous band-limited signal.
+            if (_firCoefficients != null)
+            {
+                float[] coefficients = _firCoefficients;
+                int historyLength = FIR_TAPS - 1;
+                int extendedLength = historyLength + frameCount;
+                if (_firExtScratch.Length < extendedLength)
+                {
+                    _firExtScratch = new float[extendedLength];
+                }
+                if (_firOutScratch.Length < frameCount)
+                {
+                    _firOutScratch = new float[frameCount];
+                }
+
+                Array.Copy(_firHistory, 0, _firExtScratch, 0, historyLength);
+                Array.Copy(mono, 0, _firExtScratch, historyLength, frameCount);
+
+                for (int i = 0; i < frameCount; i++)
+                {
+                    float acc = 0f;
+                    // Symmetric taps, so no reversal needed: this is y[i] = sum h[k]*x[i-k].
+                    for (int k = 0; k < FIR_TAPS; k++)
+                    {
+                        acc += coefficients[k] * _firExtScratch[i + k];
+                    }
+                    _firOutScratch[i] = acc;
+                }
+
+                // Last (FIR_TAPS - 1) input samples become the next callback's look-back.
+                Array.Copy(_firExtScratch, frameCount, _firHistory, 0, historyLength);
+
+                mono = _firOutScratch;
+            }
+
+            // Step 4: linear-interpolation resample to 16 kHz.
             //
             // The virtual input stream for this callback is
             //     c[0]    = last mono sample of the PREVIOUS callback (_previousSample)

@@ -16,4 +16,5 @@ pytest-xdist>=3.3.1  # For parallel test execution
 pytest-html>=3.2.0   # For HTML test reports
 pytest-benchmark>=4.0.0  # For performance testing
 freezegun>=1.2.2     # For time-based testing
-responses>=0.23.0    # For HTTP request mocking 
+responses>=0.23.0    # For HTTP request mocking
+jiwer>=3.0.0         # Word-error-rate metrics for eval_wer.py

@@ -4,7 +4,17 @@ All notable changes to Oreja are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Language selection**: New "Transcription Language" dropdown in the main window, defaulting to English. Pinning the language removes per-chunk auto-detect misfires (short/noisy chunks occasionally decoded in the wrong language); "Auto-detect (multilingual)" remains available for mixed-language sessions and detects per chunk. Sent per request (`language` query parameter on `/transcribe`), persisted across launches.
+- **Custom vocabulary + speaker-name prompt biasing**: `backend/vocabulary.txt` (one term per line) plus the display names of known speakers are fed to the ASR decoder as a glossary `initial_prompt`, strongly biasing it toward correct spellings of names and jargon. Auto-generated "Speaker N" placeholders are excluded; the file is re-read on change without a restart. Configurable via `OREJA_VOCAB_FILE`, `OREJA_PROMPT_SPEAKER_NAMES`, `OREJA_INITIAL_PROMPT`.
+- **Accuracy mode for file transcription**: The Transcribe File path now requests `accuracy=true`, which decodes with beam size `OREJA_FILE_BEAM_SIZE` (default 10, vs 5 live) and, when `OREJA_FILE_MODEL` is set (e.g. `large-v3`), a separate stronger model lazy-loaded on first use. Live chunk latency is unaffected.
+- **WER evaluation harness**: `backend/eval_wer.py` measures word error rate against hand-corrected reference transcripts through the real `/transcribe` pipeline, for before/after A-B comparison of accuracy changes (requires `jiwer`, added to test requirements).
+
 ### Fixed
+
+- **System-audio aliasing**: The WASAPI loopback downsample to 16 kHz used bare linear interpolation, folding all source content above 8 kHz back into the speech band as noise. A 95-tap windowed-sinc low-pass (7 kHz cutoff, ≥54 dB stopband attenuation, verified numerically) now band-limits the mono signal before decimation, with filter state carried seamlessly across capture callbacks.
+- **Mid-word cuts on cap flush**: When a speaker talks straight through `MAX_CHUNK_SECONDS` (15 s), the chunk boundary could land mid-word. The flush now cuts at the most recent in-buffer pause and carries the tail into the next chunk; timeline accounting is preserved. Only when the buffer contains no pause at all does it fall back to sending everything.
 
 - **🚨 Critical: System audio now reaches backend.** The frontend was discarding system audio due to a shared concurrency buffer; refactored audio capture into per-source independent buffers (mic and system audio each with their own lock and state). This was a silent data loss issue—system audio was never making it to transcription even though the UI appeared to be capturing it.
 - **🚨 Critical: Speaker recognition is now working.** Server-side speaker identification was disabled; rebuilt the entire persistent speaker system on top of the v2 JSON database using pyannote's unified embedding model. Speakers are now correctly identified and learned over time.
