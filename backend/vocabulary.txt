@@ -16,3 +16,4 @@
 # Oreja
 # pyannote
 # faster-whisper
+Oreja
