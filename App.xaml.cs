@@ -61,6 +61,11 @@ public class AppSettings
     // the wrong language, so pinning is the accuracy-preserving default. ---
     public string Language { get; set; } = "en";
 
+    // --- Session audio: tee each live recording to per-source 16 kHz mono WAVs
+    // (~115 MB/hour) in Documents\Oreja Recordings, so any transcript segment can be
+    // replayed via its ▶ button. Ignored while Legal-Safe Mode is on. ---
+    public bool SaveSessionAudio { get; set; } = true;
+
     // --- Keyword alerts: any transcript segment whose speaker or text contains one of these
     // (case-insensitive) is highlighted and flashes the status text. Edited via the inline
     // "🔔 Keyword Alerts" expander above the transcript. ---
@@ -245,11 +250,31 @@ public partial class App : Application
     private double _lastScrollPosition = 0;
     private bool _userScrolledUp = false;
     private HashSet<int> _selectedSegments = new HashSet<int>();
-    private bool _multiSelectMode = false;
-    private Button? _multiSelectToggleButton;
+    // Selection is always live: click a card to select it, Ctrl+click to toggle,
+    // Shift+click to extend from the anchor, or use the checkboxes directly.
+    // _selectionAnchorId is the SegmentId the next Shift+click ranges from.
+    private int? _selectionAnchorId;
+    private static readonly Brush _selectionCardBackground =
+        new SolidColorBrush(Color.FromRgb(219, 234, 254)); // light blue, distinct from the alert yellow
+
+    // Monotonic segment id source. SegmentIds used to be _transcriptionHistory.Count,
+    // which collides with surviving ids as soon as deletion exists (delete one of three
+    // segments and the next arrival would reuse id 2). Never reset - stale gaps are fine.
+    private int _nextSegmentId = 0;
+
+    // --- Session speaker roster -------------------------------------------------------
+    // Who the user said is in this session (👥 Session Speakers dialog). Roster names
+    // lead the per-segment dropdowns, map onto the 1-4 quick-assign buttons in roster
+    // order, and the roster size is sent as the diarization max_speakers ceiling.
+    // Guests are session-only identities: they never join _availableSpeakers (so they
+    // are not persisted to settings) and corrections to them never send enrollment
+    // feedback to the backend, so no voiceprint is learned for them.
+    private List<string> _sessionRoster = new List<string>();
+    private HashSet<string> _sessionGuestNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private Button? _bulkRenameButton;
     private Button? _selectAllButton;
     private Button? _clearSelectionButton;
+    private Button? _deleteSelectedButton;
     private List<CheckBox> _segmentCheckBoxes = new List<CheckBox>();
 
     // Transcript search: a TextBox above the transcript filters segment cards by text/speaker.
@@ -334,19 +359,32 @@ public partial class App : Application
         public ComboBox? SpeakerComboBoxElement { get; set; }
         public TextBox? TextDisplayElement { get; set; }
         public TextBlock? AlertBellElement { get; set; }
+        public CheckBox? SelectionCheckBoxElement { get; set; }
+        public Rectangle? SpeakerStripeElement { get; set; }
+
+        // Where this segment's audio can be replayed from: the original media file for
+        // file transcriptions, or null for live segments (those resolve through the
+        // per-source session recording, see ResolveSegmentAudioPath).
+        public string? AudioFilePath { get; set; }
     }
 
     // Smart speaker filtering for dropdown
     private List<string> GetFilteredSpeakersForDropdown()
     {
         var filteredSpeakers = new List<string>();
-        
+
         // Always add "Unknown" first
         filteredSpeakers.Add("Unknown");
-        
+
+        // Session roster leads, in roster order: these are the names the user said are
+        // actually in the room, so they are the overwhelmingly likely corrections. This
+        // is also how guests become assignable - they are never in _availableSpeakers.
+        filteredSpeakers.AddRange(_sessionRoster.Where(n => n != "Unknown"));
+
         // Add user-defined speakers (non-auto-generated)
         var userDefinedSpeakers = _availableSpeakers
-            .Where(s => s != "Unknown" && !s.StartsWith("Speaker_AUTO_SPEAKER_"))
+            .Where(s => s != "Unknown" && !s.StartsWith("Speaker_AUTO_SPEAKER_")
+                && !filteredSpeakers.Contains(s))
             .OrderBy(s => s)
             .ToList();
         filteredSpeakers.AddRange(userDefinedSpeakers);
@@ -782,11 +820,25 @@ public partial class App : Application
             };
             _transcribeFileButton.Click += TranscribeFileButton_Click;
 
+            var sessionSpeakersButton = new Button
+            {
+                Content = "👥 Session Speakers",
+                Width = 160,
+                Height = 40,
+                Margin = new Thickness(10, 0, 0, 0),
+                FontSize = 14,
+                Background = Brushes.Lavender,
+                ToolTip = "Declare who is in this session so the tool doesn't have to guess:\n" +
+                          "known speakers keep learning voiceprints, guests stay session-only."
+            };
+            sessionSpeakersButton.Click += (s, e) => ShowSessionSpeakersDialog();
+
             buttonPanel.Children.Add(_startRecordingButton);
             buttonPanel.Children.Add(_stopRecordingButton);
             buttonPanel.Children.Add(_monitoringToggleButton);
             buttonPanel.Children.Add(_saveTranscriptionButton);
             buttonPanel.Children.Add(_transcribeFileButton);
+            buttonPanel.Children.Add(sessionSpeakersButton);
             Grid.SetRow(buttonPanel, currentRow++);
 
             // Backend status indicator: a small colored dot + short text, updated by the
@@ -851,8 +903,23 @@ public partial class App : Application
                 VerticalAlignment = VerticalAlignment.Center
             };
             
+            var saveAudioCheckBox = new CheckBox
+            {
+                Content = "💾 Save session audio",
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(20, 0, 10, 0),
+                IsChecked = _appSettings.SaveSessionAudio,
+                ToolTip = "Keep a compact 16 kHz recording of each session (Documents\\Oreja Recordings, ~115 MB/hour)\n" +
+                          "so the ▶ button on a segment can replay its audio. Ignored in Legal-Safe Mode.\n" +
+                          "Takes effect at the next recording start."
+            };
+            saveAudioCheckBox.Checked += (s, e) => { _appSettings.SaveSessionAudio = true; SaveAppSettings(); };
+            saveAudioCheckBox.Unchecked += (s, e) => { _appSettings.SaveSessionAudio = false; SaveAppSettings(); };
+
             privacyPanel.Children.Add(_privacyModeCheckBox);
             privacyPanel.Children.Add(privacyHelp);
+            privacyPanel.Children.Add(saveAudioCheckBox);
             Grid.SetRow(privacyPanel, currentRow++);
             
             // Status text
@@ -899,7 +966,7 @@ public partial class App : Application
 
             var instructionsText = new TextBlock
             {
-                Text = "• Use the speaker dropdown on a segment to reassign just that segment (type a new name to create one)\n• Click '+' to create a new speaker, '🔍' to browse auto-detected speakers, '✏' to rename a speaker everywhere, '×' to delete one\n• Use Search above the transcript to filter segments by text or speaker (Esc clears)\n• Expand 🔔 Keyword Alerts to highlight segments containing chosen words as they arrive\n• Right-click a segment's text to split it, or double-click to edit it directly\n• Save Transcription exports to JSON, TXT, SRT, WebVTT, or Markdown",
+                Text = "• Use the speaker dropdown on a segment to reassign just that segment (type a new name to create one)\n• Click '+' to create a new speaker, '🔍' to browse auto-detected speakers, '✏' to rename a speaker everywhere, '×' to delete one\n• Click a card to select it - Shift+click selects a range, Ctrl+click toggles, right-click selects by speaker or deletes\n• ▶ replays a segment's audio (kept in Documents\\Oreja Recordings while 💾 Save session audio is on)\n• Use Search above the transcript to filter segments by text or speaker (Esc clears); Select All picks every match\n• Expand 🔔 Keyword Alerts to highlight segments containing chosen words as they arrive\n• Right-click a segment's text to split it, or double-click to edit it directly\n• Save Transcription exports to JSON, TXT, SRT, WebVTT, or Markdown",
                 FontSize = 11,
                 Foreground = Brushes.DarkBlue,
                 TextWrapping = TextWrapping.Wrap
@@ -1645,6 +1712,15 @@ public partial class App : Application
                 _systemAudioConverter.Reset();
                 _systemAudioFormatUnsupported = false;
 
+                // Fresh per-recording session audio (for segment playback). Never under
+                // Legal-Safe Mode - keeping raw audio would contradict "no verbatim
+                // transcription stored" - and off when the user disabled it.
+                StopSegmentPlayback();
+                _sessionAudio?.Dispose();
+                _sessionAudio = (_appSettings.SaveSessionAudio && !_privacyModeEnabled)
+                    ? new SessionAudioWriter()
+                    : null;
+
                 // If monitoring is active, stop it first (we'll use recording mode instead)
                 if (_isMonitoring)
                 {
@@ -2136,6 +2212,15 @@ public partial class App : Application
     {
         string source = state.DisplayName;
 
+        // Tee the outgoing PCM to the session recording so segments can be replayed
+        // later - the same bytes the backend hears, at the same timeline offsets.
+        // Never under Legal-Safe Mode: "no verbatim transcription stored" has to
+        // extend to the raw audio, or the mode is a fig leaf.
+        if (!_privacyModeEnabled)
+        {
+            _sessionAudio?.Write(source, chunkStartSeconds, audioData);
+        }
+
         try
         {
             Console.WriteLine($"Processing audio chunk of {audioData.Length} bytes from {source}...");
@@ -2154,7 +2239,12 @@ public partial class App : Application
             // Unknown query parameters are tolerated by the backend, so this stays compatible.
             // "language" pins the decode language ("auto" = per-chunk detection for mixed-
             // language sessions); read from the volatile mirror, never the ComboBox itself.
+            // A session roster caps how many distinct speakers diarization may report.
             var requestUrl = $"{_backendUrl}/transcribe?source={Uri.EscapeDataString(state.SourceTag)}&language={Uri.EscapeDataString(_selectedLanguageCode)}";
+            if (_sessionRoster.Count > 0)
+            {
+                requestUrl += $"&max_speakers={_sessionRoster.Count}";
+            }
 
             Console.WriteLine("Sending request to backend...");
             var response = await _httpClient!.PostAsync(requestUrl, content);
@@ -2294,7 +2384,12 @@ public partial class App : Application
             // source may match. The language selection applies to files the same as
             // to live chunks. accuracy=true buys a better decode (higher beam size,
             // optionally a stronger model) - offline files have no latency pressure.
+            // A session roster caps how many distinct speakers diarization may report.
             var requestUrl = $"{_backendUrl}/transcribe?source=file&language={Uri.EscapeDataString(_selectedLanguageCode)}&accuracy=true";
+            if (_sessionRoster.Count > 0)
+            {
+                requestUrl += $"&max_speakers={_sessionRoster.Count}";
+            }
 
             // The shared client's 60s timeout is tuned for short live chunks; a long
             // file legitimately transcribes for minutes.
@@ -2334,7 +2429,7 @@ public partial class App : Application
 
                     // File timestamps are already absolute within the file - no chunk
                     // offset to add, unlike the live path.
-                    AddTranscriptionSegment(speaker, text, startTime, endTime, $"File: {fileName}");
+                    AddTranscriptionSegment(speaker, text, startTime, endTime, $"File: {fileName}", filePath);
                     added++;
                 }
             }
@@ -2367,7 +2462,8 @@ public partial class App : Application
         }
     }
 
-    private void AddTranscriptionSegment(string? speaker, string? text, double startTime, double endTime, string source)
+    private void AddTranscriptionSegment(string? speaker, string? text, double startTime, double endTime, string source,
+        string? audioFilePath = null)
     {
         Console.WriteLine($"AddTranscriptionSegment called: Speaker='{speaker}', Text='{text}', StartTime={startTime}, EndTime={endTime}, Source={source}");
 
@@ -2407,8 +2503,8 @@ public partial class App : Application
             return;
         }
 
-        // Generate unique segment ID
-        var segmentId = _transcriptionHistory.Count;
+        // Generate unique segment ID (monotonic counter - see _nextSegmentId)
+        var segmentId = _nextSegmentId++;
 
         // Store in transcription history
         var segment = new TranscriptionSegment
@@ -2419,7 +2515,10 @@ public partial class App : Application
             EndTime = endTime,
             Source = source,
             Timestamp = DateTime.Now,
-            SegmentId = segmentId
+            SegmentId = segmentId,
+            // File transcriptions pass their media file; live segments resolve to the
+            // session recording for their source (null when session audio is off).
+            AudioFilePath = audioFilePath ?? _sessionAudio?.GetPathIfWritten(source)
         };
         _transcriptionHistory.Add(segment);
         
@@ -2591,14 +2690,18 @@ public partial class App : Application
             
             quickButton.Click += (s, e) =>
             {
-                var newSpeaker = $"Speaker {speakerNum}";
+                // Roster members map onto the quick buttons in roster order; without a
+                // roster the legacy "Speaker N" placeholders apply.
+                var newSpeaker = speakerNum <= _sessionRoster.Count
+                    ? _sessionRoster[speakerNum - 1]
+                    : $"Speaker {speakerNum}";
                 speakerComboBox.SelectedItem = newSpeaker;
                 UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
             };
-            
+
             quickSpeakerPanel.Children.Add(quickButton);
         }
-        
+
         // New speaker button
         var newSpeakerButton = new Button
         {
@@ -2663,6 +2766,7 @@ public partial class App : Application
         // Add all top row elements
         topPanel.Children.Add(alertBellIcon);
         topPanel.Children.Add(selectionCheckBox);
+        topPanel.Children.Add(CreatePlaySegmentButton(segment));
         topPanel.Children.Add(timestampText);
         topPanel.Children.Add(speakerComboBox);
         topPanel.Children.Add(emotionIndicator);
@@ -2680,8 +2784,8 @@ public partial class App : Application
         segmentPanel.Children.Add(topPanel);
         segmentPanel.Children.Add(textDisplay);
 
-        // Add segment panel to border and border to main panel
-        segmentBorder.Child = segmentPanel;
+        // Speaker stripe + click-to-select + context menu, then attach to the panel.
+        AttachCardChrome(segment, segmentBorder, segmentPanel);
         _transcriptionPanel.Children.Add(segmentBorder);
 
         // Cache the card elements on the segment itself so a later rename, privacy toggle, or
@@ -2691,6 +2795,7 @@ public partial class App : Application
         segment.SpeakerComboBoxElement = speakerComboBox;
         segment.TextDisplayElement = textDisplay;
         segment.AlertBellElement = alertBellIcon;
+        segment.SelectionCheckBoxElement = selectionCheckBox;
 
         // Highlight + bell prefix if this segment matches a configured alert keyword, and flash
         // the status text so a live match is noticeable even if the transcript isn't in view.
@@ -2884,6 +2989,14 @@ public partial class App : Application
             // Only send feedback if we have the original audio and the correction is meaningful
             if (string.IsNullOrEmpty(correctSpeakerName) || correctSpeakerName == "Unknown")
                 return;
+
+            // Guests are session-only by contract: no name mapping, no enrollment, no
+            // voiceprint. The label lives purely in this transcript.
+            if (_sessionGuestNames.Contains(correctSpeakerName))
+            {
+                Console.WriteLine($"'{correctSpeakerName}' is a session guest - skipping backend feedback");
+                return;
+            }
             
             Console.WriteLine($"Sending speaker correction feedback: '{segment.Speaker}' -> '{correctSpeakerName}'");
             
@@ -3269,33 +3382,744 @@ public partial class App : Application
         {
             Margin = new Thickness(5, 0, 10, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            Visibility = _multiSelectMode ? Visibility.Visible : Visibility.Collapsed,
-            IsChecked = _selectedSegments.Contains(segmentId)
+            IsChecked = _selectedSegments.Contains(segmentId),
+            ToolTip = "Select this segment (Shift+click a card selects a range, Ctrl+click toggles)"
         };
-        
+
+        // The HashSet add/remove and the visual refresh are both idempotent, so these
+        // handlers are safe to fire from programmatic IsChecked changes too - which is
+        // exactly how SetSegmentSelected keeps everything in sync through one path.
         checkbox.Checked += (s, e) => {
             _selectedSegments.Add(segmentId);
+            _selectionAnchorId = segmentId;
+            RefreshCardSelectionVisual(segmentId);
             UpdateMultiSelectButtons();
         };
         checkbox.Unchecked += (s, e) => {
             _selectedSegments.Remove(segmentId);
+            RefreshCardSelectionVisual(segmentId);
             UpdateMultiSelectButtons();
         };
-        
+
         _segmentCheckBoxes.Add(checkbox);
         return checkbox;
     }
 
+    // --- Selection model --------------------------------------------------------------
+    // Selection is always active. The checkbox is the explicit control; the card itself
+    // is the fast path: plain click selects just that card, Ctrl+click toggles it,
+    // Shift+click extends from the anchor. Clicks that land on interactive children
+    // (buttons, the speaker dropdown, the text box) never count as selection clicks.
+
+    private void RefreshCardSelectionVisual(int segmentId)
+    {
+        var segment = _transcriptionHistory.FirstOrDefault(s => s.SegmentId == segmentId);
+        if (segment != null)
+        {
+            // ApplyKeywordAlertHighlight owns the card background and is selection-aware.
+            ApplyKeywordAlertHighlight(segment);
+        }
+    }
+
+    private void SetSegmentSelected(TranscriptionSegment segment, bool selected)
+    {
+        var checkbox = segment.SelectionCheckBoxElement;
+        if (checkbox != null)
+        {
+            checkbox.IsChecked = selected; // fires the handlers above, which do the rest
+        }
+        else if (selected)
+        {
+            _selectedSegments.Add(segment.SegmentId);
+        }
+        else
+        {
+            _selectedSegments.Remove(segment.SegmentId);
+        }
+    }
+
+    /// <summary>True when a click's original source sits inside an interactive control of the card.</summary>
+    private static bool ClickLandedOnControl(object originalSource, Border card)
+    {
+        var node = originalSource as DependencyObject;
+        while (node != null && !ReferenceEquals(node, card))
+        {
+            if (node is Button || node is ComboBox || node is ComboBoxItem
+                || node is TextBox || node is CheckBox || node is System.Windows.Controls.Primitives.ScrollBar)
+            {
+                return true;
+            }
+            node = node is Visual || node is System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(node)
+                : LogicalTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    private void HandleCardClick(int segmentId, MouseButtonEventArgs e)
+    {
+        var segment = _transcriptionHistory.FirstOrDefault(s => s.SegmentId == segmentId);
+        if (segment == null) return;
+
+        bool ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
+        bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+
+        if (shift && _selectionAnchorId.HasValue)
+        {
+            int anchorIndex = _transcriptionHistory.FindIndex(s => s.SegmentId == _selectionAnchorId.Value);
+            int thisIndex = _transcriptionHistory.FindIndex(s => s.SegmentId == segmentId);
+            if (anchorIndex >= 0 && thisIndex >= 0)
+            {
+                if (!ctrl)
+                {
+                    ClearAllSelections();
+                }
+                int from = Math.Min(anchorIndex, thisIndex);
+                int to = Math.Max(anchorIndex, thisIndex);
+                for (int i = from; i <= to; i++)
+                {
+                    var inRange = _transcriptionHistory[i];
+                    // A search filter hides cards; a range never selects what the user can't see.
+                    if (inRange.CardElement?.Visibility == Visibility.Collapsed) continue;
+                    SetSegmentSelected(inRange, true);
+                }
+                // Anchor deliberately stays put so consecutive Shift+clicks re-range from
+                // the same origin, matching Explorer/list-view semantics.
+                return;
+            }
+        }
+
+        if (ctrl)
+        {
+            SetSegmentSelected(segment, !_selectedSegments.Contains(segmentId));
+            _selectionAnchorId = segmentId;
+            return;
+        }
+
+        // Plain click: this card becomes the whole selection - unless it already is,
+        // in which case clicking deselects it (an easy way out of a stray selection).
+        bool wasOnlySelection = _selectedSegments.Count == 1 && _selectedSegments.Contains(segmentId);
+        ClearAllSelections();
+        if (!wasOnlySelection)
+        {
+            SetSegmentSelected(segment, true);
+            _selectionAnchorId = segmentId;
+        }
+    }
+
+    private void ClearAllSelections()
+    {
+        // Snapshot: SetSegmentSelected mutates _selectedSegments via the checkbox handlers.
+        foreach (var id in _selectedSegments.ToList())
+        {
+            var segment = _transcriptionHistory.FirstOrDefault(s => s.SegmentId == id);
+            if (segment != null)
+            {
+                SetSegmentSelected(segment, false);
+            }
+            else
+            {
+                _selectedSegments.Remove(id);
+            }
+        }
+        UpdateMultiSelectButtons();
+    }
+
+    private void SelectAllFromSpeaker(string? rawSpeaker, bool additive)
+    {
+        var displayName = GetDisplaySpeakerName(rawSpeaker);
+        if (!additive)
+        {
+            ClearAllSelections();
+        }
+        foreach (var segment in _transcriptionHistory)
+        {
+            if (segment.CardElement?.Visibility == Visibility.Collapsed) continue;
+            if (GetDisplaySpeakerName(segment.Speaker) == displayName)
+            {
+                SetSegmentSelected(segment, true);
+            }
+        }
+        UpdateMultiSelectButtons();
+    }
+
+    /// <summary>
+    /// Deletes the given segments from the transcript: history, card UI, selection state,
+    /// and the stale entries in the flat checkbox/dropdown tracking lists. Purely a
+    /// transcript edit - speakers and their voiceprints are untouched.
+    /// </summary>
+    private void DeleteSegments(List<int> segmentIds)
+    {
+        foreach (var id in segmentIds)
+        {
+            var segment = _transcriptionHistory.FirstOrDefault(s => s.SegmentId == id);
+            if (segment == null) continue;
+
+            if (segment.CardElement != null)
+            {
+                _transcriptionPanel?.Children.Remove(segment.CardElement);
+            }
+            if (segment.SpeakerComboBoxElement != null)
+            {
+                _speakerComboBoxes.Remove(segment.SpeakerComboBoxElement);
+            }
+            if (segment.SelectionCheckBoxElement != null)
+            {
+                _segmentCheckBoxes.Remove(segment.SelectionCheckBoxElement);
+            }
+            _transcriptionHistory.Remove(segment);
+            _selectedSegments.Remove(id);
+            if (_selectionAnchorId == id)
+            {
+                _selectionAnchorId = null;
+            }
+        }
+
+        if (_transcriptionHistory.Count == 0 && _saveTranscriptionButton != null)
+        {
+            _saveTranscriptionButton.IsEnabled = false;
+        }
+        UpdateMultiSelectButtons();
+    }
+
+    private void DeleteSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSegments.Count == 0) return;
+
+        var count = _selectedSegments.Count;
+        var confirm = MessageBox.Show(
+            $"Delete {count} selected segment{(count == 1 ? "" : "s")} from the transcript?\n\n" +
+            "This only removes the text segments - speakers and their voiceprints are not affected.",
+            "Delete Segments", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (confirm == MessageBoxResult.Yes)
+        {
+            DeleteSegments(_selectedSegments.ToList());
+        }
+    }
+
+    private void SelectBySpeaker_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+
+        // Build the menu fresh each time from the speakers actually present, with counts.
+        var menu = new ContextMenu();
+        var groups = _transcriptionHistory
+            .GroupBy(s => GetDisplaySpeakerName(s.Speaker))
+            .OrderByDescending(g => g.Count())
+            .ToList();
+
+        if (groups.Count == 0)
+        {
+            menu.Items.Add(new MenuItem { Header = "(no segments yet)", IsEnabled = false });
+        }
+        foreach (var group in groups)
+        {
+            var item = new MenuItem { Header = $"{group.Key}  ({group.Count()})" };
+            var rawSpeaker = group.First().Speaker;
+            item.Click += (_, __) => SelectAllFromSpeaker(rawSpeaker,
+                additive: Keyboard.Modifiers.HasFlag(ModifierKeys.Control));
+            menu.Items.Add(item);
+        }
+
+        menu.PlacementTarget = button;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    /// <summary>
+    /// Card chrome shared by both construction sites (live arrival and full rebuild):
+    /// the per-speaker color stripe, click-to-select, and the card context menu.
+    /// Sets segmentBorder.Child, so callers must not assign it themselves.
+    /// </summary>
+    private void AttachCardChrome(TranscriptionSegment segment, Border segmentBorder, StackPanel segmentPanel)
+    {
+        var stripe = new Rectangle
+        {
+            Width = 5,
+            RadiusX = 2,
+            RadiusY = 2,
+            Fill = GetSpeakerColorEnhanced(GetDisplaySpeakerName(segment.Speaker)),
+            Margin = new Thickness(0, 0, 6, 0)
+        };
+        segment.SpeakerStripeElement = stripe;
+
+        var layout = new DockPanel();
+        DockPanel.SetDock(stripe, Dock.Left);
+        layout.Children.Add(stripe);
+        layout.Children.Add(segmentPanel);
+        segmentBorder.Child = layout;
+
+        segmentBorder.MouseLeftButtonUp += (s, e) =>
+        {
+            // Clicks that land on the card's own controls (buttons, dropdown, text box,
+            // checkbox) belong to those controls, not to selection.
+            if (!ClickLandedOnControl(e.OriginalSource, segmentBorder))
+            {
+                HandleCardClick(segment.SegmentId, e);
+            }
+        };
+
+        // Card context menu. segment.Speaker is read at click time, so a reassignment
+        // between opening the transcript and using the menu is respected. The text box
+        // keeps its own Edit/Split menu; this one covers the rest of the card.
+        var menu = new ContextMenu();
+
+        var selectSpeakerItem = new MenuItem { Header = "👤 Select all from this speaker" };
+        selectSpeakerItem.Click += (_, __) => SelectAllFromSpeaker(segment.Speaker, additive: false);
+        menu.Items.Add(selectSpeakerItem);
+
+        var deleteItem = new MenuItem { Header = "🗑 Delete this segment" };
+        deleteItem.Click += (_, __) =>
+        {
+            var confirm = MessageBox.Show(
+                "Delete this segment from the transcript?",
+                "Delete Segment", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (confirm == MessageBoxResult.Yes)
+            {
+                DeleteSegments(new List<int> { segment.SegmentId });
+            }
+        };
+        menu.Items.Add(deleteItem);
+
+        segmentBorder.ContextMenu = menu;
+    }
+
+    // --- Segment audio playback -------------------------------------------------------
+    // Live recordings are teed to per-source session WAVs (16 kHz mono 16-bit - the exact
+    // stream the ASR consumes, ~115 MB/hour) so any segment can be replayed to verify the
+    // transcription. File transcriptions replay straight from the original media file.
+
+    private SessionAudioWriter? _sessionAudio;
+    private WaveOutEvent? _segmentPlayer;
+    private AudioFileReader? _segmentPlayerReader;
+    private Button? _activePlayButton;
+    private DispatcherTimer? _segmentPlaybackTimer;
+    private double _segmentPlaybackEndSeconds;
+
+    private Button CreatePlaySegmentButton(TranscriptionSegment segment)
+    {
+        var playButton = new Button
+        {
+            Content = "▶",
+            Width = 25,
+            Height = 25,
+            Margin = new Thickness(0, 0, 6, 0),
+            FontSize = 10,
+            Background = Brushes.WhiteSmoke,
+            ToolTip = "Play this segment's audio (click again to stop)"
+        };
+        playButton.Click += (s, e) => ToggleSegmentPlayback(segment, playButton);
+        return playButton;
+    }
+
+    private void ToggleSegmentPlayback(TranscriptionSegment segment, Button playButton)
+    {
+        if (ReferenceEquals(_activePlayButton, playButton))
+        {
+            StopSegmentPlayback();
+            return;
+        }
+        StopSegmentPlayback();
+
+        if (_isRecording)
+        {
+            // The loopback capture would hear the playback and transcribe it right back
+            // into the session. Verification is an after-the-fact activity anyway.
+            if (_statusText != null) _statusText.Text = "Stop the recording before playing segments back.";
+            return;
+        }
+
+        var path = segment.AudioFilePath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        {
+            if (_statusText != null)
+            {
+                _statusText.Text = _privacyModeEnabled
+                    ? "No audio saved for this segment (Legal-Safe Mode does not keep session audio)."
+                    : "No saved audio for this segment - enable 'Save session audio' before recording.";
+            }
+            return;
+        }
+
+        try
+        {
+            _segmentPlayerReader = new AudioFileReader(path);
+            var start = TimeSpan.FromSeconds(Math.Max(0, segment.StartTime));
+            if (start < _segmentPlayerReader.TotalTime)
+            {
+                _segmentPlayerReader.CurrentTime = start;
+            }
+            // Small pad so a word that runs slightly past the segment boundary isn't clipped.
+            _segmentPlaybackEndSeconds = segment.EndTime + 0.25;
+
+            var player = new WaveOutEvent();
+            _segmentPlayer = player;
+            player.Init(_segmentPlayerReader);
+            player.PlaybackStopped += (s, e) => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                // Only react if this event belongs to the CURRENT player - a stale stop
+                // event from a previous playback must not kill a newly started one.
+                if (ReferenceEquals(_segmentPlayer, player))
+                {
+                    StopSegmentPlayback();
+                }
+            }));
+            player.Play();
+
+            _activePlayButton = playButton;
+            playButton.Content = "⏹";
+
+            if (_segmentPlaybackTimer == null)
+            {
+                _segmentPlaybackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+                _segmentPlaybackTimer.Tick += (s, e) =>
+                {
+                    if (_segmentPlayerReader != null
+                        && _segmentPlayerReader.CurrentTime.TotalSeconds >= _segmentPlaybackEndSeconds)
+                    {
+                        StopSegmentPlayback();
+                    }
+                };
+            }
+            _segmentPlaybackTimer.Start();
+        }
+        catch (Exception ex)
+        {
+            StopSegmentPlayback();
+            if (_statusText != null) _statusText.Text = $"Playback failed: {ex.Message}";
+        }
+    }
+
+    private void StopSegmentPlayback()
+    {
+        _segmentPlaybackTimer?.Stop();
+        if (_activePlayButton != null)
+        {
+            _activePlayButton.Content = "▶";
+            _activePlayButton = null;
+        }
+        var player = _segmentPlayer;
+        _segmentPlayer = null; // cleared first so the PlaybackStopped callback sees it stale
+        try { player?.Stop(); } catch { /* already stopped */ }
+        player?.Dispose();
+        _segmentPlayerReader?.Dispose();
+        _segmentPlayerReader = null;
+    }
+
+    /// <summary>
+    /// Per-recording session audio files: one WAV per source, 16 kHz mono 16-bit PCM.
+    /// Chunks are written at their timeline byte offsets (offset = seconds * bytes/sec),
+    /// so silence the dispatcher dropped stays as literal silence in the file and every
+    /// segment's StartTime seeks to exactly the right audio. The header sizes are
+    /// re-stamped after every write, so the file is valid WAV at all times - there is no
+    /// finalize step to forget, and a crash mid-recording still leaves playable audio.
+    /// </summary>
+    private sealed class SessionAudioWriter : IDisposable
+    {
+        private readonly object _sync = new object();
+        private readonly Dictionary<string, FileStream> _streams = new Dictionary<string, FileStream>();
+        private readonly Dictionary<string, string> _paths = new Dictionary<string, string>();
+        private readonly string _directory;
+        private readonly string _stamp;
+        private bool _disposed;
+
+        public SessionAudioWriter()
+        {
+            _directory = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Oreja Recordings");
+            _stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+        }
+
+        /// <summary>The session file a source has actually written to, or null if none yet.</summary>
+        public string? GetPathIfWritten(string sourceName)
+        {
+            lock (_sync)
+            {
+                return _streams.ContainsKey(sourceName) && _paths.TryGetValue(sourceName, out var path)
+                    ? path
+                    : null;
+            }
+        }
+
+        public void Write(string sourceName, double startSeconds, byte[] pcm)
+        {
+            if (pcm.Length == 0) return;
+            lock (_sync)
+            {
+                if (_disposed) return;
+                try
+                {
+                    if (!_streams.TryGetValue(sourceName, out var stream))
+                    {
+                        System.IO.Directory.CreateDirectory(_directory);
+                        var safeName = string.Concat(sourceName.Split(System.IO.Path.GetInvalidFileNameChars()))
+                            .Replace(' ', '-');
+                        var path = System.IO.Path.Combine(_directory, $"Oreja_{_stamp}_{safeName}.wav");
+                        stream = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
+                        stream.Write(BuildWavHeader(0), 0, 44);
+                        _paths[sourceName] = path;
+                        _streams[sourceName] = stream;
+                    }
+
+                    long offset = 44 + (((long)Math.Round(startSeconds * TRANSCRIPTION_BYTES_PER_SECOND)) & ~1L);
+                    stream.Seek(offset, SeekOrigin.Begin);
+                    stream.Write(pcm, 0, pcm.Length);
+
+                    long dataLength = Math.Max(0, stream.Length - 44);
+                    var header = BuildWavHeader(dataLength);
+                    stream.Seek(0, SeekOrigin.Begin);
+                    stream.Write(header, 0, 44);
+                    stream.Flush();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Session audio write failed ({sourceName}): {ex.Message}");
+                }
+            }
+        }
+
+        private static byte[] BuildWavHeader(long dataLength)
+        {
+            const int sampleRate = TRANSCRIPTION_SAMPLE_RATE;
+            const short channels = 1;
+            const short bitsPerSample = 16;
+            using var ms = new MemoryStream(44);
+            using var w = new BinaryWriter(ms);
+            w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+            w.Write((uint)(36 + dataLength));
+            w.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+            w.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+            w.Write(16);                                    // fmt chunk size
+            w.Write((short)1);                              // PCM
+            w.Write(channels);
+            w.Write(sampleRate);
+            w.Write(sampleRate * channels * (bitsPerSample / 8)); // byte rate
+            w.Write((short)(channels * (bitsPerSample / 8)));     // block align
+            w.Write(bitsPerSample);
+            w.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+            w.Write((uint)dataLength);
+            return ms.ToArray();
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                _disposed = true;
+                foreach (var stream in _streams.Values)
+                {
+                    try { stream.Dispose(); } catch { /* best effort */ }
+                }
+                _streams.Clear();
+            }
+        }
+    }
+
+    // --- Session speaker roster dialog --------------------------------------------------
+
+    private void ShowSessionSpeakersDialog()
+    {
+        var dialog = new Window
+        {
+            Title = "Session Speakers",
+            Width = 440,
+            Height = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = MainWindow,
+            ResizeMode = ResizeMode.NoResize
+        };
+
+        var root = new StackPanel { Margin = new Thickness(15) };
+
+        root.Children.Add(new TextBlock
+        {
+            Text = "Declare who is in this session so speaker identification doesn't have to guess. " +
+                   "Known speakers keep learning voiceprints from your corrections; guests are " +
+                   "session-only and never saved.",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+
+        // Known speakers checklist
+        root.Children.Add(new TextBlock
+        {
+            Text = "Known speakers present:",
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 5)
+        });
+        var knownPanel = new StackPanel();
+        var knownNames = _availableSpeakers
+            .Where(s => s != "Unknown"
+                && !s.StartsWith("Speaker_AUTO_SPEAKER_")
+                && !_sessionGuestNames.Contains(s))
+            .Distinct()
+            .OrderBy(s => s)
+            .ToList();
+        var knownChecks = new List<CheckBox>();
+        foreach (var name in knownNames)
+        {
+            var check = new CheckBox
+            {
+                Content = name,
+                Margin = new Thickness(2),
+                IsChecked = _sessionRoster.Contains(name)
+            };
+            knownChecks.Add(check);
+            knownPanel.Children.Add(check);
+        }
+        if (knownNames.Count == 0)
+        {
+            knownPanel.Children.Add(new TextBlock
+            {
+                Text = "(no saved speakers yet - name them during a session and they'll show up here)",
+                FontStyle = FontStyles.Italic,
+                Foreground = Brushes.Gray
+            });
+        }
+        root.Children.Add(new ScrollViewer
+        {
+            Content = knownPanel,
+            MaxHeight = 170,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+
+        // Guests
+        root.Children.Add(new TextBlock
+        {
+            Text = "Guest speakers (this session only, no voiceprint saved):",
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 5)
+        });
+        var guestNames = new List<string>(_sessionGuestNames.Where(g => _sessionRoster.Contains(g)));
+        var guestPanel = new StackPanel();
+
+        void RebuildGuestPanel()
+        {
+            guestPanel.Children.Clear();
+            foreach (var guest in guestNames)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(2) };
+                var removeButton = new Button
+                {
+                    Content = "×",
+                    Width = 20,
+                    Height = 20,
+                    Margin = new Thickness(0, 0, 6, 0),
+                    Background = Brushes.LightCoral
+                };
+                var captured = guest;
+                removeButton.Click += (_, __) => { guestNames.Remove(captured); RebuildGuestPanel(); };
+                row.Children.Add(removeButton);
+                row.Children.Add(new TextBlock { Text = $"{guest}  (guest)", VerticalAlignment = VerticalAlignment.Center });
+                guestPanel.Children.Add(row);
+            }
+        }
+        RebuildGuestPanel();
+        root.Children.Add(guestPanel);
+
+        var addGuestRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 5, 0, 12) };
+        var guestNameBox = new TextBox { Width = 220, Padding = new Thickness(4) };
+        var addGuestButton = new Button
+        {
+            Content = "＋ Add Guest",
+            Width = 100,
+            Margin = new Thickness(8, 0, 0, 0),
+            Background = Brushes.LightYellow
+        };
+        void AddGuest()
+        {
+            var name = guestNameBox.Text.Trim();
+            if (name.Length == 0) return;
+            bool duplicate = guestNames.Contains(name, StringComparer.OrdinalIgnoreCase)
+                || knownNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+            if (!duplicate)
+            {
+                guestNames.Add(name);
+                RebuildGuestPanel();
+            }
+            guestNameBox.Text = "";
+            guestNameBox.Focus();
+        }
+        addGuestButton.Click += (_, __) => AddGuest();
+        guestNameBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) AddGuest(); };
+        addGuestRow.Children.Add(guestNameBox);
+        addGuestRow.Children.Add(addGuestButton);
+        root.Children.Add(addGuestRow);
+
+        // Action buttons
+        var actionRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        var okButton = new Button
+        {
+            Content = "Set Roster",
+            Width = 100,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsDefault = true,
+            Background = Brushes.LightGreen
+        };
+        var clearButton = new Button
+        {
+            Content = "No Roster",
+            Width = 90,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            ToolTip = "Clear the roster: back to unconstrained identification"
+        };
+        var cancelButton = new Button { Content = "Cancel", Width = 70, Height = 30, IsCancel = true };
+
+        okButton.Click += (_, __) =>
+        {
+            var selectedKnown = knownChecks.Where(c => c.IsChecked == true)
+                .Select(c => c.Content?.ToString() ?? "")
+                .Where(n => n.Length > 0)
+                .ToList();
+            _sessionRoster = selectedKnown.Concat(guestNames).ToList();
+            _sessionGuestNames = new HashSet<string>(guestNames, StringComparer.OrdinalIgnoreCase);
+            RefreshAllSpeakerDropdowns();
+            if (_statusText != null)
+            {
+                _statusText.Text = _sessionRoster.Count == 0
+                    ? "Session roster cleared."
+                    : "Session speakers: " + string.Join(", ",
+                        _sessionRoster.Select(n => _sessionGuestNames.Contains(n) ? $"{n} (guest)" : n));
+            }
+            dialog.DialogResult = true;
+        };
+        clearButton.Click += (_, __) =>
+        {
+            _sessionRoster = new List<string>();
+            _sessionGuestNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            RefreshAllSpeakerDropdowns();
+            if (_statusText != null) _statusText.Text = "Session roster cleared.";
+            dialog.DialogResult = true;
+        };
+
+        actionRow.Children.Add(okButton);
+        actionRow.Children.Add(clearButton);
+        actionRow.Children.Add(cancelButton);
+        root.Children.Add(actionRow);
+
+        dialog.Content = new ScrollViewer { Content = root, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        dialog.ShowDialog();
+    }
+
     private void UpdateMultiSelectButtons()
     {
+        var count = _selectedSegments.Count;
         if (_bulkRenameButton != null)
         {
-            _bulkRenameButton.IsEnabled = _selectedSegments.Count > 0;
-            _bulkRenameButton.Content = $"Rename Selected ({_selectedSegments.Count})";
+            _bulkRenameButton.IsEnabled = count > 0;
+            _bulkRenameButton.Content = $"🏷 Rename Selected ({count})";
+        }
+        if (_deleteSelectedButton != null)
+        {
+            _deleteSelectedButton.IsEnabled = count > 0;
+            _deleteSelectedButton.Content = $"🗑 Delete Selected ({count})";
         }
         if (_clearSelectionButton != null)
         {
-            _clearSelectionButton.IsEnabled = _selectedSegments.Count > 0;
+            _clearSelectionButton.IsEnabled = count > 0;
         }
     }
 
@@ -3318,19 +4142,8 @@ public partial class App : Application
             HorizontalAlignment = HorizontalAlignment.Left 
         };
         
-        // Multi-select mode toggle
-        _multiSelectToggleButton = new Button
-        {
-            Content = "📋 Multi-Select: OFF",
-            Width = 150,
-            Height = 30,
-            Margin = new Thickness(0, 0, 10, 0),
-            Background = Brushes.LightBlue,
-            ToolTip = "Toggle multi-select mode for bulk operations"
-        };
-        _multiSelectToggleButton.Click += MultiSelectToggle_Click;
-        
-        // Select All button
+        // Select All button (respects an active search filter: hidden cards stay unselected,
+        // which turns Search + Select All into "select every match")
         _selectAllButton = new Button
         {
             Content = "☑ Select All",
@@ -3338,10 +4151,22 @@ public partial class App : Application
             Height = 30,
             Margin = new Thickness(0, 0, 10, 0),
             Background = Brushes.LightGray,
-            IsEnabled = false
+            ToolTip = "Select every visible segment (with a search active, that means every match)"
         };
         _selectAllButton.Click += SelectAll_Click;
-        
+
+        // Select-by-speaker menu button
+        var selectSpeakerButton = new Button
+        {
+            Content = "👤 Select Speaker…",
+            Width = 140,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.LightGray,
+            ToolTip = "Select every segment from one speaker (Ctrl+choose adds to the current selection)"
+        };
+        selectSpeakerButton.Click += SelectBySpeaker_Click;
+
         // Clear Selection button
         _clearSelectionButton = new Button
         {
@@ -3353,7 +4178,7 @@ public partial class App : Application
             IsEnabled = false
         };
         _clearSelectionButton.Click += ClearSelection_Click;
-        
+
         // Bulk rename button
         _bulkRenameButton = new Button
         {
@@ -3365,80 +4190,54 @@ public partial class App : Application
             IsEnabled = false
         };
         _bulkRenameButton.Click += BulkRename_Click;
-        
+
+        // Bulk delete button
+        _deleteSelectedButton = new Button
+        {
+            Content = "🗑 Delete Selected (0)",
+            Width = 160,
+            Height = 30,
+            Margin = new Thickness(0, 0, 10, 0),
+            Background = Brushes.MistyRose,
+            IsEnabled = false,
+            ToolTip = "Remove the selected segments from the transcript (speakers are not affected)"
+        };
+        _deleteSelectedButton.Click += DeleteSelected_Click;
+
         // Status text for selections
         var selectionStatus = new TextBlock
         {
-            Text = "Select segments to perform bulk operations",
+            Text = "Click a card to select · Shift+click for a range · Ctrl+click to toggle",
             VerticalAlignment = VerticalAlignment.Center,
             FontStyle = FontStyles.Italic,
             Foreground = Brushes.DarkOrange,
             Margin = new Thickness(10, 0, 0, 0)
         };
-        
-        toolbarPanel.Children.Add(_multiSelectToggleButton);
+
         toolbarPanel.Children.Add(_selectAllButton);
+        toolbarPanel.Children.Add(selectSpeakerButton);
         toolbarPanel.Children.Add(_clearSelectionButton);
         toolbarPanel.Children.Add(_bulkRenameButton);
+        toolbarPanel.Children.Add(_deleteSelectedButton);
         toolbarPanel.Children.Add(selectionStatus);
-        
+
         toolbar.Child = toolbarPanel;
         return toolbar;
-    }
-
-    private void MultiSelectToggle_Click(object sender, RoutedEventArgs e)
-    {
-        _multiSelectMode = !_multiSelectMode;
-        
-        if (_multiSelectToggleButton != null)
-        {
-            _multiSelectToggleButton.Content = _multiSelectMode ? "📋 Multi-Select: ON" : "📋 Multi-Select: OFF";
-            _multiSelectToggleButton.Background = _multiSelectMode ? Brushes.Orange : Brushes.LightBlue;
-        }
-        
-        // Update button states
-        if (_selectAllButton != null) _selectAllButton.IsEnabled = _multiSelectMode;
-        if (_clearSelectionButton != null) _clearSelectionButton.IsEnabled = _multiSelectMode && _selectedSegments.Count > 0;
-        
-        // Update checkbox visibility
-        foreach (var checkbox in _segmentCheckBoxes)
-        {
-            checkbox.Visibility = _multiSelectMode ? Visibility.Visible : Visibility.Collapsed;
-        }
-        
-        // Clear selections when turning off multi-select mode
-        if (!_multiSelectMode)
-        {
-            _selectedSegments.Clear();
-            UpdateMultiSelectButtons();
-        }
     }
 
     private void SelectAll_Click(object sender, RoutedEventArgs e)
     {
         foreach (var segment in _transcriptionHistory)
         {
-            _selectedSegments.Add(segment.SegmentId);
+            if (segment.CardElement?.Visibility == Visibility.Collapsed) continue;
+            SetSegmentSelected(segment, true);
         }
-        
-        foreach (var checkbox in _segmentCheckBoxes)
-        {
-            checkbox.IsChecked = true;
-        }
-        
         UpdateMultiSelectButtons();
     }
 
     private void ClearSelection_Click(object sender, RoutedEventArgs e)
     {
-        _selectedSegments.Clear();
-        
-        foreach (var checkbox in _segmentCheckBoxes)
-        {
-            checkbox.IsChecked = false;
-        }
-        
-        UpdateMultiSelectButtons();
+        ClearAllSelections();
     }
 
     private void BulkRename_Click(object sender, RoutedEventArgs e)
@@ -3796,7 +4595,8 @@ public partial class App : Application
             EndTime = originalSegment.StartTime + totalDuration,
             Source = originalSegment.Source,
             Timestamp = originalSegment.Timestamp,
-            SegmentId = _transcriptionHistory.Count,
+            SegmentId = _nextSegmentId++,
+            AudioFilePath = originalSegment.AudioFilePath,
             EmotionalTone = AnalyzeSentiment(secondText),
             SentimentConfidence = 0.5 // Default confidence for user-edited content
         };
@@ -3996,7 +4796,10 @@ public partial class App : Application
                 
                 quickButton.Click += (s, e) =>
                 {
-                    var newSpeaker = $"Speaker {speakerNum}";
+                    // Mirrors AddTranscriptionSegment: roster order first, then legacy names.
+                    var newSpeaker = speakerNum <= _sessionRoster.Count
+                        ? _sessionRoster[speakerNum - 1]
+                        : $"Speaker {speakerNum}";
                     speakerComboBox.SelectedItem = newSpeaker;
                     UpdateSegmentSpeaker(currentSegmentId, newSpeaker);
                 };
@@ -4067,6 +4870,7 @@ public partial class App : Application
             // Add all top row elements
             topPanel.Children.Add(alertBellIcon);
             topPanel.Children.Add(selectionCheckBox);
+            topPanel.Children.Add(CreatePlaySegmentButton(segment));
             topPanel.Children.Add(timestampText);
             topPanel.Children.Add(speakerComboBox);
             topPanel.Children.Add(emotionIndicator);
@@ -4084,8 +4888,8 @@ public partial class App : Application
             segmentPanel.Children.Add(topPanel);
             segmentPanel.Children.Add(textDisplay);
 
-            // Add segment panel to border and border to main panel
-            segmentBorder.Child = segmentPanel;
+            // Speaker stripe + click-to-select + context menu, then attach to the panel.
+            AttachCardChrome(segment, segmentBorder, segmentPanel);
             _transcriptionPanel.Children.Add(segmentBorder);
 
             // Cache the card elements and re-apply the keyword-alert highlight, mirroring what
@@ -4094,6 +4898,7 @@ public partial class App : Application
             segment.SpeakerComboBoxElement = speakerComboBox;
             segment.TextDisplayElement = textDisplay;
             segment.AlertBellElement = alertBellIcon;
+            segment.SelectionCheckBoxElement = selectionCheckBox;
             ApplyKeywordAlertHighlight(segment);
         }
 
@@ -4144,6 +4949,12 @@ public partial class App : Application
             {
                 _suppressSpeakerSelectionChanged = previousSuppress;
             }
+        }
+
+        // The stripe tracks the speaker, so a reassignment recolors the card edge too.
+        if (segment.SpeakerStripeElement != null)
+        {
+            segment.SpeakerStripeElement.Fill = GetSpeakerColorEnhanced(displaySpeaker);
         }
 
         // Don't clobber text the user is actively editing - EnableTextEditing sets IsReadOnly to
@@ -4224,7 +5035,11 @@ public partial class App : Application
         var cardElement = segment.CardElement;
         if (cardElement != null)
         {
-            cardElement.Background = isMatch ? _keywordAlertCardBackground : Brushes.White;
+            // Selection owns the background; the alert keeps its border + bell either way,
+            // so a selected alert-matching card still reads as both.
+            cardElement.Background = _selectedSegments.Contains(segment.SegmentId)
+                ? _selectionCardBackground
+                : (isMatch ? _keywordAlertCardBackground : Brushes.White);
             cardElement.BorderBrush = isMatch ? _keywordAlertCardBorder : Brushes.LightGray;
             cardElement.BorderThickness = isMatch ? new Thickness(2) : new Thickness(1);
         }

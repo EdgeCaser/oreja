@@ -1343,6 +1343,7 @@ async def transcribe_audio(
     source: Optional[str] = None,
     language: Optional[str] = None,
     accuracy: bool = False,
+    max_speakers: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Transcribe and diarize audio file, optionally with sentiment analysis and audio features.
@@ -1364,6 +1365,11 @@ async def transcribe_audio(
             beam, decoded with OREJA_FILE_MODEL when configured. Meant for the
             offline file path - a live 5-second chunk gains little and pays
             real latency.
+        max_speakers: QUERY PARAMETER. Ceiling on how many distinct speakers
+            diarization may report - the client sends its session roster size
+            so pyannote cannot invent phantom extra speakers. A ceiling, not an
+            exact count: any one chunk usually contains a subset of the roster.
+            Out-of-range values (< 1 or > 50) are ignored.
         include_analysis: Run the sentiment/conversation-analysis enhancement
             inline. QUERY PARAMETER ONLY (POST /transcribe?include_analysis=true):
             FastAPI treats a bare `bool` alongside `File(...)` as a query
@@ -1424,9 +1430,12 @@ async def transcribe_audio(
             )
         )
 
+        if max_speakers is not None and not (1 <= max_speakers <= 50):
+            max_speakers = None
+
         if diarization_pipeline is not None:
             diarization_task = asyncio.create_task(
-                run_diarization(waveform, sample_rate)
+                run_diarization(waveform, sample_rate, max_speakers=max_speakers)
             )
             # Wait for both tasks to complete. return_exceptions=True so a
             # failure on one side does not leave the other task orphaned in a
@@ -2354,15 +2363,22 @@ async def run_transcription(
         raise
 
 
-def _diarize_sync(waveform: torch.Tensor, sample_rate: int) -> Any:
+def _diarize_sync(
+    waveform: torch.Tensor, sample_rate: int, max_speakers: Optional[int] = None
+) -> Any:
     """Blocking pyannote call, serialized by the diarization lock."""
     if diarization_pipeline is None:
         raise ValueError("Diarization pipeline not loaded")
 
     audio_data = {"waveform": waveform, "sample_rate": sample_rate}
+    # max_speakers (not num_speakers) is the right roster hint for chunked live audio:
+    # a 5-second chunk usually contains a subset of the session's speakers, so forcing
+    # an exact count would be wrong, but the ceiling stops pyannote from inventing
+    # phantom extra speakers.
+    kwargs = {"max_speakers": max_speakers} if max_speakers else {}
     with _diarization_lock:
         with torch.inference_mode():
-            result = diarization_pipeline(audio_data)
+            result = diarization_pipeline(audio_data, **kwargs)
     # pyannote.audio 4.x returns a DiarizeOutput dataclass whose Annotation
     # (the object with .itertracks) lives on .speaker_diarization; 3.x returned
     # the Annotation directly. Unwrap here so every downstream consumer keeps
@@ -2370,13 +2386,15 @@ def _diarize_sync(waveform: torch.Tensor, sample_rate: int) -> Any:
     return getattr(result, "speaker_diarization", result)
 
 
-async def run_diarization(waveform: torch.Tensor, sample_rate: int) -> Any:
+async def run_diarization(
+    waveform: torch.Tensor, sample_rate: int, max_speakers: Optional[int] = None
+) -> Any:
     """Run speaker diarization on the full waveform, off the event loop."""
     try:
         if diarization_pipeline is None:
             raise ValueError("Diarization pipeline not loaded")
 
-        return await asyncio.to_thread(_diarize_sync, waveform, sample_rate)
+        return await asyncio.to_thread(_diarize_sync, waveform, sample_rate, max_speakers)
 
     except Exception as e:
         logger.error(f"Diarization error: {e}")

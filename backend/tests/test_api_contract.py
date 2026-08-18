@@ -197,7 +197,7 @@ def wired_pipeline(monkeypatch):
     monkeypatch.setattr(server, "diarization_pipeline", object(), raising=False)
     monkeypatch.setattr(
         server, "_diarize_sync",
-        lambda wf, sr: diarization, raising=False
+        lambda wf, sr, max_speakers=None: diarization, raising=False
     )
     # No embedding model / database -> identify_speakers_hook is a pass-through
     # and the diarization labels survive. This is the shipped fallback path.
