@@ -8,12 +8,17 @@ VAD and (optionally) accuracy mode are all part of what gets measured.
 Reference layout: a directory of audio/reference pairs sharing a base name -
     eval_data/
         meeting1.wav
-        meeting1.ref.txt      <- the corrected, ground-truth transcript
+        meeting1.ref.json     <- Oreja's own JSON export (Save Transcription),
+                                 after hand-correcting every segment in the app
         call2.flac
-        call2.ref.txt
+        call2.ref.txt         <- or plain corrected text, if you prefer
 
-A practical way to build references: transcribe a session, fix every error by
-hand in the transcript editor, export the corrected text to <name>.ref.txt.
+A practical way to build references: transcribe a file in the Oreja app, fix
+every mistranscribed word in the transcript pane (double-click a segment's text
+to edit it), then Save Transcription as JSON and drop it here renamed to
+<audio-stem>.ref.json. Speaker labels and timestamps in the export are ignored -
+only the words are scored. Privacy mode must be OFF when exporting, or every
+segment reads [REDACTED].
 
 Usage (backend must be running):
     python eval_wer.py eval_data/
@@ -35,7 +40,7 @@ import httpx
 import jiwer
 
 AUDIO_EXTENSIONS = (".wav", ".flac", ".ogg", ".mp3")
-REFERENCE_SUFFIX = ".ref.txt"
+REFERENCE_SUFFIXES = (".ref.json", ".ref.txt")  # first match wins
 
 # Case and punctuation are formatting, not recognition: normalize both sides so
 # "Okay," vs "okay" is not counted as an error.
@@ -56,12 +61,33 @@ def find_pairs(eval_dir: Path):
     for audio in sorted(eval_dir.iterdir()):
         if audio.suffix.lower() not in AUDIO_EXTENSIONS:
             continue
-        reference = audio.with_name(audio.stem + REFERENCE_SUFFIX)
-        if reference.exists():
+        candidates = [audio.with_name(audio.stem + s) for s in REFERENCE_SUFFIXES]
+        reference = next((c for c in candidates if c.exists()), None)
+        if reference is not None:
             pairs.append((audio, reference))
         else:
-            print(f"[skip] {audio.name}: no {reference.name}", file=sys.stderr)
+            print(f"[skip] {audio.name}: no {candidates[0].name} or {candidates[1].name}",
+                  file=sys.stderr)
     return pairs
+
+
+def load_reference(reference_path: Path) -> str:
+    """
+    Reference text from either format: Oreja's JSON export (segment texts are
+    joined; speakers/timestamps ignored) or a plain text file.
+    """
+    raw = reference_path.read_text(encoding="utf-8").strip()
+    if reference_path.name.lower().endswith(".ref.json"):
+        payload = json.loads(raw)
+        segments = payload.get("segments") or []
+        texts = [(s.get("text") or "").strip() for s in segments]
+        if any(t == "[REDACTED]" for t in texts):
+            raise ValueError(
+                f"{reference_path.name} was exported with privacy mode on - "
+                "every segment is [REDACTED]. Re-export with privacy mode off."
+            )
+        return " ".join(t for t in texts if t).strip()
+    return raw
 
 
 def transcribe(client: httpx.Client, base_url: str, audio_path: Path,
@@ -111,7 +137,11 @@ def main() -> int:
     # Long files legitimately transcribe for minutes; never let the client give up first.
     with httpx.Client(timeout=httpx.Timeout(1800.0)) as client:
         for audio, ref_path in pairs:
-            reference = ref_path.read_text(encoding="utf-8").strip()
+            try:
+                reference = load_reference(ref_path)
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"[skip] {ref_path.name}: {e}", file=sys.stderr)
+                continue
             if not reference:
                 print(f"[skip] {ref_path.name}: empty reference", file=sys.stderr)
                 continue
