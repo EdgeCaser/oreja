@@ -317,8 +317,18 @@ def initialize_models():
     logger.info(f"🐍 Python executable: {sys.executable}")
     logger.info(f"🔥 PyTorch version: {torch.__version__}")
 
-    # Set up device (GPU if available, otherwise CPU)
-    if torch.cuda.is_available():
+    # Set up the torch device for the pyannote stack (diarization + speaker
+    # embeddings). OREJA_TORCH_DEVICE=cpu moves it off the GPU entirely, leaving the
+    # GPU to whisper alone (whisper's device is OREJA_DEVICE, independent of this):
+    # on a card shared with a heavyweight desktop (dwm, Zoom, browsers) the combined
+    # whisper+pyannote stack can oversubscribe VRAM, at which point WDDM pages CUDA
+    # memory through system RAM and ~1s diarizations take minutes. The pyannote
+    # models are small enough that CPU costs only a few seconds per live chunk.
+    torch_device_setting = os.getenv("OREJA_TORCH_DEVICE", "auto").strip().lower()
+    if torch_device_setting == "cpu":
+        device = torch.device("cpu")
+        logger.info("Using device: cpu (OREJA_TORCH_DEVICE=cpu; whisper device set separately)")
+    elif torch.cuda.is_available():
         device = torch.device("cuda")
         logger.info(f"Using device: cuda ({torch.cuda.get_device_name(0)})")
         logger.info(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
@@ -517,7 +527,12 @@ def ensure_embedding_model() -> bool:
             return True
         try:
             if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                # Same device policy as initialize_models: OREJA_TORCH_DEVICE=cpu
+                # keeps the pyannote stack off the GPU.
+                if os.getenv("OREJA_TORCH_DEVICE", "auto").strip().lower() == "cpu":
+                    device = torch.device("cpu")
+                else:
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             logger.info(f"Loading embedding model on demand: {EMBEDDING_MODEL} (device={device})")
             from pyannote.audio.pipelines.speaker_verification import (  # lazy import
                 PretrainedSpeakerEmbedding,
@@ -2400,13 +2415,14 @@ def _diarize_sync(
         diarize_started = time.perf_counter()
         with torch.inference_mode():
             result = diarization_pipeline(audio_data, **kwargs)
-        if torch.cuda.is_available():
+        if device is not None and device.type == "cuda":
             # Return pyannote's transient CUDA cache to the driver after each chunk.
             # torch's caching allocator otherwise holds its peak forever, and on a
             # 10 GB card shared with Zoom/browsers that hoarded headroom is what
             # pushes the NEXT allocation into WDDM system-RAM paging (100x slower).
             # ctranslate2 (whisper) doesn't use torch's allocator, so this only
             # releases diarization's scratch memory - a few ms, well worth it.
+            # No-op when the pyannote stack runs on CPU (OREJA_TORCH_DEVICE=cpu).
             torch.cuda.empty_cache()
         logger.info(
             f"Diarization finished in {time.perf_counter() - diarize_started:.2f}s"
