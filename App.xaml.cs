@@ -171,10 +171,30 @@ public partial class App : Application
     private bool _backendHealthCheckInFlight = false;
     private string? _lastBackendError;
 
+    // Whether the last contact with the backend (health check or transcribe request) succeeded.
+    // DispatchPendingAudio consults this BEFORE cutting a chunk: while false, buffered audio is
+    // held (and keeps accumulating, up to MAX_BUFFERED_AUDIO_BYTES) instead of being fired at a
+    // port nothing is listening on and lost. The main case is the auto-started backend's model
+    // load: uvicorn does not bind the port until whisper/pyannote finish loading (~20-60s), and
+    // before this flag every chunk sent in that window died with "connection refused". Volatile:
+    // written from health-check paths, read from the dispatch timer.
+    private volatile bool _backendReachable = false;
+    // True once any health check has succeeded this session. Distinguishes "auto-started backend
+    // is still loading models" (status: Connecting) from "backend went away" (status: Offline).
+    private volatile bool _backendEverConnected = false;
+
     // Best-effort auto-started backend process. Only killed on exit if we are the ones who
     // started it - an already-running backend the user launched themselves is left alone.
     private Process? _autoStartedBackendProcess;
     private bool _weStartedBackend = false;
+
+    // The auto-started backend's stdout/stderr are captured to a per-session log file (next to
+    // the settings file) so a backend that dies at startup leaves a diagnosable trail - without
+    // this its output went nowhere and a crash was indistinguishable from slow model loading.
+    private StreamWriter? _backendLogWriter;
+    private readonly object _backendLogSync = new object();
+    private string? _backendLogPath;
+    private int _backendLogStreamsEnded = 0; // stdout + stderr EOFs seen (2 = close the file)
 
     // Debounces settings writes so dragging/resizing the window doesn't hammer the disk.
     private DispatcherTimer? _settingsSaveTimer;
@@ -192,8 +212,11 @@ public partial class App : Application
         TRANSCRIPTION_SAMPLE_RATE * TRANSCRIPTION_CHANNELS * TRANSCRIPTION_BYTES_PER_SAMPLE;
 
     // Never keep more than this much un-sent audio per source. If the backend is down or
-    // slow the oldest audio is dropped instead of growing the buffer without bound.
-    private const int MAX_BUFFERED_AUDIO_SECONDS = 30;
+    // slow the oldest audio is dropped instead of growing the buffer without bound. Sized to
+    // ride out the auto-started backend's model-load window (~20-60s) with room to spare, since
+    // dispatch now holds chunks while the backend is unreachable; 120s is still only ~3.8 MB
+    // per source at the 32 KB/s wire format.
+    private const int MAX_BUFFERED_AUDIO_SECONDS = 120;
     private const int MAX_BUFFERED_AUDIO_BYTES =
         TRANSCRIPTION_BYTES_PER_SECOND * MAX_BUFFERED_AUDIO_SECONDS;
 
@@ -1201,7 +1224,9 @@ public partial class App : Application
             }
         }
 
-        UpdateBackendStatusUI(healthy ? BackendStatus.Connected : BackendStatus.Offline, healthy ? null : _lastBackendError);
+        UpdateBackendStatusUI(
+            healthy ? BackendStatus.Connected : BackendStartupInProgress() ? BackendStatus.Connecting : BackendStatus.Offline,
+            healthy ? null : _lastBackendError);
 
         _backendHealthTimer = new DispatcherTimer();
         _backendHealthTimer.Interval = TimeSpan.FromSeconds(10);
@@ -1223,7 +1248,9 @@ public partial class App : Application
         try
         {
             bool healthy = await CheckBackendHealthAsync().ConfigureAwait(true);
-            UpdateBackendStatusUI(healthy ? BackendStatus.Connected : BackendStatus.Offline, healthy ? null : _lastBackendError);
+            UpdateBackendStatusUI(
+                healthy ? BackendStatus.Connected : BackendStartupInProgress() ? BackendStatus.Connecting : BackendStatus.Offline,
+                healthy ? null : _lastBackendError);
         }
         finally
         {
@@ -1239,15 +1266,49 @@ public partial class App : Application
             if (response.IsSuccessStatusCode)
             {
                 _lastBackendError = null;
+                _backendReachable = true;
+                _backendEverConnected = true;
                 return true;
             }
 
             _lastBackendError = $"HTTP {(int)response.StatusCode}";
+            _backendReachable = false;
             return false;
         }
         catch (Exception ex)
         {
             _lastBackendError = ex.Message;
+            _backendReachable = false;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True while the backend we auto-started is alive but has not yet answered a health check -
+    /// i.e. uvicorn is still loading models and hasn't bound the port. Used to show "Connecting"
+    /// instead of "Offline" during that window: the old label read as a failure when the honest
+    /// state was "starting". Once the process dies (or the backend has connected at least once),
+    /// this returns false and a failed check means genuinely Offline again.
+    /// </summary>
+    private bool BackendStartupInProgress()
+    {
+        if (_backendEverConnected || !_weStartedBackend)
+        {
+            return false;
+        }
+
+        var process = _autoStartedBackendProcess;
+        if (process == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return !process.HasExited;
+        }
+        catch
+        {
             return false;
         }
     }
@@ -1261,6 +1322,11 @@ public partial class App : Application
     /// </summary>
     private void ReportBackendFailure(string errorMessage)
     {
+        // Close the dispatch gate immediately (not from the dispatcher callback below): the next
+        // timer tick must already see the backend as unreachable so only ONE chunk is ever lost
+        // to a dead backend - everything after it is held in the source buffers instead.
+        _backendReachable = false;
+
         // The poll is started INSIDE the dispatcher callback, not alongside it. PollBackendHealthAsync
         // awaits with ConfigureAwait(true) and then writes to _backendStatusDot/_backendStatusText;
         // started from a thread-pool thread (which FlushSourceOnStopAsync's retry path does reach -
@@ -1280,6 +1346,8 @@ public partial class App : Application
     /// flips back to Connected immediately rather than waiting for the next poll.</summary>
     private void ReportBackendSuccess()
     {
+        _backendReachable = true;
+        _backendEverConnected = true;
         Dispatcher.BeginInvoke(new Action(() => UpdateBackendStatusUI(BackendStatus.Connected)));
     }
 
@@ -1371,7 +1439,20 @@ public partial class App : Application
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
+                // Capture the backend's output to a log file (see OpenBackendLog). Without this
+                // its stdout/stderr went nowhere and a crash at startup was indistinguishable
+                // from slow model loading. Redirection makes the child block once the pipe
+                // buffer fills, so the Begin*ReadLine calls below are mandatory, not optional.
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
             };
+            // Make python actually emit UTF-8 on redirected pipes; its default on Windows is the
+            // ANSI codepage, which mangles the backend's emoji-laden log lines.
+            startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+
+            OpenBackendLog(pythonExe, startInfo.Arguments, backendDir);
 
             Console.WriteLine($"Auto-starting backend: \"{pythonExe}\" {startInfo.Arguments} (cwd: {backendDir})");
             _autoStartedBackendProcess = Process.Start(startInfo);
@@ -1379,7 +1460,19 @@ public partial class App : Application
 
             if (_weStartedBackend)
             {
-                Console.WriteLine($"Auto-started backend process id {_autoStartedBackendProcess!.Id}.");
+                var process = _autoStartedBackendProcess!;
+                process.EnableRaisingEvents = true;
+                process.Exited += OnAutoStartedBackendExited;
+                process.OutputDataReceived += (s, e) => WriteBackendLogLine(e.Data);
+                process.ErrorDataReceived += (s, e) => WriteBackendLogLine(e.Data);
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                Console.WriteLine($"Auto-started backend process id {process.Id}. Output -> {_backendLogPath ?? "(log file unavailable)"}");
+            }
+            else
+            {
+                CloseBackendLog();
             }
         }
         catch (Exception ex)
@@ -1388,7 +1481,116 @@ public partial class App : Application
             // indicator (already showing) communicates this to the user; nothing else to do.
             Console.WriteLine($"Auto-start backend failed: {ex.Message}");
             _weStartedBackend = false;
+            CloseBackendLog();
         }
+    }
+
+    /// <summary>
+    /// Opens (truncating) the auto-started backend's output log, next to the settings file:
+    /// %APPDATA%\Oreja\backend.log. One file per app session - "what did the backend say last
+    /// time it ran" is the question this answers; unbounded append is not worth it. Failure to
+    /// open just means backend output is discarded (WriteBackendLogLine tolerates a null
+    /// writer); the backend itself still runs.
+    /// </summary>
+    private void OpenBackendLog(string pythonExe, string arguments, string backendDir)
+    {
+        lock (_backendLogSync)
+        {
+            try
+            {
+                var orejaFolder = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Oreja");
+                Directory.CreateDirectory(orejaFolder);
+                _backendLogPath = System.IO.Path.Combine(orejaFolder, "backend.log");
+
+                _backendLogStreamsEnded = 0;
+                _backendLogWriter = new StreamWriter(_backendLogPath, append: false, new UTF8Encoding(false))
+                {
+                    // Line-level flushing so a crash (theirs or ours) never loses the tail of
+                    // the log - which is exactly the part a startup failure is diagnosed from.
+                    AutoFlush = true,
+                };
+                _backendLogWriter.WriteLine($"=== Oreja backend started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
+                _backendLogWriter.WriteLine($"=== \"{pythonExe}\" {arguments} (cwd: {backendDir}) ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not open backend log file: {ex.Message}");
+                _backendLogWriter = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sink for the backend's OutputDataReceived/ErrorDataReceived events (thread-pool threads).
+    /// A null line is that stream's EOF; after both streams end the file is closed. Writes after
+    /// close are silently dropped - EOF/exit ordering isn't guaranteed and a lost trailing line
+    /// beats a crash in an event handler.
+    /// </summary>
+    private void WriteBackendLogLine(string? line)
+    {
+        lock (_backendLogSync)
+        {
+            if (line == null)
+            {
+                if (++_backendLogStreamsEnded == 2)
+                {
+                    CloseBackendLogLocked();
+                }
+                return;
+            }
+
+            try
+            {
+                _backendLogWriter?.WriteLine(line);
+            }
+            catch
+            {
+                // Disposed underneath us or disk trouble; the log is best-effort.
+            }
+        }
+    }
+
+    private void CloseBackendLog()
+    {
+        lock (_backendLogSync)
+        {
+            CloseBackendLogLocked();
+        }
+    }
+
+    private void CloseBackendLogLocked()
+    {
+        try
+        {
+            _backendLogWriter?.Dispose();
+        }
+        catch
+        {
+        }
+        _backendLogWriter = null;
+    }
+
+    /// <summary>
+    /// The auto-started backend exited on its own (a crash, or clean shutdown we didn't ask
+    /// for). Record the exit code in both the console and the log file, and point at the log -
+    /// this line is what turns "connection refused forever" into a diagnosable failure.
+    /// </summary>
+    private void OnAutoStartedBackendExited(object? sender, EventArgs e)
+    {
+        int? exitCode = null;
+        try
+        {
+            exitCode = (sender as Process)?.ExitCode;
+        }
+        catch
+        {
+            // Process already disposed (app shutdown path); the console line below still lands.
+        }
+
+        var codeText = exitCode?.ToString() ?? "unknown";
+        WriteBackendLogLine($"=== backend process exited (code {codeText}) at {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
+        Console.WriteLine($"Auto-started backend exited (code {codeText}). Its output is in: {_backendLogPath ?? "(log file unavailable)"}");
     }
 
     /// <summary>
@@ -2074,6 +2276,28 @@ public partial class App : Application
 
             double bufferedSeconds = state.Buffer.Count / (double)TRANSCRIPTION_BYTES_PER_SECOND;
 
+            if (!_backendReachable)
+            {
+                // Backend not up yet (auto-started uvicorn loading models) or gone away: hold
+                // the audio instead of firing it at a closed port and losing it. The buffer
+                // keeps accumulating (AppendAudioToSource drops-oldest past
+                // MAX_BUFFERED_AUDIO_BYTES, with the timeline kept honest) and the health poll
+                // reopens this gate the moment the backend answers, at which point everything
+                // held goes out through the normal cut logic below.
+                if (!state.HoldLogged)
+                {
+                    state.HoldLogged = true;
+                    Console.WriteLine($"Backend not reachable; holding {bufferedSeconds:F1}s of {state.DisplayName} audio until it is.");
+                }
+                return;
+            }
+
+            if (state.HoldLogged)
+            {
+                state.HoldLogged = false;
+                Console.WriteLine($"Backend reachable again; releasing {bufferedSeconds:F1}s of held {state.DisplayName} audio.");
+            }
+
             if (bufferedSeconds < MAX_CHUNK_SECONDS)
             {
                 if (bufferedSeconds < MIN_CHUNK_SECONDS)
@@ -2167,7 +2391,10 @@ public partial class App : Application
                     return; // Nothing left to flush
                 }
 
-                if (!state.IsProcessing)
+                // Also wait out an unreachable backend (same bounded loop): stopping while the
+                // auto-started backend is still loading models should deliver the tail once it
+                // comes up, not throw the tail at a closed port.
+                if (!state.IsProcessing && _backendReachable)
                 {
                     chunk = state.Buffer.ToArray();
                     state.Buffer.Clear();
@@ -5695,6 +5922,10 @@ public partial class App : Application
                 backendProcess.Dispose();
             }
         }
+
+        // After the kill: the output streams may or may not have EOF'd by now, so close the
+        // backend log deterministically here (idempotent; late DataReceived events are dropped).
+        CloseBackendLog();
     }
 
     private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
@@ -6069,6 +6300,13 @@ public partial class App : Application
 
         /// <summary>True while a /transcribe request for THIS source is outstanding.</summary>
         public bool IsProcessing { get; set; }
+
+        /// <summary>
+        /// True after DispatchPendingAudio has logged that this source's audio is being held
+        /// because the backend is unreachable; cleared when dispatch resumes. Purely to keep the
+        /// console at one line per hold episode instead of one per timer tick. Guarded by Sync.
+        /// </summary>
+        public bool HoldLogged { get; set; }
 
         /// <summary>
         /// Total bytes that have left this source's Buffer since the recording started - either
