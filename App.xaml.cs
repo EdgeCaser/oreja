@@ -155,6 +155,11 @@ public partial class App : Application
     private const int DISPATCH_POLL_INTERVAL_MS = 1000;
     private const double MIN_CHUNK_SECONDS = 3.0;   // never send fragments shorter than this
     private const double MAX_CHUNK_SECONDS = 15.0;  // hard cap: flush mid-speech at this size
+    // MAX_CHUNK_SECONDS expressed in wire-format bytes: no single /transcribe request may carry
+    // more than this, even when draining a backlog. Chunks that scale with the backlog are how
+    // one slow backend response spiraled: 15s -> timeout -> 48s -> longer decode -> timeout ->
+    // 120s..., each oversized decode grinding the GPU for the next one to queue behind.
+    private const int MAX_CHUNK_BYTES = (int)(TRANSCRIPTION_BYTES_PER_SECOND * MAX_CHUNK_SECONDS);
     private const int SILENCE_WINDOW_MS = 400;      // trailing window inspected for a pause
     private const double SILENCE_RMS_THRESHOLD = 300.0; // int16 RMS ≈ -40 dBFS
 
@@ -2328,13 +2333,15 @@ public partial class App : Application
             // How much of the buffer leaves in this chunk. Normally all of it (the
             // tail-silence gate above means the buffer already ends on a pause), but a
             // cap flush lands here mid-speech: then prefer the most recent pause WITHIN
-            // the buffer as the cut point and carry the tail into the next chunk, so the
-            // boundary does not split a word. No pause anywhere => send everything,
-            // exactly as before.
+            // the first MAX_CHUNK_SECONDS as the cut point and carry the tail into the
+            // next chunk, so the boundary does not split a word. No pause in that range
+            // => hard-cut at MAX_CHUNK_BYTES: a bounded mid-word cut beats handing the
+            // backend a backlog-sized decode (see MAX_CHUNK_BYTES). The remainder goes
+            // out on the following ticks, one capped chunk per response.
             int cutBytes = state.Buffer.Count;
             if (bufferedSeconds >= MAX_CHUNK_SECONDS)
             {
-                cutBytes = FindPauseCutOffset(state.Buffer);
+                cutBytes = FindPauseCutOffset(state.Buffer, MAX_CHUNK_BYTES);
             }
 
             if (cutBytes >= state.Buffer.Count)
@@ -2396,8 +2403,25 @@ public partial class App : Application
                 // comes up, not throw the tail at a closed port.
                 if (!state.IsProcessing && _backendReachable)
                 {
-                    chunk = state.Buffer.ToArray();
-                    state.Buffer.Clear();
+                    // Capped exactly like DispatchPendingAudio: a stop with a backlog drains as
+                    // several bounded requests, never one backlog-sized decode.
+                    int cutBytes = state.Buffer.Count;
+                    if (cutBytes > MAX_CHUNK_BYTES)
+                    {
+                        cutBytes = FindPauseCutOffset(state.Buffer, MAX_CHUNK_BYTES);
+                    }
+
+                    if (cutBytes >= state.Buffer.Count)
+                    {
+                        chunk = state.Buffer.ToArray();
+                        state.Buffer.Clear();
+                    }
+                    else
+                    {
+                        chunk = new byte[cutBytes];
+                        state.Buffer.CopyTo(0, chunk, 0, cutBytes);
+                        state.Buffer.RemoveRange(0, cutBytes);
+                    }
 
                     // Same bookkeeping as DispatchPendingAudio: this tail chunk starts where
                     // everything consumed so far ended.
@@ -2411,7 +2435,7 @@ public partial class App : Application
             if (chunk.Length > 0)
             {
                 await ProcessAudioChunkAsync(chunk, state, chunkStartSeconds);
-                return;
+                continue; // A capped cut may have left a remainder; take the next slice.
             }
 
             // A request for this source is still in flight; wait for it and retry.
@@ -6356,30 +6380,42 @@ public partial class App : Application
 
     /// <summary>
     /// Byte offset to cut a cap-flushed chunk at: the end of the most recent
-    /// SILENCE_WINDOW_MS-long quiet stretch, so the cut lands in a pause instead of
-    /// mid-word. Scans backwards at 100 ms strides (a real inter-sentence pause is
-    /// several hundred ms, so the stride cannot step over one). Never cuts closer to
-    /// the buffer start than MIN_CHUNK_SECONDS - the outgoing chunk stays worth a
-    /// request - and returns buffer.Count (send everything, the pre-existing
-    /// behavior) when the range holds no pause at all.
+    /// SILENCE_WINDOW_MS-long quiet stretch within the first maxBytes of the buffer,
+    /// so the cut lands in a pause instead of mid-word. Scans backwards at 100 ms
+    /// strides (a real inter-sentence pause is several hundred ms, so the stride
+    /// cannot step over one). Never cuts closer to the buffer start than
+    /// MIN_CHUNK_SECONDS - the outgoing chunk stays worth a request - and hard-cuts
+    /// at maxBytes when the range holds no pause at all: the chunk size stays
+    /// bounded no matter how large a backlog the buffer holds, because chunk size
+    /// determines backend decode time and unbounded chunks are how one slow
+    /// response snowballed into minutes-long decodes.
     /// Callers must hold the owning source's Sync lock.
     /// </summary>
-    private static int FindPauseCutOffset(List<byte> buffer)
+    private static int FindPauseCutOffset(List<byte> buffer, int maxBytes)
     {
         int windowBytes = TRANSCRIPTION_BYTES_PER_SECOND * SILENCE_WINDOW_MS / 1000;
         int strideBytes = TRANSCRIPTION_BYTES_PER_SECOND / 10;
         int minChunkBytes = (int)(TRANSCRIPTION_BYTES_PER_SECOND * MIN_CHUNK_SECONDS);
 
-        // buffer.Count and both constants are whole-sample (even) sizes, so every
+        if (maxBytes > buffer.Count)
+        {
+            maxBytes = buffer.Count;
+        }
+        if ((maxBytes & 1) != 0)
+        {
+            maxBytes--; // keep the cut on a 16-bit sample boundary
+        }
+
+        // maxBytes and both constants are whole-sample (even) sizes, so every
         // candidate cut below stays sample-aligned without explicit rounding.
-        for (int cut = buffer.Count; cut - windowBytes >= minChunkBytes; cut -= strideBytes)
+        for (int cut = maxBytes; cut - windowBytes >= minChunkBytes; cut -= strideBytes)
         {
             if (PcmRms(buffer, cut - windowBytes, cut) < SILENCE_RMS_THRESHOLD)
             {
                 return cut;
             }
         }
-        return buffer.Count;
+        return maxBytes;
     }
 
     /// <summary>

@@ -2341,9 +2341,29 @@ async def run_transcription(
         logger.info(
             f"Transcribing {duration:.2f}s of audio with faster-whisper (RMS {rms_energy:.4f})"
         )
+        if not accuracy and duration > 20.0:
+            # Live clients cap chunks at ~15s; a bigger one means an old client draining
+            # a backlog as a single request - decode time scales with it, so flag it.
+            logger.warning(
+                f"Live chunk is {duration:.1f}s (expected <= ~15s) - outdated client or backlog?"
+            )
 
         # Off the event loop; the ASR lock inside serializes concurrent requests.
+        decode_started = time.perf_counter()
         result = await asyncio.to_thread(_transcribe_sync, audio_array, language, accuracy)
+        decode_elapsed = time.perf_counter() - decode_started
+
+        # Includes time queued on the ASR lock. Logged unconditionally so a grinding decode
+        # is diagnosable from the log afterwards; warn when slower than real time, which on
+        # this hardware means something is badly wrong (typically VRAM oversubscribed by
+        # other GPU apps, forcing WDDM to page CUDA memory through system RAM).
+        logger.info(f"faster-whisper finished {duration:.2f}s of audio in {decode_elapsed:.2f}s")
+        if decode_elapsed > max(10.0, duration):
+            logger.warning(
+                f"ASR ran slower than real time ({decode_elapsed:.1f}s for {duration:.1f}s of "
+                "audio). GPU is likely paging into system RAM - check free VRAM "
+                "(other GPU-heavy apps: video calls, browsers, games)."
+            )
 
         if not result["chunks"]:
             logger.info("No speech survived VAD / hallucination gating")
@@ -2377,8 +2397,21 @@ def _diarize_sync(
     # phantom extra speakers.
     kwargs = {"max_speakers": max_speakers} if max_speakers else {}
     with _diarization_lock:
+        diarize_started = time.perf_counter()
         with torch.inference_mode():
             result = diarization_pipeline(audio_data, **kwargs)
+        if torch.cuda.is_available():
+            # Return pyannote's transient CUDA cache to the driver after each chunk.
+            # torch's caching allocator otherwise holds its peak forever, and on a
+            # 10 GB card shared with Zoom/browsers that hoarded headroom is what
+            # pushes the NEXT allocation into WDDM system-RAM paging (100x slower).
+            # ctranslate2 (whisper) doesn't use torch's allocator, so this only
+            # releases diarization's scratch memory - a few ms, well worth it.
+            torch.cuda.empty_cache()
+        logger.info(
+            f"Diarization finished in {time.perf_counter() - diarize_started:.2f}s"
+            + (f" (max_speakers={max_speakers})" if max_speakers else "")
+        )
     # pyannote.audio 4.x returns a DiarizeOutput dataclass whose Annotation
     # (the object with .itertracks) lives on .speaker_diarization; 3.x returned
     # the Annotation directly. Unwrap here so every downstream consumer keeps
