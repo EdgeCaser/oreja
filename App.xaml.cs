@@ -16,6 +16,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Collections.Concurrent;
 using System.Windows.Input;
 using System.Diagnostics;
 
@@ -575,6 +577,12 @@ public partial class App : Application
         // with no visible console, which is what an installed app should do.
         AllocConsole();
 #endif
+        // Must run before the first Console.WriteLine anywhere in the app: a Windows console
+        // suspends ALL writes while the user has text selected in it (QuickEdit mark mode),
+        // and this app logs from the UI thread - so without this, a stray click into the
+        // console window froze the entire UI (timers, dispatch, health polls) until the
+        // selection was cleared, which looks exactly like a crash.
+        NonBlockingConsole.Install();
         Console.WriteLine("=== Oreja Application Starting ===");
         
         base.OnStartup(e);
@@ -2366,8 +2374,11 @@ public partial class App : Application
             state.IsProcessing = true; // Released in ProcessAudioChunkAsync's finally block
         }
 
-        // Fire and forget - the returned task clears state.IsProcessing when it completes.
-        _ = ProcessAudioChunkAsync(chunk, state, chunkStartSeconds);
+        // Fire and forget on a worker thread - the task clears state.IsProcessing when it
+        // completes. Task.Run matters: ProcessAudioChunkAsync's code before its first await
+        // (session-audio file write, WAV assembly, console logging) would otherwise run HERE
+        // on the UI thread, where a stalled disk or a blocked console freezes the window.
+        _ = Task.Run(() => ProcessAudioChunkAsync(chunk, state, chunkStartSeconds));
     }
 
     /// <summary>
@@ -2377,7 +2388,9 @@ public partial class App : Application
     /// </summary>
     private void FlushSourceOnStop(AudioSourceState state)
     {
-        _ = FlushSourceOnStopAsync(state);
+        // Task.Run for the same reason as DispatchPendingAudio: the flush path reaches
+        // ProcessAudioChunkAsync's synchronous prefix, which must not run on the UI thread.
+        _ = Task.Run(() => FlushSourceOnStopAsync(state));
     }
 
     private async Task FlushSourceOnStopAsync(AudioSourceState state)
@@ -4065,6 +4078,136 @@ public partial class App : Application
     /// re-stamped after every write, so the file is valid WAV at all times - there is no
     /// finalize step to forget, and a crash mid-recording still leaves playable audio.
     /// </summary>
+    /// <summary>
+    /// Replaces Console.Out/Error with a writer that enqueues lines for a background pump
+    /// thread instead of writing synchronously. A Windows console suspends every write while
+    /// the user has text selected in it (QuickEdit mark mode) - and this app logs from the UI
+    /// thread, so one click into the console window used to freeze the whole UI until the
+    /// selection was cleared, indistinguishable from a crash. With this in place a blocked
+    /// console just makes lines queue (dropping past the cap); the app never waits on it.
+    /// </summary>
+    private static class NonBlockingConsole
+    {
+        private const int MAX_QUEUED_LINES = 4096;
+        private static BlockingCollection<string>? _queue;
+        private static Thread? _pump;
+
+        public static void Install()
+        {
+            if (_queue != null)
+            {
+                return;
+            }
+
+            var original = Console.Out;
+            var queue = new BlockingCollection<string>(MAX_QUEUED_LINES);
+            _queue = queue;
+
+            _pump = new Thread(() =>
+            {
+                foreach (var line in queue.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        original.WriteLine(line);
+                    }
+                    catch
+                    {
+                        // Console gone or broken pipe: keep draining so producers never block.
+                    }
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "console-log-pump",
+            };
+            _pump.Start();
+
+            // Synchronized: Console.Out is written from the UI thread, capture callbacks,
+            // request continuations and the backend-log events all at once.
+            var writer = TextWriter.Synchronized(new QueueWriter(queue));
+            Console.SetOut(writer);
+            Console.SetError(writer);
+        }
+
+        /// <summary>
+        /// Best-effort flush of queued lines on shutdown. Bounded: if the console is blocked
+        /// (text still selected) this gives up after the timeout rather than hanging close.
+        /// </summary>
+        public static void DrainOnShutdown(int timeoutMs)
+        {
+            try
+            {
+                _queue?.CompleteAdding();
+                _pump?.Join(timeoutMs);
+            }
+            catch
+            {
+            }
+        }
+
+        private sealed class QueueWriter : TextWriter
+        {
+            private readonly BlockingCollection<string> _queue;
+            private readonly StringBuilder _partial = new StringBuilder();
+
+            public QueueWriter(BlockingCollection<string> queue)
+            {
+                _queue = queue;
+            }
+
+            public override Encoding Encoding => Encoding.UTF8;
+
+            public override void WriteLine(string? value)
+            {
+                FlushPartial(value ?? string.Empty);
+            }
+
+            public override void WriteLine()
+            {
+                FlushPartial(string.Empty);
+            }
+
+            public override void Write(string? value)
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    return;
+                }
+                // Accumulate until a newline arrives so interleaved Write()/WriteLine()
+                // callers still produce whole lines in the queue.
+                int newline;
+                while ((newline = value!.IndexOf('\n')) >= 0)
+                {
+                    FlushPartial(value.Substring(0, newline).TrimEnd('\r'));
+                    value = value.Substring(newline + 1);
+                }
+                _partial.Append(value);
+            }
+
+            public override void Write(char value)
+            {
+                if (value == '\n')
+                {
+                    FlushPartial(string.Empty);
+                }
+                else if (value != '\r')
+                {
+                    _partial.Append(value);
+                }
+            }
+
+            private void FlushPartial(string tail)
+            {
+                string line = _partial.Length > 0 ? _partial.Append(tail).ToString() : tail;
+                _partial.Clear();
+                // TryAdd, never Add: when the pump is stalled (console blocked) and the queue
+                // is full, drop the line - logging must never block the caller.
+                _queue.TryAdd(line);
+            }
+        }
+    }
+
     private sealed class SessionAudioWriter : IDisposable
     {
         private readonly object _sync = new object();
@@ -5950,6 +6093,10 @@ public partial class App : Application
         // After the kill: the output streams may or may not have EOF'd by now, so close the
         // backend log deterministically here (idempotent; late DataReceived events are dropped).
         CloseBackendLog();
+
+        // Give queued console lines a moment to reach the console; bounded so a blocked
+        // console (text still selected in it) cannot hang the close.
+        NonBlockingConsole.DrainOnShutdown(1000);
     }
 
     private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
